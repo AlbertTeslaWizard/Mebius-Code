@@ -1,0 +1,36 @@
+# Mebius Code
+
+Mebius Code is a multi-client agentic coding platform for the Object-Oriented Technology and Methods course project. It provides a backend service for model configuration, project workspaces, coding sessions, Plan Mode, tool approvals, and server-side code operations.
+
+The visible product name is **Mebius Code**. Engineering identifiers use lowercase names such as `mebius-code`, `mebius_code`, and `MEBIUS_CODE_`.
+
+## Project Layout
+
+```text
+backend/                 NestJS backend service
+docs/                    Markdown source documents for final DOCX deliverables
+面向对象技术与方法结课设计.docx  Original course requirement document
+```
+
+## Backend Quick Start
+
+```bash
+cd backend
+npm install
+cp .env.example .env
+docker compose up -d postgres
+npm run start:dev
+```
+
+API base URL:
+
+```text
+http://localhost:3000/api
+```
+
+SSE session events:
+
+```text
+GET /api/sessions/:id/events?access_token=<jwt>
+```
+

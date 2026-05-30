@@ -1,0 +1,19 @@
+name: mebius-code-backend
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mebius-code-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mebius_code
+      POSTGRES_USER: mebius
+      POSTGRES_PASSWORD: mebius_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - mebius-code-postgres:/var/lib/postgresql/data
+
+volumes:
+  mebius-code-postgres:
+

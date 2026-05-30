@@ -1,0 +1,26 @@
+# dependencies
+node_modules/
+
+# build outputs
+dist/
+coverage/
+.turbo/
+
+# env files
+.env
+.env.*
+!.env.example
+
+# local runtime data
+backend/workspaces/
+backend/uploads/
+backend/*.sqlite
+
+# private course material
+面向对象技术与方法结课设计.docx
+
+# editor/system
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

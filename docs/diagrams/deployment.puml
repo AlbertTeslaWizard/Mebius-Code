@@ -1,0 +1,15 @@
+@startuml
+node "Developer Browser / CLI" as Client
+node "Cloud Server" {
+  component "NestJS API" as API
+  database "PostgreSQL" as DB
+  folder "Workspace Root" as WS
+}
+cloud "OpenAI-compatible Provider" as LLM
+
+Client --> API : REST + SSE
+API --> DB : TypeORM
+API --> WS : file tools / commands
+API --> LLM : Chat Completions
+@enduml
+

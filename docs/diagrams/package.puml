@@ -1,0 +1,25 @@
+@startuml
+package "auth" {}
+package "users" {}
+package "model-configs" {}
+package "projects" {}
+package "sessions" {}
+package "agent" {}
+package "tools" {}
+package "events" {}
+package "audit" {}
+
+auth ..> users
+model-configs ..> users
+projects ..> users
+sessions ..> users
+sessions ..> projects
+agent ..> sessions
+agent ..> model-configs
+agent ..> tools
+agent ..> events
+tools ..> projects
+tools ..> audit
+sessions ..> events
+@enduml
+

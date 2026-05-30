@@ -1,0 +1,71 @@
+@startuml
+class User {
+  +id: string
+  +email: string
+  +role: UserRole
+}
+
+class ModelConfig {
+  +baseUrl: string
+  +modelName: string
+  +supportsTools: boolean
+}
+
+class Project {
+  +name: string
+  +workspacePath: string
+}
+
+class Session {
+  +title: string
+  +status: SessionStatus
+}
+
+class Message {
+  +role: MessageRole
+  +content: string
+}
+
+class Plan {
+  +status: PlanStatus
+  +summary: string
+}
+
+class PlanStep {
+  +order: number
+  +title: string
+  +status: PlanStepStatus
+}
+
+class ToolCall {
+  +name: string
+  +status: ToolCallStatus
+  +requiresApproval: boolean
+}
+
+class ToolApproval {
+  +status: ApprovalStatus
+}
+
+class FilePatch {
+  +relativePath: string
+  +status: FilePatchStatus
+}
+
+class CommandRun {
+  +command: string
+  +exitCode: number
+}
+
+User "1" --> "*" ModelConfig
+User "1" --> "*" Project
+Project "1" --> "*" Session
+Session "1" --> "*" Message
+Session "1" --> "*" Plan
+Plan "1" --> "*" PlanStep
+Session "1" --> "*" ToolCall
+ToolCall "1" --> "0..1" ToolApproval
+ToolCall "1" --> "0..1" FilePatch
+ToolCall "1" --> "0..1" CommandRun
+@enduml
+

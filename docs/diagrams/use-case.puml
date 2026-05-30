@@ -1,0 +1,31 @@
+@startuml
+left to right direction
+actor Developer as Dev
+actor Admin
+
+rectangle "Mebius Code" {
+  usecase "Register/Login" as UCAuth
+  usecase "Configure Model Provider" as UCModel
+  usecase "Create/Import Project" as UCProject
+  usecase "Start Coding Session" as UCSession
+  usecase "Generate Plan" as UCPlan
+  usecase "Approve Tool Call" as UCApprove
+  usecase "Read/Search Files" as UCRead
+  usecase "Create File Patch" as UCPatch
+  usecase "Run Safe Command" as UCCmd
+  usecase "Audit Operations" as UCAudit
+}
+
+Dev --> UCAuth
+Dev --> UCModel
+Dev --> UCProject
+Dev --> UCSession
+Dev --> UCPlan
+Dev --> UCApprove
+Dev --> UCRead
+Dev --> UCPatch
+Dev --> UCCmd
+Admin --> UCAudit
+Admin --> UCModel
+@enduml
+
