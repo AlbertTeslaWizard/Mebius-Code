@@ -1,6 +1,34 @@
 name: mebius-code
 
 services:
+  api:
+    build:
+      context: ./backend
+    container_name: mebius-code-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      API_PREFIX: api
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USER: mebius
+      DATABASE_PASSWORD: mebius_dev_password
+      DATABASE_NAME: mebius_code
+      DATABASE_SYNCHRONIZE: "true"
+      JWT_SECRET: replace-with-a-long-random-production-secret
+      JWT_EXPIRES_IN: 7d
+      MEBIUS_CODE_MASTER_KEY: replace-with-a-32-byte-or-longer-production-secret
+      MEBIUS_CODE_WORKSPACE_ROOT: /app/workspaces
+      MEBIUS_CODE_COMMAND_ALLOWLIST: git status,git diff,git log,npm test,npm run test,npm run build,npm run lint,node --version,npm --version
+    ports:
+      - "3000:3000"
+    volumes:
+      - mebius-code-workspaces:/app/workspaces
+
   postgres:
     image: postgres:16-alpine
     container_name: mebius-code-postgres
@@ -21,4 +49,4 @@ services:
 
 volumes:
   mebius-code-postgres:
-
+  mebius-code-workspaces:

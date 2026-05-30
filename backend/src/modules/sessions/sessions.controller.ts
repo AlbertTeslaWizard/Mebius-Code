@@ -1,5 +1,7 @@
 import { Body, Controller, Get, MessageEvent, Param, Post, Req, Sse, UseGuards } from '@nestjs/common';
 import { Observable } from 'rxjs';
+import { from } from 'rxjs';
+import { mergeMap } from 'rxjs/operators';
 import { RequestWithUser } from '../../common/types/request-with-user';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { SseJwtGuard } from '../auth/sse-jwt.guard';
@@ -49,8 +51,9 @@ export class SessionsController {
 
   @Sse('sessions/:id/events')
   @UseGuards(SseJwtGuard)
-  eventsStream(@Param('id') id: string): Observable<MessageEvent> {
-    return this.events.stream(id);
+  eventsStream(@Req() request: RequestWithUser, @Param('id') id: string): Observable<MessageEvent> {
+    return from(this.sessions.findOwned(request.user.sub, id)).pipe(
+      mergeMap(() => this.events.stream(id)),
+    );
   }
 }
-

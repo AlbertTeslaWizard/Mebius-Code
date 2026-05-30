@@ -21,6 +21,7 @@
 | 2026-05-30 | 分析课程设计要求，确定个人项目选题。 | 明确 Mebius Code 智能编程 Agent 平台方向。 |
 | 2026-05-30 | 确定后端技术方案。 | NestJS、PostgreSQL、JWT、OpenAI-compatible、SSE、Docker Compose。 |
 | 2026-05-30 | 初始化后端和文档结构。 | `backend/`、`docs/`、Docker Compose、Markdown 源文档。 |
+| 2026-05-30 | 补充后端质量检查和部署能力。 | ESLint 9 配置、单元测试、API 健康检查、Docker API 服务。 |
 
 ## 4. Commit 记录
 
@@ -29,4 +30,3 @@
 ## 5. 项目总结
 
 本节在项目完成后由开发者自行补充，不使用 AI 生成。
-

@@ -10,6 +10,7 @@ import { ProjectsModule } from './modules/projects/projects.module';
 import { SessionsModule } from './modules/sessions/sessions.module';
 import { ToolsModule } from './modules/tools/tools.module';
 import { UsersModule } from './modules/users/users.module';
+import { HealthController } from './health.controller';
 
 @Module({
   imports: [
@@ -39,6 +40,6 @@ import { UsersModule } from './modules/users/users.module';
     ToolsModule,
     AgentModule,
   ],
+  controllers: [HealthController],
 })
 export class AppModule {}
-
