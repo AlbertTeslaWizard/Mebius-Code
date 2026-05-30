@@ -17,6 +17,12 @@ Health check:
 GET http://localhost:3000/api/health
 ```
 
+On Windows, if PowerShell returns a proxy-related `502 Bad Gateway`, bypass the local proxy:
+
+```bash
+curl.exe --noproxy "*" http://localhost:3000/api/health
+```
+
 ## Docker Compose
 
 From the repository root:
@@ -71,4 +77,3 @@ POST /api/approvals/:id/reject
 - `.git`, `.env`, `node_modules`, `dist`, and `coverage` are blocked by default.
 - `create_patch` and `run_command` require approval.
 - Commands must match `MEBIUS_CODE_COMMAND_ALLOWLIST`.
-
