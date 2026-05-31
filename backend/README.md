@@ -68,7 +68,13 @@ POST /api/sessions/:id/run
 GET  /api/approvals/pending
 POST /api/approvals/:id/approve
 POST /api/approvals/:id/reject
+
+GET  /api/audit-logs
 ```
+
+`GET /api/audit-logs` supports `action`, `resourceType`, `resourceId`, `actorId`,
+`limit`, and `offset` query parameters. Regular users are scoped to their own
+logs; admins can query all actors.
 
 ## Security Defaults
 
