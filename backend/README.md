@@ -78,6 +78,24 @@ GET  /api/audit-logs
 `limit`, and `offset` query parameters. Regular users are scoped to their own
 logs; admins can query all actors.
 
+## Slash Commands
+
+`POST /api/sessions/:id/commands` supports these command flows:
+
+```text
+/clear
+/compact
+/model <modelConfigId>
+/connect
+/connect <provider search>
+```
+
+`/connect` returns searchable OpenAI-compatible provider options. Submit
+`args.providerId` to get the connection form, then submit `args.providerId` and
+`args.apiKey` to validate the provider, save the encrypted model config, and
+switch the active session model. API keys must be passed through `args.apiKey`,
+not embedded in the command string.
+
 ## Security Defaults
 
 - Model API keys are encrypted with `MEBIUS_CODE_MASTER_KEY`.

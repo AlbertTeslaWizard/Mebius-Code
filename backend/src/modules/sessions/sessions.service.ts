@@ -190,6 +190,10 @@ export class SessionsService {
       return saved;
     }
 
+    if (name === '/connect') {
+      return this.connectModel(session, parts.join(' '), dto.args);
+    }
+
     throw new BadRequestException(`Unsupported slash command: ${name}`);
   }
 
@@ -235,5 +239,79 @@ export class SessionsService {
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
     };
+  }
+
+  private async connectModel(
+    session: Session,
+    commandQuery: string,
+    args: Record<string, unknown> | undefined,
+  ): Promise<unknown> {
+    const providerId = typeof args?.providerId === 'string' ? args.providerId : undefined;
+    if (!providerId) {
+      const query = typeof args?.query === 'string' ? args.query : commandQuery;
+      return {
+        type: 'connect.providers',
+        providers: this.modelConfigs.searchProviders(query),
+      };
+    }
+
+    const provider = this.modelConfigs.getProvider(providerId);
+    const apiKey = typeof args?.apiKey === 'string' ? args.apiKey : undefined;
+    if (!apiKey) {
+      return {
+        type: 'connect.form',
+        provider,
+        fields: this.connectFields(provider.id),
+      };
+    }
+
+    const modelConfig = await this.modelConfigs.connect(session.owner as User, {
+      providerId,
+      apiKey,
+      modelName: typeof args?.modelName === 'string' ? args.modelName : undefined,
+      displayName: typeof args?.displayName === 'string' ? args.displayName : undefined,
+      baseUrl: typeof args?.baseUrl === 'string' ? args.baseUrl : undefined,
+    });
+    session.activeModelConfig = { id: modelConfig.id } as Session['activeModelConfig'];
+    const saved = await this.sessions.save(session);
+    this.events.publish(session.id, 'agent_status', {
+      status: 'model_connected',
+      modelConfigId: modelConfig.id,
+      providerId: modelConfig.providerId,
+      modelName: modelConfig.modelName,
+    });
+    return {
+      type: 'connect.connected',
+      modelConfig,
+      session: this.toView({ ...saved, activeModelConfig: modelConfig } as Session),
+    };
+  }
+
+  private connectFields(providerId: string): Array<{
+    name: string;
+    label: string;
+    type: 'text' | 'password';
+    required: boolean;
+  }> {
+    const baseFields: Array<{
+      name: string;
+      label: string;
+      type: 'text' | 'password';
+      required: boolean;
+    }> = [{ name: 'apiKey', label: 'API Key', type: 'password', required: true }];
+
+    if (providerId === 'custom') {
+      return [
+        { name: 'displayName', label: 'Display Name', type: 'text', required: true },
+        { name: 'baseUrl', label: 'Base URL', type: 'text', required: true },
+        { name: 'modelName', label: 'Model Name', type: 'text', required: false },
+        ...baseFields,
+      ];
+    }
+
+    return [
+      { name: 'modelName', label: 'Model Name', type: 'text', required: false },
+      ...baseFields,
+    ];
   }
 }

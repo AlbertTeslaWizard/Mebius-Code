@@ -8,6 +8,7 @@ The visible product name is **Mebius Code**. Engineering identifiers use lowerca
 
 ```text
 backend/                 NestJS backend service
+frontend/                Vue 3 + TypeScript web workspace
 docs/                    Markdown source documents for final DOCX deliverables
 面向对象技术与方法结课设计.docx  Original course requirement document
 ```
@@ -34,3 +35,12 @@ SSE session events:
 GET /api/sessions/:id/events?access_token=<jwt>
 ```
 
+## Frontend Quick Start
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+The web app runs at `http://127.0.0.1:5173` and proxies `/api` to the backend.

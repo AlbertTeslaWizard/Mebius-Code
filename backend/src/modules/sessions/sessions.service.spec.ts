@@ -11,6 +11,7 @@ describe('SessionsService', () => {
   const sessions = {
     findAndCount: jest.fn(),
     findOne: jest.fn(),
+    save: jest.fn((session: Session) => Promise.resolve(session)),
   } as unknown as jest.Mocked<Repository<Session>>;
   const messages = {} as jest.Mocked<Repository<Message>>;
   const summaries = {} as jest.Mocked<Repository<ConversationSummary>>;
@@ -23,13 +24,51 @@ describe('SessionsService', () => {
       displayName: config.displayName,
       baseUrl: config.baseUrl,
       modelName: config.modelName,
+      providerId: config.providerId ?? null,
       supportsTools: config.supportsTools,
       isDefault: config.isDefault,
       createdAt: config.createdAt,
       updatedAt: config.updatedAt,
     })),
+    searchProviders: jest.fn(() => [
+      {
+        id: 'moonshot',
+        displayName: 'Moonshot AI',
+        description: 'Moonshot Kimi OpenAI-compatible API.',
+        aliases: ['kimi'],
+        baseUrl: 'https://api.moonshot.cn/v1',
+        recommendedModels: ['moonshot-v1-8k'],
+        supportsTools: true,
+        requiresCustomBaseUrl: false,
+      },
+    ]),
+    getProvider: jest.fn(() => ({
+      id: 'moonshot',
+      displayName: 'Moonshot AI',
+      description: 'Moonshot Kimi OpenAI-compatible API.',
+      aliases: ['kimi'],
+      baseUrl: 'https://api.moonshot.cn/v1',
+      recommendedModels: ['moonshot-v1-8k'],
+      supportsTools: true,
+      requiresCustomBaseUrl: false,
+    })),
+    connect: jest.fn(() =>
+      Promise.resolve({
+        id: 'connected-model',
+        providerId: 'moonshot',
+        displayName: 'Moonshot AI',
+        baseUrl: 'https://api.moonshot.cn/v1',
+        modelName: 'moonshot-v1-8k',
+        supportsTools: true,
+        isDefault: true,
+        createdAt: new Date('2026-06-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-06-01T00:00:00.000Z'),
+      }),
+    ),
   } as unknown as jest.Mocked<ModelConfigsService>;
-  const events = {};
+  const events = {
+    publish: jest.fn(),
+  };
   const service = new SessionsService(
     sessions,
     messages,
@@ -92,12 +131,82 @@ describe('SessionsService', () => {
     );
     expect(result.activeModelConfig).not.toHaveProperty('encryptedApiKey');
   });
+
+  it('returns provider search results for /connect queries', async () => {
+    const result = await service.handleCommand('owner-1', 'session-1', {
+      command: '/connect kimi',
+    });
+
+    expect(modelConfigs.searchProviders).toHaveBeenCalledWith('kimi');
+    expect(result).toEqual({
+      type: 'connect.providers',
+      providers: [expect.objectContaining({ id: 'moonshot' })],
+    });
+  });
+
+  it('returns a provider form before an API key is submitted', async () => {
+    const result = await service.handleCommand('owner-1', 'session-1', {
+      command: '/connect',
+      args: { providerId: 'moonshot' },
+    });
+
+    expect(modelConfigs.getProvider).toHaveBeenCalledWith('moonshot');
+    expect(result).toEqual(
+      expect.objectContaining({
+        type: 'connect.form',
+        provider: expect.objectContaining({ id: 'moonshot' }),
+        fields: expect.arrayContaining([
+          expect.objectContaining({ name: 'apiKey', type: 'password', required: true }),
+        ]),
+      }),
+    );
+  });
+
+  it('connects a provider and switches the active session model', async () => {
+    const result = await service.handleCommand('owner-1', 'session-1', {
+      command: '/connect',
+      args: {
+        providerId: 'moonshot',
+        apiKey: 'sk-test',
+        modelName: 'moonshot-v1-8k',
+      },
+    });
+
+    expect(modelConfigs.connect).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'owner-1' }),
+      {
+        providerId: 'moonshot',
+        apiKey: 'sk-test',
+        modelName: 'moonshot-v1-8k',
+        displayName: undefined,
+        baseUrl: undefined,
+      },
+    );
+    expect(sessions.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        activeModelConfig: { id: 'connected-model' },
+      }),
+    );
+    expect(events.publish).toHaveBeenCalledWith('session-1', 'agent_status', {
+      status: 'model_connected',
+      modelConfigId: 'connected-model',
+      providerId: 'moonshot',
+      modelName: 'moonshot-v1-8k',
+    });
+    expect(result).toEqual(
+      expect.objectContaining({
+        type: 'connect.connected',
+        modelConfig: expect.not.objectContaining({ encryptedApiKey: expect.any(String) }),
+      }),
+    );
+  });
 });
 
 function sessionFixture(): Session {
   const createdAt = new Date('2026-06-01T00:00:00.000Z');
   return {
     id: 'session-1',
+    owner: { id: 'owner-1' },
     project: { id: 'project-1' },
     title: 'Feature work',
     status: SessionStatus.Active,

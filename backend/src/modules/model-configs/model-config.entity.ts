@@ -28,6 +28,9 @@ export class ModelConfig {
   @Column({ name: 'model_name' })
   modelName: string;
 
+  @Column({ name: 'provider_id', type: 'varchar', nullable: true })
+  providerId?: string | null;
+
   @Column({ name: 'encrypted_api_key' })
   encryptedApiKey: string;
 
