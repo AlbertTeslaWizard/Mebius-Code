@@ -24,3 +24,5 @@ backend/*.sqlite
 Thumbs.db
 .idea/
 .vscode/
+
+images/
