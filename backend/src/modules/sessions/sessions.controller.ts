@@ -1,4 +1,15 @@
-import { Body, Controller, Get, MessageEvent, Param, Post, Req, Sse, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  MessageEvent,
+  Param,
+  Post,
+  Query,
+  Req,
+  Sse,
+  UseGuards,
+} from '@nestjs/common';
 import { Observable } from 'rxjs';
 import { from } from 'rxjs';
 import { mergeMap } from 'rxjs/operators';
@@ -9,6 +20,7 @@ import { EventsService } from '../events/events.service';
 import { UsersService } from '../users/users.service';
 import { CreateMessageDto } from './dto/create-message.dto';
 import { CreateSessionDto } from './dto/create-session.dto';
+import { ListSessionsDto } from './dto/list-sessions.dto';
 import { SlashCommandDto } from './dto/slash-command.dto';
 import { SessionsService } from './sessions.service';
 
@@ -29,6 +41,22 @@ export class SessionsController {
   ) {
     const owner = await this.users.findById(request.user.sub);
     return this.sessions.create(projectId, owner, dto);
+  }
+
+  @Get('projects/:projectId/sessions')
+  @UseGuards(JwtAuthGuard)
+  list(
+    @Req() request: RequestWithUser,
+    @Param('projectId') projectId: string,
+    @Query() query: ListSessionsDto,
+  ) {
+    return this.sessions.listForProject(request.user.sub, projectId, query);
+  }
+
+  @Get('sessions/:id')
+  @UseGuards(JwtAuthGuard)
+  get(@Req() request: RequestWithUser, @Param('id') id: string) {
+    return this.sessions.get(request.user.sub, id);
   }
 
   @Get('sessions/:id/messages')

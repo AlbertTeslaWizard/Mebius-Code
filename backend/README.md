@@ -56,6 +56,8 @@ GET  /api/projects/:id/tree
 GET  /api/projects/:id/file?path=src/main.ts
 
 POST /api/projects/:projectId/sessions
+GET  /api/projects/:projectId/sessions
+GET  /api/sessions/:id
 GET  /api/sessions/:id/messages
 POST /api/sessions/:id/messages
 POST /api/sessions/:id/commands

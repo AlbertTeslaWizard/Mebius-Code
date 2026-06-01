@@ -1,18 +1,36 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { FindOptionsWhere, Repository } from 'typeorm';
 import { MessageRole } from '../../common/enums/message-role.enum';
 import { SessionStatus } from '../../common/enums/session-status.enum';
 import { EventsService } from '../events/events.service';
-import { ModelConfigsService } from '../model-configs/model-configs.service';
+import { ModelConfigsService, SanitizedModelConfig } from '../model-configs/model-configs.service';
 import { ProjectsService } from '../projects/projects.service';
 import { User } from '../users/user.entity';
 import { ConversationSummary } from './conversation-summary.entity';
 import { CreateMessageDto } from './dto/create-message.dto';
 import { CreateSessionDto } from './dto/create-session.dto';
+import { ListSessionsDto } from './dto/list-sessions.dto';
 import { SlashCommandDto } from './dto/slash-command.dto';
 import { Message } from './message.entity';
 import { Session } from './session.entity';
+
+export interface SessionView {
+  id: string;
+  projectId: string;
+  title: string;
+  status: SessionStatus;
+  activeModelConfig: SanitizedModelConfig | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface SessionList {
+  items: SessionView[];
+  total: number;
+  limit: number;
+  offset: number;
+}
 
 @Injectable()
 export class SessionsService {
@@ -56,6 +74,43 @@ export class SessionsService {
       throw new NotFoundException('Session not found.');
     }
     return session;
+  }
+
+  async get(ownerId: string, sessionId: string): Promise<SessionView> {
+    return this.toView(await this.findOwned(ownerId, sessionId));
+  }
+
+  async listForProject(
+    ownerId: string,
+    projectId: string,
+    query: ListSessionsDto,
+  ): Promise<SessionList> {
+    await this.projects.findOwned(ownerId, projectId);
+    const limit = query.limit ?? 50;
+    const offset = query.offset ?? 0;
+    const where: FindOptionsWhere<Session> = {
+      owner: { id: ownerId },
+      project: { id: projectId },
+    };
+
+    if (query.status) {
+      where.status = query.status;
+    }
+
+    const [items, total] = await this.sessions.findAndCount({
+      where,
+      relations: { project: true, activeModelConfig: true },
+      order: { updatedAt: 'DESC' },
+      take: limit,
+      skip: offset,
+    });
+
+    return {
+      items: items.map((session) => this.toView(session)),
+      total,
+      limit,
+      offset,
+    };
   }
 
   async listMessages(ownerId: string, sessionId: string): Promise<Message[]> {
@@ -167,5 +222,18 @@ export class SessionsService {
     });
     return summary;
   }
-}
 
+  private toView(session: Session): SessionView {
+    return {
+      id: session.id,
+      projectId: session.project.id,
+      title: session.title,
+      status: session.status,
+      activeModelConfig: session.activeModelConfig
+        ? this.modelConfigs.sanitize(session.activeModelConfig)
+        : null,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+    };
+  }
+}
