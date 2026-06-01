@@ -4,10 +4,12 @@ import { RouterLink, useRoute } from 'vue-router';
 import { useMessage } from 'naive-ui';
 import { Code2 } from 'lucide-vue-next';
 import { useAuthStore } from '../stores/auth';
+import { useLocaleStore } from '../stores/locale';
 
 const route = useRoute();
 const message = useMessage();
 const auth = useAuthStore();
+const locale = useLocaleStore();
 const isRegister = computed(() => route.name === 'register');
 const error = ref('');
 const form = reactive({
@@ -27,13 +29,13 @@ async function submit() {
         password: form.password,
         adminInviteCode: form.adminInviteCode || undefined,
       });
-      message.success('Account created.');
+      message.success(locale.t('accountCreated'));
       return;
     }
     await auth.login(form.email, form.password);
-    message.success('Signed in.');
+    message.success(locale.t('signedIn'));
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Authentication failed.';
+    error.value = err instanceof Error ? err.message : locale.t('authFailed');
   }
 }
 </script>
@@ -48,9 +50,12 @@ async function submit() {
         <div>
           <h1 class="m-0 text-xl font-semibold">Mebius Code</h1>
           <p class="m-0 text-sm text-mebius-muted">
-            {{ isRegister ? 'Create a workspace account' : 'Sign in to your workspace' }}
+            {{ isRegister ? locale.t('createWorkspaceAccount') : locale.t('signInWorkspace') }}
           </p>
         </div>
+        <n-button class="ml-auto" size="small" quaternary @click="locale.toggleLocale">
+          {{ locale.t('languageSwitch') }}
+        </n-button>
       </div>
 
       <n-alert v-if="error" class="mb-4" type="error" :show-icon="false">
@@ -58,22 +63,23 @@ async function submit() {
       </n-alert>
 
       <n-form label-placement="top" @submit.prevent="submit">
-        <n-form-item v-if="isRegister" label="Name">
-          <n-input v-model:value="form.name" placeholder="Your name" />
+        <n-form-item v-if="isRegister" :label="locale.t('name')">
+          <n-input v-model:value="form.name" :placeholder="locale.t('yourName')" autocomplete="name" />
         </n-form-item>
-        <n-form-item label="Email">
-          <n-input v-model:value="form.email" placeholder="you@example.com" />
+        <n-form-item :label="locale.t('email')">
+          <n-input v-model:value="form.email" :placeholder="locale.t('emailPlaceholder')" autocomplete="email" />
         </n-form-item>
-        <n-form-item label="Password">
+        <n-form-item :label="locale.t('password')">
           <n-input
             v-model:value="form.password"
-            placeholder="Password"
+            :placeholder="locale.t('password')"
             type="password"
             show-password-on="mousedown"
+            autocomplete="current-password"
           />
         </n-form-item>
-        <n-form-item v-if="isRegister" label="Admin invite code">
-          <n-input v-model:value="form.adminInviteCode" placeholder="Optional" />
+        <n-form-item v-if="isRegister" :label="locale.t('adminInviteCode')">
+          <n-input v-model:value="form.adminInviteCode" :placeholder="locale.t('optional')" autocomplete="off" />
         </n-form-item>
 
         <n-button
@@ -83,18 +89,18 @@ async function submit() {
           :loading="auth.loading"
           :disabled="!form.email || !form.password || (isRegister && !form.name)"
         >
-          {{ isRegister ? 'Create account' : 'Sign in' }}
+          {{ isRegister ? locale.t('createAccount') : locale.t('signIn') }}
         </n-button>
       </n-form>
 
       <p class="mb-0 mt-5 text-center text-sm text-mebius-muted">
         <template v-if="isRegister">
-          Already have an account?
-          <RouterLink class="text-mebius-accent" to="/login">Sign in</RouterLink>
+          {{ locale.t('alreadyHaveAccount') }}
+          <RouterLink class="text-mebius-accent" to="/login">{{ locale.t('signIn') }}</RouterLink>
         </template>
         <template v-else>
-          Need an account?
-          <RouterLink class="text-mebius-accent" to="/register">Register</RouterLink>
+          {{ locale.t('needAccount') }}
+          <RouterLink class="text-mebius-accent" to="/register">{{ locale.t('register') }}</RouterLink>
         </template>
       </p>
     </section>

@@ -1,11 +1,10 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { RouterLink } from 'vue-router';
 import type { TreeOption } from 'naive-ui';
 import {
   Cable,
   Check,
-  ClipboardList,
   FileText,
   Folder,
   GitBranch,
@@ -21,17 +20,21 @@ import {
 import type { ConnectField, ConnectProvider, TreeNode } from '../api/types';
 import { useApprovalStore } from '../stores/approvals';
 import { useAuthStore } from '../stores/auth';
+import { useLocaleStore } from '../stores/locale';
 import { useWorkspaceStore } from '../stores/workspace';
+
+type ComposerMode = 'build' | 'plan';
 
 const auth = useAuthStore();
 const workspace = useWorkspaceStore();
 const approvals = useApprovalStore();
+const locale = useLocaleStore();
 
 const projectForm = reactive({ name: '', description: '' });
 const importForm = reactive({ gitUrl: '', branch: '' });
 const sessionTitle = ref('');
 const composer = ref('');
-const planGoal = ref('');
+const composerMode = ref<ComposerMode>('build');
 const selectedFileKeys = ref<Array<string | number>>([]);
 const connectModal = ref(false);
 const connectQuery = ref('');
@@ -39,11 +42,31 @@ const connectProviders = ref<ConnectProvider[]>([]);
 const connectSelected = ref<ConnectProvider | null>(null);
 const connectFields = ref<ConnectField[]>([]);
 const connectForm = reactive<Record<string, string>>({});
+const lastConnectCommandQuery = ref<string | null>(null);
 const busy = ref(false);
 const error = ref('');
 
 const treeOptions = computed<TreeOption[]>(() => workspace.fileTree.map(toTreeOption));
 const canChat = computed(() => Boolean(workspace.currentSession));
+const activeModelLabel = computed(
+  () =>
+    workspace.currentSession?.activeModelConfig?.displayName ||
+    workspace.currentSession?.activeModelConfig?.modelName ||
+    locale.t('currentModelFallback'),
+);
+const canSubmitComposer = computed(() => canChat.value && Boolean(composer.value.trim()) && !busy.value);
+const composerModeOptions = computed<Array<{ label: string; value: ComposerMode }>>(() => [
+  { label: locale.t('build'), value: 'build' },
+  { label: locale.t('plan'), value: 'plan' },
+]);
+const settingsOptions = computed(() => [
+  { label: locale.t('modelConfigs'), key: 'models' },
+  { label: locale.t('auditLogs'), key: 'audit' },
+  { label: locale.t('signOut'), key: 'logout' },
+]);
+const connectReady = computed(() =>
+  connectFields.value.every((field) => !field.required || Boolean(connectForm[field.name]?.trim())),
+);
 
 onMounted(async () => {
   await Promise.all([auth.fetchMe(), approvals.loadPending()]);
@@ -54,13 +77,25 @@ onBeforeUnmount(() => {
   workspace.disconnectEvents();
 });
 
+watch(composer, (value) => {
+  const query = parseConnectCommand(value);
+  if (query === null) {
+    lastConnectCommandQuery.value = null;
+    return;
+  }
+  if (!canChat.value) return;
+  if (connectModal.value && lastConnectCommandQuery.value === query) return;
+  lastConnectCommandQuery.value = query;
+  void openConnect(query);
+});
+
 async function runTask(action: () => Promise<unknown>) {
   busy.value = true;
   error.value = '';
   try {
     await action();
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Operation failed.';
+    error.value = err instanceof Error ? err.message : locale.t('operationFailed');
   } finally {
     busy.value = false;
   }
@@ -95,18 +130,23 @@ async function createSession() {
   });
 }
 
-async function submitText() {
-  const value = composer.value;
+async function submitComposer() {
+  const value = composer.value.trim();
+  if (!value) return;
+  const connectCommandQuery = parseConnectCommand(value);
+  if (connectCommandQuery !== null) {
+    await openConnect(connectCommandQuery);
+    return;
+  }
   composer.value = '';
-  await runTask(() => workspace.submitText(value));
+  await runTask(() =>
+    composerMode.value === 'plan' ? workspace.createPlan(value) : workspace.submitText(value),
+  );
 }
 
-async function createPlan() {
-  await runTask(() => workspace.createPlan(planGoal.value));
-}
-
-async function openConnect() {
+async function openConnect(initialQuery = '') {
   connectModal.value = true;
+  connectQuery.value = initialQuery;
   connectSelected.value = null;
   connectFields.value = [];
   clearConnectForm();
@@ -126,6 +166,9 @@ async function chooseProvider(provider: ConnectProvider) {
   const result = await workspace.connectProvider({ providerId: provider.id });
   if (result?.type === 'connect.form') {
     connectFields.value = result.fields;
+    result.fields.forEach((field) => {
+      connectForm[field.name] = '';
+    });
   }
 }
 
@@ -140,6 +183,9 @@ async function submitConnect() {
       baseUrl: connectForm.baseUrl || undefined,
     });
     connectModal.value = false;
+    if (parseConnectCommand(composer.value) !== null) {
+      composer.value = '';
+    }
     clearConnectForm();
   });
 }
@@ -148,6 +194,49 @@ function clearConnectForm() {
   Object.keys(connectForm).forEach((key) => {
     delete connectForm[key];
   });
+}
+
+function parseConnectCommand(value: string): string | null {
+  const match = value.trim().match(/^\/connect(?:\s+(.*))?$/);
+  return match ? (match[1]?.trim() ?? '') : null;
+}
+
+function connectFieldLabel(field: ConnectField): string {
+  if (field.name === 'apiKey') return locale.t('apiKey');
+  if (field.name === 'modelName') return locale.t('modelName');
+  if (field.name === 'displayName') return locale.t('displayName');
+  if (field.name === 'baseUrl') return locale.t('baseUrl');
+  return field.label;
+}
+
+function connectFieldPlaceholder(field: ConnectField): string {
+  if (field.name === 'apiKey') return locale.t('apiKeyPlaceholder');
+  if (field.name === 'modelName') return locale.t('modelNamePlaceholder');
+  if (field.name === 'displayName') return locale.t('displayNamePlaceholder');
+  if (field.name === 'baseUrl') return locale.t('baseUrlPlaceholder');
+  return '';
+}
+
+function connectInputProps(field: ConnectField) {
+  const providerId = connectSelected.value?.id ?? 'provider';
+  return {
+    id: `mebius-connect-${providerId}-${field.name}`,
+    name: `mebius-connect-${providerId}-${field.name}`,
+    autocomplete: field.name === 'apiKey' ? 'new-password' : 'off',
+    autocapitalize: 'off',
+    spellcheck: 'false',
+  };
+}
+
+function providerDescription(provider: ConnectProvider): string {
+  if (provider.id === 'openai') return locale.t('providerOpenaiDescription');
+  if (provider.id === 'openrouter') return locale.t('providerOpenrouterDescription');
+  if (provider.id === 'deepseek') return locale.t('providerDeepseekDescription');
+  if (provider.id === 'moonshot') return locale.t('providerMoonshotDescription');
+  if (provider.id === 'dashscope') return locale.t('providerDashscopeDescription');
+  if (provider.id === 'siliconflow') return locale.t('providerSiliconflowDescription');
+  if (provider.id === 'custom') return locale.t('providerCustomDescription');
+  return provider.description;
 }
 
 function onFileSelect(keys: Array<string | number>) {
@@ -186,18 +275,14 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
           <div class="mb-3 flex items-center justify-between">
             <div>
               <h1 class="m-0 text-lg font-semibold">Mebius Code</h1>
-              <p class="m-0 text-xs text-mebius-muted">{{ auth.user?.email ?? 'Workspace' }}</p>
+              <p class="m-0 text-xs text-mebius-muted">{{ auth.user?.email ?? locale.t('workspace') }}</p>
             </div>
             <n-dropdown
               trigger="click"
-              :options="[
-                { label: 'Model configs', key: 'models' },
-                { label: 'Audit logs', key: 'audit' },
-                { label: 'Sign out', key: 'logout' }
-              ]"
+              :options="settingsOptions"
               @select="(key: string) => key === 'logout' ? auth.logout() : $router.push(key === 'models' ? '/settings/models' : '/settings/audit')"
             >
-              <n-button circle quaternary title="Settings">
+              <n-button circle quaternary :title="locale.t('settings')">
                 <template #icon><n-icon><Settings /></n-icon></template>
               </n-button>
             </n-dropdown>
@@ -210,18 +295,18 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
         <section class="border-b border-mebius-border p-3">
           <div class="mb-2 flex items-center gap-2 text-sm font-medium">
             <n-icon><Folder /></n-icon>
-            Projects
+            {{ locale.t('projects') }}
           </div>
           <div class="space-y-2">
-            <n-input v-model:value="projectForm.name" size="small" placeholder="Project name" />
+            <n-input v-model:value="projectForm.name" size="small" :placeholder="locale.t('projectName')" />
             <n-input
               v-model:value="projectForm.description"
               size="small"
-              placeholder="Description"
+              :placeholder="locale.t('description')"
             />
             <n-button size="small" block type="primary" :disabled="!projectForm.name" @click="createProject">
               <template #icon><n-icon><Plus /></n-icon></template>
-              Create project
+              {{ locale.t('createProject') }}
             </n-button>
           </div>
         </section>
@@ -242,12 +327,12 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
         <section class="border-t border-mebius-border p-3">
           <div class="mb-2 flex items-center gap-2 text-sm font-medium">
             <n-icon><GitBranch /></n-icon>
-            Git import
+            {{ locale.t('gitImport') }}
           </div>
-          <n-input v-model:value="importForm.gitUrl" class="mb-2" size="small" placeholder="Repository URL" />
-          <n-input v-model:value="importForm.branch" class="mb-2" size="small" placeholder="Branch" />
+          <n-input v-model:value="importForm.gitUrl" class="mb-2" size="small" :placeholder="locale.t('repositoryUrl')" />
+          <n-input v-model:value="importForm.branch" class="mb-2" size="small" :placeholder="locale.t('branch')" />
           <n-button size="small" block :disabled="!workspace.currentProject || !importForm.gitUrl" @click="importGit">
-            Import into current project
+            {{ locale.t('importIntoCurrentProject') }}
           </n-button>
         </section>
       </aside>
@@ -256,21 +341,24 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
         <header class="flex items-center justify-between border-b border-mebius-border bg-white px-4 py-3">
           <div>
             <h2 class="m-0 text-base font-semibold">
-              {{ workspace.currentSession?.title ?? 'No session selected' }}
+              {{ workspace.currentSession?.title ?? locale.t('noSessionSelected') }}
             </h2>
             <p class="m-0 text-xs text-mebius-muted">
-              {{ workspace.currentProject?.name ?? 'Create or select a project' }}
+              {{ workspace.currentProject?.name ?? locale.t('createOrSelectProject') }}
               · SSE {{ workspace.eventStatus }}
             </p>
           </div>
           <n-space>
-            <n-button size="small" @click="openConnect" :disabled="!workspace.currentSession">
+            <n-button size="small" @click="openConnect('')" :disabled="!workspace.currentSession">
               <template #icon><n-icon><Cable /></n-icon></template>
-              Connect
+              {{ locale.t('connect') }}
+            </n-button>
+            <n-button size="small" quaternary @click="locale.toggleLocale">
+              {{ locale.t('languageSwitch') }}
             </n-button>
             <n-button size="small" @click="approvals.loadPending">
               <template #icon><n-icon><RefreshCw /></n-icon></template>
-              Sync
+              {{ locale.t('sync') }}
             </n-button>
           </n-space>
         </header>
@@ -278,12 +366,12 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
         <div class="grid min-h-0 flex-1 grid-cols-[220px_1fr]">
           <aside class="min-h-0 border-r border-mebius-border bg-white p-3">
             <div class="mb-3 flex items-center justify-between">
-              <span class="text-sm font-medium">Sessions</span>
-              <n-button circle quaternary size="small" title="New session" @click="createSession">
+              <span class="text-sm font-medium">{{ locale.t('sessions') }}</span>
+              <n-button circle quaternary size="small" :title="locale.t('newSession')" @click="createSession">
                 <template #icon><n-icon><Plus /></n-icon></template>
               </n-button>
             </div>
-            <n-input v-model:value="sessionTitle" class="mb-2" size="small" placeholder="Session title" />
+            <n-input v-model:value="sessionTitle" class="mb-2" size="small" :placeholder="locale.t('sessionTitle')" />
             <div class="h-[calc(100%-72px)] overflow-y-auto scrollbar-thin">
               <n-list hoverable clickable>
                 <n-list-item
@@ -304,7 +392,7 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
           <div class="flex min-h-0 flex-col">
             <div class="min-h-0 flex-1 overflow-y-auto p-4 scrollbar-thin">
               <div v-if="workspace.messages.length === 0" class="rounded border border-dashed border-mebius-border bg-white p-6 text-sm text-mebius-muted">
-                Create a session, connect a model, then send a request.
+                {{ locale.t('createSessionHint') }}
               </div>
               <div
                 v-for="message in workspace.messages"
@@ -319,10 +407,10 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
 
               <section v-if="workspace.activePlan" class="rounded border border-mebius-border bg-white p-3">
                 <div class="mb-2 flex items-center justify-between">
-                  <strong>Plan: {{ workspace.activePlan.plan.status }}</strong>
+                  <strong>{{ locale.t('planStatus', { status: workspace.activePlan.plan.status }) }}</strong>
                   <n-button size="small" type="primary" @click="workspace.approvePlan">
                     <template #icon><n-icon><Check /></n-icon></template>
-                    Approve
+                    {{ locale.t('approve') }}
                   </n-button>
                 </div>
                 <p class="text-sm">{{ workspace.activePlan.plan.summary }}</p>
@@ -335,22 +423,44 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
             </div>
 
             <footer class="border-t border-mebius-border bg-white p-3">
-              <div class="mb-2 grid grid-cols-[1fr_auto_auto] gap-2">
+              <div class="rounded-2xl border border-mebius-border bg-white shadow-sm">
                 <n-input
                   v-model:value="composer"
                   type="textarea"
+                  :bordered="false"
                   :autosize="{ minRows: 2, maxRows: 5 }"
-                  placeholder="Ask Mebius Code, or type /connect kimi"
-                  @keydown.ctrl.enter.prevent="submitText"
+                  :placeholder="locale.t('askPlaceholder')"
+                  @keydown.ctrl.enter.prevent="submitComposer"
                 />
-                <n-button :disabled="!canChat || !composer" :loading="busy" type="primary" @click="submitText">
-                  <template #icon><n-icon><Send /></n-icon></template>
-                  Send
-                </n-button>
-                <n-button :disabled="!canChat || !composer" @click="planGoal = composer; createPlan()">
-                  <template #icon><n-icon><ClipboardList /></n-icon></template>
-                  Plan
-                </n-button>
+                <div class="flex flex-wrap items-center justify-between gap-2 border-t border-mebius-border px-3 py-2">
+                  <div class="flex min-w-0 flex-wrap items-center gap-2">
+                    <n-segmented
+                      v-model:value="composerMode"
+                      size="small"
+                      :options="composerModeOptions"
+                    />
+                    <n-button
+                      size="small"
+                      quaternary
+                      class="max-w-[240px]"
+                      :disabled="!workspace.currentSession"
+                      @click="openConnect('')"
+                    >
+                      <template #icon><n-icon><Cable /></n-icon></template>
+                      <span class="truncate">{{ activeModelLabel }}</span>
+                    </n-button>
+                  </div>
+                  <n-button
+                    circle
+                    :disabled="!canSubmitComposer"
+                    :loading="busy"
+                    type="primary"
+                    :title="locale.t('send')"
+                    @click="submitComposer"
+                  >
+                    <template #icon><n-icon><Send /></n-icon></template>
+                  </n-button>
+                </div>
               </div>
             </footer>
           </div>
@@ -359,13 +469,13 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
 
       <aside class="flex min-h-0 flex-col border-l border-mebius-border bg-white">
         <n-tabs type="line" animated class="min-h-0 flex-1" pane-class="h-full">
-          <n-tab-pane name="files" tab="Files">
+          <n-tab-pane name="files" :tab="locale.t('files')">
             <div class="grid h-[calc(100vh-48px)] grid-rows-[250px_1fr]">
               <div class="overflow-y-auto border-b border-mebius-border p-3 scrollbar-thin">
                 <div class="mb-2 flex items-center justify-between">
                   <span class="flex items-center gap-2 text-sm font-medium">
                     <n-icon><FileText /></n-icon>
-                    File tree
+                    {{ locale.t('fileTree') }}
                   </span>
                   <n-button circle quaternary size="small" @click="workspace.loadTree()">
                     <template #icon><n-icon><RefreshCw /></n-icon></template>
@@ -383,23 +493,23 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
                   <div class="mb-2 font-medium">{{ workspace.currentFile.path }}</div>
                   <pre class="m-0 whitespace-pre-wrap rounded bg-slate-950 p-3 text-slate-100">{{ workspace.currentFile.content }}</pre>
                 </div>
-                <div v-else class="text-sm text-mebius-muted">Select a file to preview it.</div>
+                <div v-else class="text-sm text-mebius-muted">{{ locale.t('selectFilePreview') }}</div>
               </div>
             </div>
           </n-tab-pane>
 
-          <n-tab-pane name="approvals" tab="Approvals">
+          <n-tab-pane name="approvals" :tab="locale.t('approvals')">
             <div class="h-[calc(100vh-48px)] overflow-y-auto p-3 scrollbar-thin">
               <div class="mb-3 flex items-center justify-between">
                 <span class="flex items-center gap-2 text-sm font-medium">
                   <n-icon><ShieldCheck /></n-icon>
-                  Pending approvals
+                  {{ locale.t('pendingApprovals') }}
                 </span>
                 <n-button circle quaternary size="small" @click="approvals.loadPending">
                   <template #icon><n-icon><RefreshCw /></n-icon></template>
                 </n-button>
               </div>
-              <n-empty v-if="approvals.pending.length === 0" description="No pending approvals" />
+              <n-empty v-if="approvals.pending.length === 0" :description="locale.t('noPendingApprovals')" />
               <div
                 v-for="approval in approvals.pending"
                 :key="approval.id"
@@ -410,18 +520,18 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
                 <n-space class="mt-2">
                   <n-button size="small" type="primary" @click="approvals.approve(approval.id)">
                     <template #icon><n-icon><Check /></n-icon></template>
-                    Approve
+                    {{ locale.t('approve') }}
                   </n-button>
                   <n-button size="small" @click="approvals.reject(approval.id)">
                     <template #icon><n-icon><X /></n-icon></template>
-                    Reject
+                    {{ locale.t('reject') }}
                   </n-button>
                 </n-space>
               </div>
             </div>
           </n-tab-pane>
 
-          <n-tab-pane name="events" tab="Events">
+          <n-tab-pane name="events" :tab="locale.t('events')">
             <div class="h-[calc(100vh-48px)] overflow-y-auto p-3 scrollbar-thin">
               <div
                 v-for="event in workspace.eventLog"
@@ -437,13 +547,14 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
       </aside>
     </div>
 
-    <n-modal v-model:show="connectModal" preset="card" title="Connect Model Provider" class="max-w-[720px]">
+    <n-modal v-model:show="connectModal" preset="card" :title="locale.t('connectModelProvider')" class="max-w-[720px]">
       <div class="grid gap-4 md:grid-cols-[260px_1fr]">
         <section>
           <n-input
             v-model:value="connectQuery"
             class="mb-3"
-            placeholder="Search providers, e.g. kimi or 通义"
+            :placeholder="locale.t('searchProvidersPlaceholder')"
+            @update:value="() => searchProviders()"
             @keyup.enter="searchProviders"
           />
           <div class="space-y-2">
@@ -455,26 +566,34 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
               @click="chooseProvider(provider)"
             >
               <div class="font-medium">{{ provider.displayName }}</div>
-              <div class="text-xs text-mebius-muted">{{ provider.description }}</div>
+              <div class="text-xs text-mebius-muted">{{ providerDescription(provider) }}</div>
             </button>
           </div>
         </section>
         <section>
-          <n-empty v-if="!connectSelected" description="Select a provider" />
+          <n-empty v-if="!connectSelected" :description="locale.t('selectProvider')" />
           <div v-else>
             <h3 class="m-0 mb-1 text-base font-semibold">{{ connectSelected.displayName }}</h3>
-            <p class="m-0 mb-4 text-sm text-mebius-muted">{{ connectSelected.baseUrl || 'Custom endpoint' }}</p>
-            <n-form label-placement="top">
-              <n-form-item v-for="field in connectFields" :key="field.name" :label="field.label">
+            <p class="m-0 text-sm text-mebius-muted">{{ connectSelected.baseUrl || locale.t('customEndpoint') }}</p>
+            <p v-if="connectSelected.recommendedModels.length" class="m-0 mb-4 text-xs text-mebius-muted">
+              {{ locale.t('recommendedModels', { models: connectSelected.recommendedModels.join(', ') }) }}
+            </p>
+            <div v-else class="mb-4"></div>
+            <n-form label-placement="top" autocomplete="off">
+              <input class="pointer-events-none fixed h-px w-px opacity-0" style="left: -1000px; top: -1000px;" type="text" name="mebius-connect-username-decoy" autocomplete="username" tabindex="-1" aria-hidden="true" />
+              <input class="pointer-events-none fixed h-px w-px opacity-0" style="left: -1000px; top: -1000px;" type="password" name="mebius-connect-password-decoy" autocomplete="current-password" tabindex="-1" aria-hidden="true" />
+              <n-form-item v-for="field in connectFields" :key="field.name" :label="connectFieldLabel(field)">
                 <n-input
                   v-model:value="connectForm[field.name]"
                   :type="field.type === 'password' ? 'password' : 'text'"
+                  :placeholder="connectFieldPlaceholder(field)"
+                  :input-props="connectInputProps(field)"
                   show-password-on="mousedown"
                 />
               </n-form-item>
-              <n-button type="primary" :loading="busy" :disabled="!connectForm.apiKey" @click="submitConnect">
+              <n-button type="primary" :loading="busy" :disabled="!connectReady" @click="submitConnect">
                 <template #icon><n-icon><Play /></n-icon></template>
-                Validate and connect
+                {{ locale.t('validateAndConnect') }}
               </n-button>
             </n-form>
           </div>

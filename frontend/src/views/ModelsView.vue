@@ -4,10 +4,12 @@ import { RouterLink } from 'vue-router';
 import { ArrowLeft, Plus, RefreshCw } from 'lucide-vue-next';
 import { jsonBody, request } from '../api/http';
 import type { ModelConfig } from '../api/types';
+import { useLocaleStore } from '../stores/locale';
 
 const configs = ref<ModelConfig[]>([]);
 const loading = ref(false);
 const error = ref('');
+const locale = useLocaleStore();
 const form = reactive({
   displayName: '',
   baseUrl: '',
@@ -23,7 +25,7 @@ async function load() {
   try {
     configs.value = await request<ModelConfig[]>('/model-configs');
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to load model configs.';
+    error.value = err instanceof Error ? err.message : locale.t('failedLoadModelConfigs');
   } finally {
     loading.value = false;
   }
@@ -55,42 +57,47 @@ onMounted(load);
       <div class="mb-5 flex items-center justify-between">
         <div class="flex items-center gap-3">
           <RouterLink to="/app">
-            <n-button quaternary circle title="Back to workspace">
+            <n-button quaternary circle :title="locale.t('backToWorkspace')">
               <template #icon><n-icon><ArrowLeft /></n-icon></template>
             </n-button>
           </RouterLink>
           <div>
-            <h1 class="m-0 text-xl font-semibold">Model Configs</h1>
-            <p class="m-0 text-sm text-mebius-muted">Encrypted provider credentials and defaults.</p>
+            <h1 class="m-0 text-xl font-semibold">{{ locale.t('modelConfigs') }}</h1>
+            <p class="m-0 text-sm text-mebius-muted">{{ locale.t('encryptedCredentials') }}</p>
           </div>
         </div>
-        <n-button :loading="loading" @click="load">
-          <template #icon><n-icon><RefreshCw /></n-icon></template>
-          Refresh
-        </n-button>
+        <n-space>
+          <n-button size="small" quaternary @click="locale.toggleLocale">
+            {{ locale.t('languageSwitch') }}
+          </n-button>
+          <n-button :loading="loading" @click="load">
+            <template #icon><n-icon><RefreshCw /></n-icon></template>
+            {{ locale.t('refresh') }}
+          </n-button>
+        </n-space>
       </div>
 
       <n-alert v-if="error" class="mb-4" type="error" :show-icon="false">{{ error }}</n-alert>
 
       <div class="grid gap-4 lg:grid-cols-[360px_1fr]">
         <section class="rounded border border-mebius-border bg-white p-4">
-          <h2 class="m-0 mb-4 text-base font-semibold">Add Manually</h2>
-          <n-form label-placement="top">
-            <n-form-item label="Display name">
-              <n-input v-model:value="form.displayName" />
+          <h2 class="m-0 mb-4 text-base font-semibold">{{ locale.t('addManually') }}</h2>
+          <n-form label-placement="top" autocomplete="off">
+            <n-form-item :label="locale.t('displayName')">
+              <n-input v-model:value="form.displayName" autocomplete="off" />
             </n-form-item>
-            <n-form-item label="Base URL">
-              <n-input v-model:value="form.baseUrl" placeholder="https://api.example.com/v1" />
+            <n-form-item :label="locale.t('baseUrl')">
+              <n-input v-model:value="form.baseUrl" :placeholder="locale.t('baseUrlPlaceholder')" autocomplete="off" />
             </n-form-item>
-            <n-form-item label="Model name">
-              <n-input v-model:value="form.modelName" />
+            <n-form-item :label="locale.t('modelName')">
+              <n-input v-model:value="form.modelName" autocomplete="off" />
             </n-form-item>
-            <n-form-item label="API key">
-              <n-input v-model:value="form.apiKey" type="password" show-password-on="mousedown" />
+            <n-form-item :label="locale.t('apiKey')">
+              <n-input v-model:value="form.apiKey" type="password" show-password-on="mousedown" autocomplete="new-password" />
             </n-form-item>
             <n-space>
-              <n-checkbox v-model:checked="form.supportsTools">Tools</n-checkbox>
-              <n-checkbox v-model:checked="form.isDefault">Default</n-checkbox>
+              <n-checkbox v-model:checked="form.supportsTools">{{ locale.t('supportsTools') }}</n-checkbox>
+              <n-checkbox v-model:checked="form.isDefault">{{ locale.t('defaultConfig') }}</n-checkbox>
             </n-space>
             <n-button
               class="mt-4"
@@ -100,7 +107,7 @@ onMounted(load);
               @click="create"
             >
               <template #icon><n-icon><Plus /></n-icon></template>
-              Add config
+              {{ locale.t('addConfig') }}
             </n-button>
           </n-form>
         </section>
@@ -109,14 +116,14 @@ onMounted(load);
           <n-data-table
             :loading="loading"
             :columns="[
-              { title: 'Name', key: 'displayName' },
-              { title: 'Provider', key: 'providerId' },
-              { title: 'Model', key: 'modelName' },
-              { title: 'Default', key: 'isDefault' },
+              { title: locale.t('name'), key: 'displayName' },
+              { title: locale.t('provider'), key: 'providerId' },
+              { title: locale.t('model'), key: 'modelName' },
+              { title: locale.t('defaultColumn'), key: 'isDefault' },
               {
-                title: 'Actions',
+                title: locale.t('actions'),
                 key: 'actions',
-                render: (row: ModelConfig) => h('button', { class: 'text-mebius-accent', onClick: () => testConfig(row.id) }, 'Test')
+                render: (row: ModelConfig) => h('button', { class: 'text-mebius-accent', onClick: () => testConfig(row.id) }, locale.t('test'))
               }
             ]"
             :data="configs"
