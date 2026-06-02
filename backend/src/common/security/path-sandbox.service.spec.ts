@@ -31,5 +31,13 @@ describe('PathSandboxService', () => {
       BadRequestException,
     );
   });
-});
 
+  it('requires project deletion paths to match the exact sandbox project root', () => {
+    const projectRoot = service.getProjectRoot('project-1');
+
+    expect(service.assertExactProjectRoot('project-1', projectRoot)).toBe(projectRoot);
+    expect(() => service.assertExactProjectRoot('project-1', join(process.cwd(), 'workspaces'))).toThrow(
+      BadRequestException,
+    );
+  });
+});

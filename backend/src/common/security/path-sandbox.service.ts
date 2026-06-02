@@ -23,6 +23,17 @@ export class PathSandboxService {
     return projectRoot;
   }
 
+  assertExactProjectRoot(projectId: string, workspacePath: string): string {
+    const expectedRoot = this.getProjectRoot(projectId);
+    const actualRoot = resolve(workspacePath);
+
+    if (actualRoot !== expectedRoot) {
+      throw new BadRequestException('Project workspace path does not match the sandbox root.');
+    }
+
+    return expectedRoot;
+  }
+
   resolveProjectPath(projectRoot: string, relativePath = '.'): string {
     const safeRelativePath = this.normalizeRelativePath(relativePath);
     const root = resolve(projectRoot);
@@ -55,4 +66,3 @@ export class PathSandboxService {
     return normalized === '' ? '.' : normalized;
   }
 }
-

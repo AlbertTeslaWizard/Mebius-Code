@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { EncryptionService } from '../../common/security/encryption.service';
@@ -133,7 +133,9 @@ export class ModelConfigsService {
     if (dto.displayName !== undefined) config.displayName = dto.displayName;
     if (dto.baseUrl !== undefined) config.baseUrl = dto.baseUrl.replace(/\/+$/, '');
     if (dto.modelName !== undefined) config.modelName = dto.modelName;
-    if (dto.apiKey !== undefined) config.encryptedApiKey = this.encryption.encrypt(dto.apiKey);
+    if (dto.apiKey !== undefined && dto.apiKey.trim() !== '') {
+      config.encryptedApiKey = this.encryption.encrypt(dto.apiKey);
+    }
     if (dto.supportsTools !== undefined) config.supportsTools = dto.supportsTools;
     if (dto.isDefault !== undefined) config.isDefault = dto.isDefault;
 
@@ -150,7 +152,7 @@ export class ModelConfigsService {
     const config = id ? await this.findOwned(ownerId, id) : await this.findDefault(ownerId);
     return {
       ...this.sanitize(config),
-      apiKey: this.encryption.decrypt(config.encryptedApiKey),
+      apiKey: this.decryptApiKey(config),
     };
   }
 
@@ -200,6 +202,16 @@ export class ModelConfigsService {
       throw new NotFoundException('Model config not found.');
     }
     return config;
+  }
+
+  private decryptApiKey(config: ModelConfig): string {
+    try {
+      return this.encryption.decrypt(config.encryptedApiKey);
+    } catch {
+      throw new ConflictException(
+        'Model config API key cannot be decrypted with the current master key. Edit this model config and re-enter the API key.',
+      );
+    }
   }
 
   private async findDefault(ownerId: string): Promise<ModelConfig> {

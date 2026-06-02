@@ -1,4 +1,4 @@
-import { IsBoolean, IsOptional, IsString, IsUrl, MaxLength, MinLength } from 'class-validator';
+import { IsBoolean, IsOptional, IsString, IsUrl, MaxLength, MinLength, ValidateIf } from 'class-validator';
 
 export class UpdateModelConfigDto {
   @IsOptional()
@@ -16,7 +16,7 @@ export class UpdateModelConfigDto {
   @MinLength(1)
   modelName?: string;
 
-  @IsOptional()
+  @ValidateIf((_object, value) => value !== undefined && value !== '')
   @IsString()
   @MinLength(1)
   apiKey?: string;
@@ -29,4 +29,3 @@ export class UpdateModelConfigDto {
   @IsBoolean()
   isDefault?: boolean;
 }
-

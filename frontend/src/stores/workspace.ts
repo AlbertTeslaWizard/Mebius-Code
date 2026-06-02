@@ -4,6 +4,7 @@ import type {
   ConnectResult,
   ListResponse,
   Message,
+  ModelConfig,
   Plan,
   PlanStep,
   Project,
@@ -16,6 +17,7 @@ import type {
 interface WorkspaceState {
   projects: Project[];
   sessions: Session[];
+  modelConfigs: ModelConfig[];
   messages: Message[];
   fileTree: TreeNode[];
   currentFile: ProjectFile | null;
@@ -32,6 +34,7 @@ export const useWorkspaceStore = defineStore('workspace', {
   state: (): WorkspaceState => ({
     projects: [],
     sessions: [],
+    modelConfigs: [],
     messages: [],
     fileTree: [],
     currentFile: null,
@@ -45,13 +48,16 @@ export const useWorkspaceStore = defineStore('workspace', {
   }),
   actions: {
     async bootstrap() {
-      await this.loadProjects();
+      await Promise.all([this.loadProjects(), this.loadModelConfigs()]);
       if (this.projects[0]) {
         await this.selectProject(this.projects[0]);
       }
     },
     async loadProjects() {
       this.projects = await request<Project[]>('/projects');
+    },
+    async loadModelConfigs() {
+      this.modelConfigs = await request<ModelConfig[]>('/model-configs');
     },
     async createProject(input: { name: string; description?: string }) {
       const project = await request<Project>('/projects', {
@@ -60,6 +66,26 @@ export const useWorkspaceStore = defineStore('workspace', {
       });
       await this.loadProjects();
       await this.selectProject(project);
+    },
+    async deleteProject(projectId: string) {
+      const wasCurrent = this.currentProject?.id === projectId;
+      await request<{ deleted: true }>(`/projects/${projectId}`, { method: 'DELETE' });
+      await this.loadProjects();
+
+      if (!wasCurrent) return;
+
+      this.disconnectEvents();
+      this.currentProject = null;
+      this.currentSession = null;
+      this.currentFile = null;
+      this.sessions = [];
+      this.messages = [];
+      this.fileTree = [];
+      this.activePlan = null;
+
+      if (this.projects[0]) {
+        await this.selectProject(this.projects[0]);
+      }
     },
     async importGit(input: { gitUrl: string; branch?: string }) {
       if (!this.currentProject) return;
@@ -98,10 +124,36 @@ export const useWorkspaceStore = defineStore('workspace', {
       await this.loadSessions();
       await this.selectSession(session);
     },
+    async deleteSession(sessionId: string) {
+      const wasCurrent = this.currentSession?.id === sessionId;
+      await request<{ deleted: true }>(`/sessions/${sessionId}`, { method: 'DELETE' });
+      await this.loadSessions();
+
+      if (!wasCurrent) return;
+
+      this.disconnectEvents();
+      this.currentSession = null;
+      this.messages = [];
+      this.activePlan = null;
+
+      if (this.sessions[0]) {
+        await this.selectSession(this.sessions[0]);
+      }
+    },
     async selectSession(session: Session) {
       this.currentSession = await request<Session>(`/sessions/${session.id}`);
       await this.loadMessages();
       this.connectEvents();
+    },
+    async switchSessionModel(modelConfigId: string) {
+      if (!this.currentSession) return null;
+      const session = await request<Session>(`/sessions/${this.currentSession.id}/commands`, {
+        method: 'POST',
+        body: jsonBody({ command: '/model', args: { modelConfigId } }),
+      });
+      this.currentSession = session;
+      this.sessions = this.sessions.map((item) => (item.id === session.id ? session : item));
+      return session;
     },
     async loadMessages() {
       if (!this.currentSession) return;
@@ -178,7 +230,7 @@ export const useWorkspaceStore = defineStore('workspace', {
       });
       if (result.type === 'connect.connected') {
         this.currentSession = result.session;
-        await this.loadSessions();
+        await Promise.all([this.loadSessions(), this.loadModelConfigs()]);
       }
       return result;
     },

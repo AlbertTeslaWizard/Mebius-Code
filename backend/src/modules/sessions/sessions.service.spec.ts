@@ -11,6 +11,7 @@ describe('SessionsService', () => {
   const sessions = {
     findAndCount: jest.fn(),
     findOne: jest.fn(),
+    remove: jest.fn((session: Session) => Promise.resolve(session)),
     save: jest.fn((session: Session) => Promise.resolve(session)),
   } as unknown as jest.Mocked<Repository<Session>>;
   const messages = {} as jest.Mocked<Repository<Message>>;
@@ -30,6 +31,20 @@ describe('SessionsService', () => {
       createdAt: config.createdAt,
       updatedAt: config.updatedAt,
     })),
+    findRuntime: jest.fn(() =>
+      Promise.resolve({
+        id: 'model-2',
+        displayName: 'Updated model',
+        baseUrl: 'https://api.example.com',
+        modelName: 'gpt-updated',
+        providerId: null,
+        supportsTools: true,
+        isDefault: false,
+        apiKey: 'sk-test',
+        createdAt: new Date('2026-06-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-06-01T00:00:00.000Z'),
+      }),
+    ),
     searchProviders: jest.fn(() => [
       {
         id: 'moonshot',
@@ -199,6 +214,48 @@ describe('SessionsService', () => {
         modelConfig: expect.not.objectContaining({ encryptedApiKey: expect.any(String) }),
       }),
     );
+  });
+
+  it('switches models with /model and returns a sanitized session view', async () => {
+    const result = await service.handleCommand('owner-1', 'session-1', {
+      command: '/model model-2',
+    });
+
+    expect(modelConfigs.findRuntime).toHaveBeenCalledWith('owner-1', 'model-2');
+    expect(sessions.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        activeModelConfig: { id: 'model-2' },
+      }),
+    );
+    expect(events.publish).toHaveBeenCalledWith('session-1', 'agent_status', {
+      status: 'model_changed',
+      modelConfigId: 'model-2',
+    });
+    expect(result).toEqual(
+      expect.objectContaining({
+        id: 'session-1',
+        projectId: 'project-1',
+        activeModelConfig: expect.objectContaining({
+          id: 'model-2',
+          displayName: 'Updated model',
+        }),
+      }),
+    );
+    expect((result as { activeModelConfig?: unknown }).activeModelConfig).not.toHaveProperty('apiKey');
+  });
+
+  it('deletes owned sessions and publishes a deletion event', async () => {
+    const result = await service.remove('owner-1', 'session-1');
+
+    expect(sessions.findOne).toHaveBeenCalledWith({
+      where: { id: 'session-1', owner: { id: 'owner-1' } },
+      relations: { owner: true, project: true, activeModelConfig: true },
+    });
+    expect(events.publish).toHaveBeenCalledWith('session-1', 'agent_status', {
+      status: 'session_deleted',
+    });
+    expect(sessions.remove).toHaveBeenCalledWith(expect.objectContaining({ id: 'session-1' }));
+    expect(result).toEqual({ deleted: true });
   });
 });
 

@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   MessageEvent,
   Param,
@@ -75,6 +76,12 @@ export class SessionsController {
   @UseGuards(JwtAuthGuard)
   command(@Req() request: RequestWithUser, @Param('id') id: string, @Body() dto: SlashCommandDto) {
     return this.sessions.handleCommand(request.user.sub, id, dto);
+  }
+
+  @Delete('sessions/:id')
+  @UseGuards(JwtAuthGuard)
+  remove(@Req() request: RequestWithUser, @Param('id') id: string) {
+    return this.sessions.remove(request.user.sub, id);
   }
 
   @Sse('sessions/:id/events')

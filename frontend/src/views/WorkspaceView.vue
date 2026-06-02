@@ -15,6 +15,7 @@ import {
   Send,
   Settings,
   ShieldCheck,
+  Trash2,
   X,
 } from 'lucide-vue-next';
 import type { ConnectField, ConnectProvider, TreeNode } from '../api/types';
@@ -53,6 +54,12 @@ const activeModelLabel = computed(
     workspace.currentSession?.activeModelConfig?.displayName ||
     workspace.currentSession?.activeModelConfig?.modelName ||
     locale.t('currentModelFallback'),
+);
+const modelOptions = computed(() =>
+  workspace.modelConfigs.map((config) => ({
+    label: `${config.displayName} · ${config.modelName}`,
+    value: config.id,
+  })),
 );
 const canSubmitComposer = computed(() => canChat.value && Boolean(composer.value.trim()) && !busy.value);
 const composerModeOptions = computed<Array<{ label: string; value: ComposerMode }>>(() => [
@@ -112,6 +119,10 @@ async function createProject() {
   });
 }
 
+async function deleteProject(projectId: string) {
+  await runTask(() => workspace.deleteProject(projectId));
+}
+
 async function importGit() {
   await runTask(async () => {
     await workspace.importGit({
@@ -128,6 +139,15 @@ async function createSession() {
     await workspace.createSession(sessionTitle.value || undefined);
     sessionTitle.value = '';
   });
+}
+
+async function deleteSession(sessionId: string) {
+  await runTask(() => workspace.deleteSession(sessionId));
+}
+
+async function switchModel(modelConfigId: string | null) {
+  if (!modelConfigId) return;
+  await runTask(() => workspace.switchSessionModel(modelConfigId));
 }
 
 async function submitComposer() {
@@ -319,7 +339,24 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
               :class="project.id === workspace.currentProject?.id ? 'bg-slate-100' : ''"
               @click="workspace.selectProject(project)"
             >
-              <n-thing :title="project.name" :description="project.description || project.sourceType" />
+              <div class="flex items-center justify-between gap-2">
+                <n-thing class="min-w-0" :title="project.name" :description="project.description || project.sourceType" />
+                <n-popconfirm @positive-click="deleteProject(project.id)">
+                  <template #trigger>
+                    <n-button
+                      circle
+                      quaternary
+                      size="small"
+                      :disabled="busy"
+                      :title="locale.t('deleteProject')"
+                      @click.stop
+                    >
+                      <template #icon><n-icon><Trash2 /></n-icon></template>
+                    </n-button>
+                  </template>
+                  {{ locale.t('confirmDeleteProject', { name: project.name }) }}
+                </n-popconfirm>
+              </div>
             </n-list-item>
           </n-list>
         </section>
@@ -380,10 +417,28 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
                   :class="session.id === workspace.currentSession?.id ? 'bg-slate-100' : ''"
                   @click="workspace.selectSession(session)"
                 >
-                  <n-thing
-                    :title="session.title"
-                    :description="session.activeModelConfig?.modelName || session.status"
-                  />
+                  <div class="flex items-center justify-between gap-2">
+                    <n-thing
+                      class="min-w-0"
+                      :title="session.title"
+                      :description="session.activeModelConfig?.modelName || session.status"
+                    />
+                    <n-popconfirm @positive-click="deleteSession(session.id)">
+                      <template #trigger>
+                        <n-button
+                          circle
+                          quaternary
+                          size="small"
+                          :disabled="busy"
+                          :title="locale.t('deleteSession')"
+                          @click.stop
+                        >
+                          <template #icon><n-icon><Trash2 /></n-icon></template>
+                        </n-button>
+                      </template>
+                      {{ locale.t('confirmDeleteSession', { name: session.title }) }}
+                    </n-popconfirm>
+                  </div>
                 </n-list-item>
               </n-list>
             </div>
@@ -439,16 +494,16 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
                       size="small"
                       :options="composerModeOptions"
                     />
-                    <n-button
+                    <n-select
                       size="small"
-                      quaternary
-                      class="max-w-[240px]"
-                      :disabled="!workspace.currentSession"
-                      @click="openConnect('')"
-                    >
-                      <template #icon><n-icon><Cable /></n-icon></template>
-                      <span class="truncate">{{ activeModelLabel }}</span>
-                    </n-button>
+                      class="w-[260px] max-w-full"
+                      :value="workspace.currentSession?.activeModelConfig?.id ?? null"
+                      :options="modelOptions"
+                      :placeholder="activeModelLabel"
+                      :disabled="!workspace.currentSession || modelOptions.length === 0 || busy"
+                      :consistent-menu-width="false"
+                      @update:value="switchModel"
+                    />
                   </div>
                   <n-button
                     circle

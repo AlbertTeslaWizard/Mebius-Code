@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { RequestWithUser } from '../../common/types/request-with-user';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { UsersService } from '../users/users.service';
@@ -35,6 +35,12 @@ export class ProjectsController {
     return this.projects.importGit(owner, id, dto);
   }
 
+  @Delete(':id')
+  async remove(@Req() request: RequestWithUser, @Param('id') id: string) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.projects.remove(owner, id);
+  }
+
   @Get(':id/tree')
   tree(
     @Req() request: RequestWithUser,
@@ -50,4 +56,3 @@ export class ProjectsController {
     return this.projects.readProjectFile(request.user.sub, id, path);
   }
 }
-

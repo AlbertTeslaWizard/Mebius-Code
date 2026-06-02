@@ -2,8 +2,8 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { InjectRepository } from '@nestjs/typeorm';
 import { spawn } from 'child_process';
 import { Dirent } from 'fs';
-import { mkdir, readdir, readFile, stat } from 'fs/promises';
-import { basename, join, relative } from 'path';
+import { readdir, readFile, rm, stat } from 'fs/promises';
+import { basename, join, relative, resolve } from 'path';
 import { Repository } from 'typeorm';
 import { PathSandboxService } from '../../common/security/path-sandbox.service';
 import { AuditService } from '../audit/audit.service';
@@ -69,13 +69,13 @@ export class ProjectsService {
 
   async importGit(owner: User, projectId: string, dto: ImportGitDto): Promise<Project> {
     const project = await this.findOwned(owner.id, projectId);
-    await mkdir(project.workspacePath, { recursive: true });
-    const existingFiles = await readdir(project.workspacePath);
+    const workspacePath = await this.ensureCurrentWorkspacePath(project);
+    const existingFiles = await readdir(workspacePath);
     if (existingFiles.length > 0) {
       throw new BadRequestException('Workspace is not empty.');
     }
 
-    await this.cloneRepository(dto.gitUrl, project.workspacePath, dto.branch);
+    await this.cloneRepository(dto.gitUrl, workspacePath, dto.branch);
     project.sourceType = ProjectSourceType.Git;
     project.gitUrl = dto.gitUrl;
     const saved = await this.projects.save(project);
@@ -89,13 +89,37 @@ export class ProjectsService {
     return saved;
   }
 
+  async remove(owner: User, projectId: string): Promise<{ deleted: true }> {
+    const project = await this.findOwned(owner.id, projectId);
+    const workspacePath = this.paths.assertExactProjectRoot(
+      project.id,
+      this.paths.getProjectRoot(project.id),
+    );
+
+    await this.audit.record({
+      actor: owner,
+      action: 'project.deleted',
+      resourceType: 'project',
+      resourceId: project.id,
+      metadata: {
+        workspacePath,
+        persistedWorkspacePath: project.workspacePath,
+      },
+    });
+    await this.projects.remove(project);
+    await rm(workspacePath, { recursive: true, force: true });
+
+    return { deleted: true };
+  }
+
   async readProjectFile(ownerId: string, projectId: string, relativePath: string): Promise<{
     path: string;
     content: string;
     size: number;
   }> {
     const project = await this.findOwned(ownerId, projectId);
-    const absolutePath = this.paths.resolveProjectPath(project.workspacePath, relativePath);
+    const projectRoot = await this.ensureCurrentWorkspacePath(project);
+    const absolutePath = this.paths.resolveProjectPath(projectRoot, relativePath);
     const info = await stat(absolutePath);
     if (!info.isFile()) {
       throw new BadRequestException('Path is not a file.');
@@ -104,7 +128,7 @@ export class ProjectsService {
       throw new BadRequestException('File is too large to read through the API.');
     }
     return {
-      path: this.toRelative(project.workspacePath, absolutePath),
+      path: this.toRelative(projectRoot, absolutePath),
       content: await readFile(absolutePath, 'utf8'),
       size: info.size,
     };
@@ -112,8 +136,20 @@ export class ProjectsService {
 
   async buildTree(ownerId: string, projectId: string, relativePath = '.', depth = 3): Promise<TreeNode[]> {
     const project = await this.findOwned(ownerId, projectId);
-    const root = this.paths.resolveProjectPath(project.workspacePath, relativePath);
-    return this.readTree(project.workspacePath, root, depth);
+    const projectRoot = await this.ensureCurrentWorkspacePath(project);
+    const root = this.paths.resolveProjectPath(projectRoot, relativePath);
+    return this.readTree(projectRoot, root, depth);
+  }
+
+  private async ensureCurrentWorkspacePath(project: Project): Promise<string> {
+    const workspacePath = await this.paths.ensureProjectRoot(project.id);
+
+    if (resolve(project.workspacePath) !== workspacePath) {
+      project.workspacePath = workspacePath;
+      await this.projects.save(project);
+    }
+
+    return workspacePath;
   }
 
   private async readTree(projectRoot: string, currentPath: string, depth: number): Promise<TreeNode[]> {
@@ -171,4 +207,3 @@ export class ProjectsService {
     });
   }
 }
-

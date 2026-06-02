@@ -132,6 +132,13 @@ export class SessionsService {
     return message;
   }
 
+  async remove(ownerId: string, sessionId: string): Promise<{ deleted: true }> {
+    const session = await this.findOwned(ownerId, sessionId);
+    this.events.publish(session.id, 'agent_status', { status: 'session_deleted' });
+    await this.sessions.remove(session);
+    return { deleted: true };
+  }
+
   async addMessage(
     session: Session,
     role: MessageRole,
@@ -180,14 +187,14 @@ export class SessionsService {
       if (!modelConfigId) {
         throw new BadRequestException('/model requires a model config id.');
       }
-      await this.modelConfigs.findRuntime(ownerId, modelConfigId);
+      const modelConfig = await this.modelConfigs.findRuntime(ownerId, modelConfigId);
       session.activeModelConfig = { id: modelConfigId } as Session['activeModelConfig'];
       const saved = await this.sessions.save(session);
       this.events.publish(session.id, 'agent_status', {
         status: 'model_changed',
         modelConfigId,
       });
-      return saved;
+      return this.toView({ ...saved, activeModelConfig: modelConfig } as unknown as Session);
     }
 
     if (name === '/connect') {

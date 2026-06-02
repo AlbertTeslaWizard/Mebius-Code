@@ -24,6 +24,12 @@ export interface ModelConfig {
   updatedAt: string;
 }
 
+export interface ModelConfigTestResult {
+  ok: boolean;
+  status?: number;
+  message: string;
+}
+
 export interface Project {
   id: string;
   name: string;
