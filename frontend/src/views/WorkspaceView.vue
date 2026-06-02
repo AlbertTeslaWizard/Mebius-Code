@@ -8,7 +8,10 @@ import {
   FileText,
   Folder,
   GitBranch,
-  LogOut,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   Play,
   Plus,
   RefreshCw,
@@ -18,9 +21,16 @@ import {
   Trash2,
   X,
 } from 'lucide-vue-next';
-import type { ConnectField, ConnectProvider, TreeNode } from '../api/types';
+import type {
+  ConnectField,
+  ConnectProvider,
+  GitStatusFile,
+  LayoutPreferences,
+  TreeNode,
+} from '../api/types';
+import MessageContent from '../components/MessageContent.vue';
 import { useApprovalStore } from '../stores/approvals';
-import { useAuthStore } from '../stores/auth';
+import { defaultUserPreferences, useAuthStore } from '../stores/auth';
 import { useLocaleStore } from '../stores/locale';
 import { useWorkspaceStore } from '../stores/workspace';
 
@@ -33,6 +43,7 @@ const locale = useLocaleStore();
 
 const projectForm = reactive({ name: '', description: '' });
 const importForm = reactive({ gitUrl: '', branch: '' });
+const gitCommitMessage = ref('');
 const sessionTitle = ref('');
 const composer = ref('');
 const composerMode = ref<ComposerMode>('build');
@@ -44,8 +55,12 @@ const connectSelected = ref<ConnectProvider | null>(null);
 const connectFields = ref<ConnectField[]>([]);
 const connectForm = reactive<Record<string, string>>({});
 const lastConnectCommandQuery = ref<string | null>(null);
+const isCompactViewport = ref(false);
+const leftOverlayOpen = ref(false);
+const rightOverlayOpen = ref(false);
 const busy = ref(false);
 const error = ref('');
+let compactViewportQuery: MediaQueryList | null = null;
 
 const treeOptions = computed<TreeOption[]>(() => workspace.fileTree.map(toTreeOption));
 const canChat = computed(() => Boolean(workspace.currentSession));
@@ -61,7 +76,13 @@ const modelOptions = computed(() =>
     value: config.id,
   })),
 );
-const canSubmitComposer = computed(() => canChat.value && Boolean(composer.value.trim()) && !busy.value);
+const canSubmitComposer = computed(
+  () =>
+    canChat.value &&
+    Boolean(composer.value.trim()) &&
+    !busy.value &&
+    workspace.agentActivity?.status !== 'waiting_for_approval',
+);
 const composerModeOptions = computed<Array<{ label: string; value: ComposerMode }>>(() => [
   { label: locale.t('build'), value: 'build' },
   { label: locale.t('plan'), value: 'plan' },
@@ -74,14 +95,146 @@ const settingsOptions = computed(() => [
 const connectReady = computed(() =>
   connectFields.value.every((field) => !field.required || Boolean(connectForm[field.name]?.trim())),
 );
+const layoutPreferences = computed(() => auth.user?.preferences ?? defaultUserPreferences);
+const leftSidebarCollapsed = computed(() => layoutPreferences.value.layout.leftSidebarCollapsed);
+const rightSidebarCollapsed = computed(() => layoutPreferences.value.layout.rightSidebarCollapsed);
+const leftSidebarInert = computed(() =>
+  isCompactViewport.value ? !leftOverlayOpen.value : leftSidebarCollapsed.value,
+);
+const rightSidebarInert = computed(() =>
+  isCompactViewport.value ? !rightOverlayOpen.value : rightSidebarCollapsed.value,
+);
+const hasOverlayOpen = computed(() => leftOverlayOpen.value || rightOverlayOpen.value);
+const workspaceGridStyle = computed<Record<string, string>>(() => ({
+  '--left-sidebar-width': leftSidebarCollapsed.value ? '0px' : '280px',
+  '--right-sidebar-width': rightSidebarCollapsed.value ? '0px' : '360px',
+}));
+const leftSidebarToggleLabel = computed(() => {
+  if (isCompactViewport.value) {
+    return leftOverlayOpen.value ? locale.t('closeSidebar') : locale.t('openLeftSidebar');
+  }
+  return leftSidebarCollapsed.value ? locale.t('expandLeftSidebar') : locale.t('collapseLeftSidebar');
+});
+const rightSidebarToggleLabel = computed(() => {
+  if (isCompactViewport.value) {
+    return rightOverlayOpen.value ? locale.t('closeSidebar') : locale.t('openRightSidebar');
+  }
+  return rightSidebarCollapsed.value ? locale.t('expandRightSidebar') : locale.t('collapseRightSidebar');
+});
+const leftSidebarToggleIcon = computed(() =>
+  isCompactViewport.value
+    ? leftOverlayOpen.value
+      ? PanelLeftClose
+      : PanelLeftOpen
+    : leftSidebarCollapsed.value
+      ? PanelLeftOpen
+      : PanelLeftClose,
+);
+const rightSidebarToggleIcon = computed(() =>
+  isCompactViewport.value
+    ? rightOverlayOpen.value
+      ? PanelRightClose
+      : PanelRightOpen
+    : rightSidebarCollapsed.value
+      ? PanelRightOpen
+      : PanelRightClose,
+);
+const isImportingGit = computed(() => workspace.gitImportStatus === 'running');
+const isLoadingGitStatus = computed(() => workspace.gitStatusLoading);
+const isPublishingGit = computed(() => workspace.gitPublishStatus === 'running');
+const gitStatus = computed(() => workspace.gitStatus);
+const gitImportFeedback = computed(() => {
+  if (workspace.gitImportStatus === 'running') return locale.t('gitImportRunning');
+  if (workspace.gitImportStatus === 'success') return locale.t('gitImportComplete');
+  if (workspace.gitImportStatus === 'error') return workspace.gitImportError || locale.t('gitImportFailed');
+  return '';
+});
+const gitPublishFeedback = computed(() => workspace.gitPublishMessage);
+const gitImportFeedbackClass = computed(() => {
+  if (workspace.gitImportStatus === 'error') return 'text-red-600';
+  if (workspace.gitImportStatus === 'success') return 'text-mebius-accent';
+  return 'text-mebius-muted';
+});
+const gitPublishFeedbackClass = computed(() => {
+  if (workspace.gitPublishStatus === 'error') return 'text-red-600';
+  if (workspace.gitPublishStatus === 'success') return 'text-mebius-accent';
+  return 'text-mebius-muted';
+});
+const canCommitGit = computed(
+  () =>
+    Boolean(workspace.currentProject) &&
+    gitStatus.value?.isGitRepo === true &&
+    (gitStatus.value?.counts.staged ?? 0) > 0 &&
+    Boolean(gitCommitMessage.value.trim()) &&
+    !busy.value &&
+    !isPublishingGit.value,
+);
+const canPushGit = computed(
+  () =>
+    Boolean(workspace.currentProject) &&
+    gitStatus.value?.isGitRepo === true &&
+    gitStatus.value.hasRemote &&
+    !busy.value &&
+    !isPublishingGit.value,
+);
+const pushStatusHint = computed(() => {
+  if (gitStatus.value?.isGitRepo !== true) return '';
+  if (isPublishingGit.value || busy.value) return locale.t('gitPushBusy');
+  if (!gitStatus.value.hasRemote) return locale.t('gitRequiresRemote');
+  if (gitStatus.value.ahead > 0) {
+    return locale.t('gitReadyToPush', { count: String(gitStatus.value.ahead) });
+  }
+  return locale.t('gitNoCommitsToPush');
+});
+const canStageAllGit = computed(
+  () =>
+    Boolean(workspace.currentProject) &&
+    gitStatus.value?.isGitRepo === true &&
+    gitStatus.value.files.some((file) => canStageFile(file)) &&
+    !busy.value &&
+    !isPublishingGit.value,
+);
+const canUnstageAllGit = computed(
+  () =>
+    Boolean(workspace.currentProject) &&
+    gitStatus.value?.isGitRepo === true &&
+    gitStatus.value.files.some((file) => canUnstageFile(file)) &&
+    !busy.value &&
+    !isPublishingGit.value,
+);
+const agentActivityText = computed(() => {
+  const activity = workspace.agentActivity;
+  if (!activity) return '';
+  if (activity.status === 'thinking') return locale.t('agentThinking');
+  if (activity.status === 'using_tools') {
+    return activity.toolName
+      ? locale.t('agentUsingTool', { tool: activity.toolName })
+      : locale.t('agentUsingTools');
+  }
+  if (activity.status === 'waiting_for_approval') {
+    return activity.toolName
+      ? locale.t('agentWaitingToolApproval', { tool: activity.toolName })
+      : locale.t('agentWaitingApproval');
+  }
+  return activity.message || locale.t('agentFailed');
+});
+const agentActivityToneClass = computed(() => {
+  if (workspace.agentActivity?.status === 'failed') return 'border-red-200 bg-red-50 text-red-700';
+  if (workspace.agentActivity?.status === 'waiting_for_approval') {
+    return 'border-amber-200 bg-amber-50 text-amber-700';
+  }
+  return 'border-mebius-border bg-white text-mebius-muted';
+});
 
 onMounted(async () => {
+  setupCompactViewportQuery();
   await Promise.all([auth.fetchMe(), approvals.loadPending()]);
   await workspace.bootstrap();
 });
 
 onBeforeUnmount(() => {
   workspace.disconnectEvents();
+  compactViewportQuery?.removeEventListener('change', handleCompactViewportChange);
 });
 
 watch(composer, (value) => {
@@ -108,6 +261,84 @@ async function runTask(action: () => Promise<unknown>) {
   }
 }
 
+async function updateLayoutPreferences(layout: Partial<LayoutPreferences>) {
+  error.value = '';
+  try {
+    await auth.updatePreferences({ layout });
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : locale.t('operationFailed');
+  }
+}
+
+function toggleLeftSidebar() {
+  if (isCompactViewport.value) {
+    leftOverlayOpen.value = !leftOverlayOpen.value;
+    rightOverlayOpen.value = false;
+    return;
+  }
+
+  void updateLayoutPreferences({
+    leftSidebarCollapsed: !leftSidebarCollapsed.value,
+  });
+}
+
+function toggleRightSidebar() {
+  if (isCompactViewport.value) {
+    rightOverlayOpen.value = !rightOverlayOpen.value;
+    leftOverlayOpen.value = false;
+    return;
+  }
+
+  void updateLayoutPreferences({
+    rightSidebarCollapsed: !rightSidebarCollapsed.value,
+  });
+}
+
+function closeSidebars() {
+  leftOverlayOpen.value = false;
+  rightOverlayOpen.value = false;
+}
+
+function setupCompactViewportQuery() {
+  compactViewportQuery = window.matchMedia('(max-width: 1023px)');
+  isCompactViewport.value = compactViewportQuery.matches;
+  compactViewportQuery.addEventListener('change', handleCompactViewportChange);
+}
+
+function handleCompactViewportChange(event: MediaQueryListEvent) {
+  isCompactViewport.value = event.matches;
+  if (!event.matches) {
+    closeSidebars();
+  }
+}
+
+function gitStateLabel(state: string) {
+  switch (state) {
+    case 'untracked':
+      return locale.t('gitStateUntracked');
+    case 'staged':
+      return locale.t('gitStateStaged');
+    case 'modified':
+      return locale.t('gitStateModified');
+    case 'deleted':
+      return locale.t('gitStateDeleted');
+    case 'renamed':
+      return locale.t('gitStateRenamed');
+    case 'conflicted':
+      return locale.t('gitStateConflicted');
+    default:
+      return locale.t('gitStateUnknown');
+  }
+}
+
+function canStageFile(file: GitStatusFile) {
+  return file.workTreeStatus !== ' ' || file.state === 'untracked';
+}
+
+function canUnstageFile(file: GitStatusFile) {
+  return file.indexStatus !== ' ' && file.indexStatus !== '?';
+}
+
 async function createProject() {
   await runTask(async () => {
     await workspace.createProject({
@@ -131,6 +362,49 @@ async function importGit() {
     });
     importForm.gitUrl = '';
     importForm.branch = '';
+  });
+}
+
+async function refreshGitStatus() {
+  await runTask(async () => {
+    await workspace.loadGitStatus();
+  });
+}
+
+async function commitGit() {
+  await runTask(async () => {
+    await workspace.commitGit(gitCommitMessage.value);
+    gitCommitMessage.value = '';
+  });
+}
+
+async function stageGitFile(path: string) {
+  await runTask(async () => {
+    await workspace.stageGitFile(path);
+  });
+}
+
+async function unstageGitFile(path: string) {
+  await runTask(async () => {
+    await workspace.unstageGitFile(path);
+  });
+}
+
+async function stageAllGit() {
+  await runTask(async () => {
+    await workspace.stageAllGit();
+  });
+}
+
+async function unstageAllGit() {
+  await runTask(async () => {
+    await workspace.unstageAllGit();
+  });
+}
+
+async function pushGit() {
+  await runTask(async () => {
+    await workspace.pushGit();
   });
 }
 
@@ -289,23 +563,49 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
 
 <template>
   <main class="h-screen overflow-hidden bg-mebius-bg text-mebius-ink">
-    <div class="grid h-full grid-cols-[280px_minmax(420px,1fr)_360px]">
-      <aside class="flex min-h-0 flex-col border-r border-mebius-border bg-white">
+    <div class="workspace-shell" :style="workspaceGridStyle">
+      <button
+        v-if="isCompactViewport && hasOverlayOpen"
+        class="fixed inset-0 z-20 bg-slate-950/20 lg:hidden"
+        type="button"
+        :title="locale.t('closeSidebar')"
+        :aria-label="locale.t('closeSidebar')"
+        @click="closeSidebars"
+      />
+
+      <aside
+        class="workspace-side-panel workspace-side-panel--left flex min-h-0 min-w-0 flex-col overflow-hidden border-r border-mebius-border bg-white"
+        :class="{ 'is-collapsed': leftSidebarCollapsed, 'is-overlay-open': leftOverlayOpen }"
+        :inert="leftSidebarInert"
+        :aria-hidden="leftSidebarInert"
+      >
         <header class="border-b border-mebius-border p-4">
           <div class="mb-3 flex items-center justify-between">
             <div>
               <h1 class="m-0 text-lg font-semibold">Mebius Code</h1>
               <p class="m-0 text-xs text-mebius-muted">{{ auth.user?.email ?? locale.t('workspace') }}</p>
             </div>
-            <n-dropdown
-              trigger="click"
-              :options="settingsOptions"
-              @select="(key: string) => key === 'logout' ? auth.logout() : $router.push(key === 'models' ? '/settings/models' : '/settings/audit')"
-            >
-              <n-button circle quaternary :title="locale.t('settings')">
-                <template #icon><n-icon><Settings /></n-icon></template>
+            <div class="flex items-center gap-1">
+              <n-dropdown
+                trigger="click"
+                :options="settingsOptions"
+                @select="(key: string) => key === 'logout' ? auth.logout() : $router.push(key === 'models' ? '/settings/models' : '/settings/audit')"
+              >
+                <n-button circle quaternary :title="locale.t('settings')">
+                  <template #icon><n-icon><Settings /></n-icon></template>
+                </n-button>
+              </n-dropdown>
+              <n-button
+                v-if="isCompactViewport"
+                circle
+                quaternary
+                :title="locale.t('closeSidebar')"
+                :aria-label="locale.t('closeSidebar')"
+                @click="closeSidebars"
+              >
+                <template #icon><n-icon><X /></n-icon></template>
               </n-button>
-            </n-dropdown>
+            </div>
           </div>
           <n-alert v-if="error" type="error" :show-icon="false" closable @close="error = ''">
             {{ error }}
@@ -366,24 +666,192 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
             <n-icon><GitBranch /></n-icon>
             {{ locale.t('gitImport') }}
           </div>
-          <n-input v-model:value="importForm.gitUrl" class="mb-2" size="small" :placeholder="locale.t('repositoryUrl')" />
-          <n-input v-model:value="importForm.branch" class="mb-2" size="small" :placeholder="locale.t('branch')" />
-          <n-button size="small" block :disabled="!workspace.currentProject || !importForm.gitUrl" @click="importGit">
+          <n-input
+            v-model:value="importForm.gitUrl"
+            class="mb-2"
+            size="small"
+            :disabled="isImportingGit"
+            :placeholder="locale.t('repositoryUrl')"
+          />
+          <n-input
+            v-model:value="importForm.branch"
+            class="mb-2"
+            size="small"
+            :disabled="isImportingGit"
+            :placeholder="locale.t('branch')"
+          />
+          <n-button
+            size="small"
+            block
+            :loading="isImportingGit"
+            :disabled="!workspace.currentProject || !importForm.gitUrl || isImportingGit"
+            @click="importGit"
+          >
             {{ locale.t('importIntoCurrentProject') }}
           </n-button>
+          <p v-if="gitImportFeedback" class="m-0 mt-2 text-xs leading-5" :class="gitImportFeedbackClass">
+            {{ gitImportFeedback }}
+          </p>
+        </section>
+
+        <section class="border-t border-mebius-border p-3">
+          <div class="mb-2 flex items-center justify-between gap-2">
+            <div class="flex items-center gap-2 text-sm font-medium">
+              <n-icon><GitBranch /></n-icon>
+              {{ locale.t('gitPublish') }}
+            </div>
+            <n-button
+              quaternary
+              size="small"
+              :loading="isLoadingGitStatus"
+              :disabled="!workspace.currentProject || isLoadingGitStatus || busy"
+              @click="refreshGitStatus"
+            >
+              <template #icon><n-icon><RefreshCw /></n-icon></template>
+              {{ locale.t('gitRefreshStatus') }}
+            </n-button>
+          </div>
+
+          <p v-if="workspace.gitStatusError" class="m-0 mb-2 text-xs leading-5 text-red-600">
+            {{ workspace.gitStatusError || locale.t('gitStatusFailed') }}
+          </p>
+          <p v-else-if="isLoadingGitStatus" class="m-0 mb-2 text-xs leading-5 text-mebius-muted">
+            {{ locale.t('gitStatusLoading') }}
+          </p>
+          <template v-else-if="gitStatus">
+            <p v-if="!gitStatus.isGitRepo" class="m-0 mb-2 text-xs leading-5 text-mebius-muted">
+              {{ locale.t('gitStatusUnavailable') }}
+            </p>
+            <template v-else>
+              <div class="mb-2 rounded-xl border border-mebius-border/80 bg-slate-50 p-2 text-xs text-mebius-muted">
+                <p class="m-0">{{ locale.t('gitCurrentBranch', { branch: gitStatus.branch ?? 'HEAD' }) }}</p>
+                <p v-if="gitStatus.tracking" class="m-0 mt-1">
+                  {{ locale.t('gitTrackingBranch', { tracking: gitStatus.tracking }) }}
+                </p>
+                <p class="m-0 mt-1">{{ locale.t('gitRemoteCount', { count: gitStatus.remotes.length }) }}</p>
+                <p class="m-0 mt-1">{{ locale.t('gitAheadCount', { count: String(gitStatus.ahead) }) }}</p>
+                <p class="m-0 mt-1">{{ locale.t('gitBehindCount', { count: String(gitStatus.behind) }) }}</p>
+                <p class="m-0 mt-1">
+                  staged {{ gitStatus.counts.staged }} · unstaged {{ gitStatus.counts.unstaged }} · untracked
+                  {{ gitStatus.counts.untracked }}
+                </p>
+              </div>
+
+              <n-input
+                v-model:value="gitCommitMessage"
+                class="mb-2"
+                size="small"
+                :disabled="isPublishingGit || busy"
+                :placeholder="locale.t('gitCommitPlaceholder')"
+              />
+              <div class="grid grid-cols-2 gap-2">
+                <n-button size="small" :disabled="!canCommitGit" :loading="isPublishingGit && busy" @click="commitGit">
+                  {{ locale.t('gitCommit') }}
+                </n-button>
+                <n-button size="small" secondary :disabled="!canPushGit" :loading="isPublishingGit && busy" @click="pushGit">
+                  {{ locale.t('gitPush') }}
+                </n-button>
+              </div>
+
+              <p class="m-0 mt-2 text-xs leading-5 text-mebius-muted">
+                {{ pushStatusHint }}
+              </p>
+              <p v-if="gitStatus.hasRemote" class="m-0 mt-1 text-xs leading-5 text-mebius-muted">
+                {{ locale.t('gitRequiresRemote') }}
+              </p>
+
+              <div class="mt-3">
+                <div class="mb-1 flex items-center justify-between gap-2">
+                  <div class="text-xs font-medium text-mebius-muted">{{ locale.t('gitChangedFiles') }}</div>
+                  <div class="flex items-center gap-2">
+                    <n-button
+                      size="tiny"
+                      quaternary
+                      :disabled="!canStageAllGit"
+                      @click="stageAllGit"
+                    >
+                      {{ locale.t('gitStageAll') }}
+                    </n-button>
+                    <n-button
+                      size="tiny"
+                      quaternary
+                      :disabled="!canUnstageAllGit"
+                      @click="unstageAllGit"
+                    >
+                      {{ locale.t('gitUnstageAll') }}
+                    </n-button>
+                  </div>
+                </div>
+                <div
+                  v-if="gitStatus.files.length"
+                  class="max-h-36 space-y-1 overflow-y-auto rounded-xl border border-mebius-border/80 bg-slate-50 p-2"
+                >
+                  <div
+                    v-for="file in gitStatus.files"
+                    :key="file.path"
+                    class="flex items-center justify-between gap-2 text-xs"
+                  >
+                    <div class="min-w-0 flex-1">
+                      <div class="truncate">{{ file.path }}</div>
+                      <div class="text-[11px] text-mebius-muted">{{ gitStateLabel(file.state) }}</div>
+                    </div>
+                    <div class="flex shrink-0 items-center gap-2">
+                      <n-button
+                        v-if="canStageFile(file)"
+                        size="tiny"
+                        quaternary
+                        :disabled="busy || isPublishingGit"
+                        @click="stageGitFile(file.path)"
+                      >
+                        {{ locale.t('gitStage') }}
+                      </n-button>
+                      <n-button
+                        v-if="canUnstageFile(file)"
+                        size="tiny"
+                        quaternary
+                        :disabled="busy || isPublishingGit"
+                        @click="unstageGitFile(file.path)"
+                      >
+                        {{ locale.t('gitUnstage') }}
+                      </n-button>
+                    </div>
+                  </div>
+                </div>
+                <p v-else class="m-0 text-xs leading-5 text-mebius-muted">
+                  {{ locale.t('gitNoChanges') }}
+                </p>
+              </div>
+            </template>
+          </template>
+
+          <p v-if="gitPublishFeedback" class="m-0 mt-2 text-xs leading-5" :class="gitPublishFeedbackClass">
+            {{ gitPublishFeedback }}
+          </p>
         </section>
       </aside>
 
-      <section class="flex min-h-0 flex-col">
+      <section class="flex min-h-0 min-w-0 flex-col">
         <header class="flex items-center justify-between border-b border-mebius-border bg-white px-4 py-3">
-          <div>
-            <h2 class="m-0 text-base font-semibold">
-              {{ workspace.currentSession?.title ?? locale.t('noSessionSelected') }}
-            </h2>
-            <p class="m-0 text-xs text-mebius-muted">
-              {{ workspace.currentProject?.name ?? locale.t('createOrSelectProject') }}
-              · SSE {{ workspace.eventStatus }}
-            </p>
+          <div class="flex min-w-0 items-center gap-2">
+            <n-button
+              circle
+              quaternary
+              size="small"
+              :title="leftSidebarToggleLabel"
+              :aria-label="leftSidebarToggleLabel"
+              @click="toggleLeftSidebar"
+            >
+              <template #icon><n-icon><component :is="leftSidebarToggleIcon" /></n-icon></template>
+            </n-button>
+            <div class="min-w-0">
+              <h2 class="m-0 truncate text-base font-semibold">
+                {{ workspace.currentSession?.title ?? locale.t('noSessionSelected') }}
+              </h2>
+              <p class="m-0 truncate text-xs text-mebius-muted">
+                {{ workspace.currentProject?.name ?? locale.t('createOrSelectProject') }}
+                · SSE {{ workspace.eventStatus }}
+              </p>
+            </div>
           </div>
           <n-space>
             <n-button size="small" @click="openConnect('')" :disabled="!workspace.currentSession">
@@ -396,6 +864,16 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
             <n-button size="small" @click="approvals.loadPending">
               <template #icon><n-icon><RefreshCw /></n-icon></template>
               {{ locale.t('sync') }}
+            </n-button>
+            <n-button
+              circle
+              quaternary
+              size="small"
+              :title="rightSidebarToggleLabel"
+              :aria-label="rightSidebarToggleLabel"
+              @click="toggleRightSidebar"
+            >
+              <template #icon><n-icon><component :is="rightSidebarToggleIcon" /></n-icon></template>
             </n-button>
           </n-space>
         </header>
@@ -457,7 +935,18 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
                 <div class="mb-2 text-xs font-semibold uppercase tracking-wide text-mebius-muted">
                   {{ message.role }}
                 </div>
-                <pre class="m-0 whitespace-pre-wrap text-sm leading-6">{{ message.content }}</pre>
+                <MessageContent :role="message.role" :content="message.content" />
+              </div>
+
+              <div
+                v-if="agentActivityText"
+                class="mb-3 flex items-center gap-2 rounded border p-3 text-sm"
+                :class="agentActivityToneClass"
+              >
+                <n-icon v-if="workspace.agentActivity?.status !== 'failed'" class="shrink-0 animate-spin">
+                  <RefreshCw />
+                </n-icon>
+                <span>{{ agentActivityText }}</span>
               </div>
 
               <section v-if="workspace.activePlan" class="rounded border border-mebius-border bg-white p-3">
@@ -522,7 +1011,23 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
         </div>
       </section>
 
-      <aside class="flex min-h-0 flex-col border-l border-mebius-border bg-white">
+      <aside
+        class="workspace-side-panel workspace-side-panel--right relative flex min-h-0 min-w-0 flex-col overflow-hidden border-l border-mebius-border bg-white"
+        :class="{ 'is-collapsed': rightSidebarCollapsed, 'is-overlay-open': rightOverlayOpen }"
+        :inert="rightSidebarInert"
+        :aria-hidden="rightSidebarInert"
+      >
+        <n-button
+          v-if="isCompactViewport"
+          class="absolute right-2 top-2 z-10"
+          circle
+          quaternary
+          :title="locale.t('closeSidebar')"
+          :aria-label="locale.t('closeSidebar')"
+          @click="closeSidebars"
+        >
+          <template #icon><n-icon><X /></n-icon></template>
+        </n-button>
         <n-tabs type="line" animated class="min-h-0 flex-1" pane-class="h-full">
           <n-tab-pane name="files" :tab="locale.t('files')">
             <div class="grid h-[calc(100vh-48px)] grid-rows-[250px_1fr]">
@@ -657,3 +1162,64 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
     </n-modal>
   </main>
 </template>
+
+<style scoped>
+.workspace-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  height: 100%;
+  position: relative;
+}
+
+.workspace-side-panel {
+  min-width: 0;
+}
+
+@media (min-width: 1024px) {
+  .workspace-shell {
+    grid-template-columns:
+      var(--left-sidebar-width) minmax(420px, 1fr)
+      var(--right-sidebar-width);
+  }
+
+  .workspace-side-panel {
+    position: relative;
+    transition: opacity 120ms ease;
+  }
+
+  .workspace-side-panel.is-collapsed {
+    opacity: 0;
+    pointer-events: none;
+  }
+}
+
+@media (max-width: 1023px) {
+  .workspace-side-panel {
+    bottom: 0;
+    max-width: 90vw;
+    position: fixed;
+    top: 0;
+    transition:
+      box-shadow 160ms ease,
+      transform 160ms ease;
+    width: 320px;
+    z-index: 30;
+  }
+
+  .workspace-side-panel--left {
+    left: 0;
+    transform: translateX(-100%);
+  }
+
+  .workspace-side-panel--right {
+    right: 0;
+    transform: translateX(100%);
+    width: 380px;
+  }
+
+  .workspace-side-panel.is-overlay-open {
+    box-shadow: 0 24px 80px rgb(15 23 42 / 18%);
+    transform: translateX(0);
+  }
+}
+</style>

@@ -3,9 +3,12 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { FindOptionsWhere, Repository } from 'typeorm';
 import { MessageRole } from '../../common/enums/message-role.enum';
 import { SessionStatus } from '../../common/enums/session-status.enum';
+import { ApprovalStatus, ToolCallStatus } from '../../common/enums/tool-status.enum';
 import { EventsService } from '../events/events.service';
 import { ModelConfigsService, SanitizedModelConfig } from '../model-configs/model-configs.service';
 import { ProjectsService } from '../projects/projects.service';
+import { ToolApproval } from '../tools/tool-approval.entity';
+import { ToolCall } from '../tools/tool-call.entity';
 import { User } from '../users/user.entity';
 import { ConversationSummary } from './conversation-summary.entity';
 import { CreateMessageDto } from './dto/create-message.dto';
@@ -21,6 +24,10 @@ export interface SessionView {
   title: string;
   status: SessionStatus;
   activeModelConfig: SanitizedModelConfig | null;
+  agentActivity?: {
+    status: 'using_tools' | 'waiting_for_approval';
+    toolName?: string;
+  } | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -41,6 +48,10 @@ export class SessionsService {
     private readonly messages: Repository<Message>,
     @InjectRepository(ConversationSummary)
     private readonly summaries: Repository<ConversationSummary>,
+    @InjectRepository(ToolCall)
+    private readonly toolCalls: Repository<ToolCall>,
+    @InjectRepository(ToolApproval)
+    private readonly approvals: Repository<ToolApproval>,
     private readonly projects: ProjectsService,
     private readonly modelConfigs: ModelConfigsService,
     private readonly events: EventsService,
@@ -77,7 +88,9 @@ export class SessionsService {
   }
 
   async get(ownerId: string, sessionId: string): Promise<SessionView> {
-    return this.toView(await this.findOwned(ownerId, sessionId));
+    const session = await this.findOwned(ownerId, sessionId);
+    const agentActivity = await this.getAgentActivity(session.id);
+    return this.toView(session, agentActivity);
   }
 
   async listForProject(
@@ -162,6 +175,17 @@ export class SessionsService {
     });
   }
 
+  async findPendingApprovalTool(sessionId: string): Promise<ToolApproval | null> {
+    return this.approvals.findOne({
+      where: {
+        status: ApprovalStatus.Pending,
+        toolCall: { session: { id: sessionId }, status: ToolCallStatus.PendingApproval },
+      },
+      relations: { toolCall: true },
+      order: { createdAt: 'DESC' },
+    });
+  }
+
   async handleCommand(ownerId: string, sessionId: string, dto: SlashCommandDto): Promise<unknown> {
     const session = await this.findOwned(ownerId, sessionId);
     const [name, ...parts] = dto.command.trim().split(/\s+/);
@@ -234,7 +258,10 @@ export class SessionsService {
     return summary;
   }
 
-  private toView(session: Session): SessionView {
+  private toView(
+    session: Session,
+    agentActivity: SessionView['agentActivity'] = null,
+  ): SessionView {
     return {
       id: session.id,
       projectId: session.project.id,
@@ -243,9 +270,36 @@ export class SessionsService {
       activeModelConfig: session.activeModelConfig
         ? this.modelConfigs.sanitize(session.activeModelConfig)
         : null,
+      agentActivity,
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
     };
+  }
+
+  private async getAgentActivity(sessionId: string): Promise<SessionView['agentActivity']> {
+    const pendingApproval = await this.findPendingApprovalTool(sessionId);
+    if (pendingApproval?.toolCall) {
+      return {
+        status: 'waiting_for_approval',
+        toolName: pendingApproval.toolCall.name,
+      };
+    }
+
+    const runningTool = await this.toolCalls.findOne({
+      where: {
+        session: { id: sessionId },
+        status: ToolCallStatus.Running,
+      },
+      order: { updatedAt: 'DESC' },
+    });
+    if (runningTool) {
+      return {
+        status: 'using_tools',
+        toolName: runningTool.name,
+      };
+    }
+
+    return null;
   }
 
   private async connectModel(

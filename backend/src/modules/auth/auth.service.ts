@@ -5,6 +5,11 @@ import { compare, hash } from 'bcryptjs';
 import { UserRole } from '../../common/enums/user-role.enum';
 import { JwtPayload } from '../../common/types/authenticated-user';
 import { User } from '../users/user.entity';
+import {
+  normalizeUserPreferences,
+  UserPreferences,
+  UserPreferencesPatch,
+} from '../users/user-preferences';
 import { UsersService } from '../users/users.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
@@ -14,6 +19,7 @@ export interface PublicUser {
   email: string;
   name: string;
   role: UserRole;
+  preferences: UserPreferences;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -48,6 +54,14 @@ export class AuthService {
     return { user: this.publicUser(user), accessToken: await this.sign(user) };
   }
 
+  async currentUser(userId: string): Promise<PublicUser> {
+    return this.publicUser(await this.users.findById(userId));
+  }
+
+  async updatePreferences(userId: string, patch: UserPreferencesPatch): Promise<PublicUser> {
+    return this.publicUser(await this.users.updatePreferences(userId, patch));
+  }
+
   async sign(user: User): Promise<string> {
     const payload: JwtPayload = {
       sub: user.id,
@@ -63,6 +77,7 @@ export class AuthService {
       email: user.email,
       name: user.name,
       role: user.role,
+      preferences: normalizeUserPreferences(user.preferences),
       createdAt: user.createdAt,
       updatedAt: user.updatedAt,
     };

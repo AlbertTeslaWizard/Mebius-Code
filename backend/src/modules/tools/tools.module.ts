@@ -1,6 +1,7 @@
-import { Module } from '@nestjs/common';
+import { forwardRef, Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { CommonModule } from '../../common/common.module';
+import { AgentModule } from '../agent/agent.module';
 import { AuditModule } from '../audit/audit.module';
 import { EventsModule } from '../events/events.module';
 import { SessionsModule } from '../sessions/sessions.module';
@@ -16,6 +17,7 @@ import { ToolsService } from './tools.service';
   imports: [
     TypeOrmModule.forFeature([ToolCall, ToolApproval, FilePatch, CommandRun]),
     CommonModule,
+    forwardRef(() => AgentModule),
     AuditModule,
     EventsModule,
     SessionsModule,
@@ -26,4 +28,3 @@ import { ToolsService } from './tools.service';
   exports: [ToolsService],
 })
 export class ToolsModule {}
-

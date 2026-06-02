@@ -1,7 +1,10 @@
 import { Repository } from 'typeorm';
+import { ApprovalStatus, ToolCallStatus } from '../../common/enums/tool-status.enum';
 import { SessionStatus } from '../../common/enums/session-status.enum';
 import { ModelConfigsService } from '../model-configs/model-configs.service';
 import { ProjectsService } from '../projects/projects.service';
+import { ToolApproval } from '../tools/tool-approval.entity';
+import { ToolCall } from '../tools/tool-call.entity';
 import { ConversationSummary } from './conversation-summary.entity';
 import { Message } from './message.entity';
 import { Session } from './session.entity';
@@ -16,6 +19,12 @@ describe('SessionsService', () => {
   } as unknown as jest.Mocked<Repository<Session>>;
   const messages = {} as jest.Mocked<Repository<Message>>;
   const summaries = {} as jest.Mocked<Repository<ConversationSummary>>;
+  const toolCalls = {
+    findOne: jest.fn(),
+  } as unknown as jest.Mocked<Repository<ToolCall>>;
+  const approvals = {
+    findOne: jest.fn(),
+  } as unknown as jest.Mocked<Repository<ToolApproval>>;
   const projects = {
     findOwned: jest.fn(),
   } as unknown as jest.Mocked<ProjectsService>;
@@ -88,6 +97,8 @@ describe('SessionsService', () => {
     sessions,
     messages,
     summaries,
+    toolCalls,
+    approvals,
     projects,
     modelConfigs,
     events as never,
@@ -98,6 +109,8 @@ describe('SessionsService', () => {
     projects.findOwned.mockResolvedValue({ id: 'project-1' } as never);
     sessions.findAndCount.mockResolvedValue([[sessionFixture()], 1]);
     sessions.findOne.mockResolvedValue(sessionFixture());
+    approvals.findOne.mockResolvedValue(null);
+    toolCalls.findOne.mockResolvedValue(null);
   });
 
   it('lists sessions for an owned project with pagination and status filters', async () => {
@@ -145,6 +158,40 @@ describe('SessionsService', () => {
       }),
     );
     expect(result.activeModelConfig).not.toHaveProperty('encryptedApiKey');
+  });
+
+  it('returns waiting approval activity when the session has a pending approval', async () => {
+    approvals.findOne.mockResolvedValue({
+      toolCall: { name: 'run_command' },
+    } as ToolApproval);
+
+    const result = await service.get('owner-1', 'session-1');
+
+    expect(result.agentActivity).toEqual({
+      status: 'waiting_for_approval',
+      toolName: 'run_command',
+    });
+    expect(approvals.findOne).toHaveBeenCalledWith({
+      where: {
+        status: ApprovalStatus.Pending,
+        toolCall: { session: { id: 'session-1' }, status: ToolCallStatus.PendingApproval },
+      },
+      relations: { toolCall: true },
+      order: { createdAt: 'DESC' },
+    });
+  });
+
+  it('returns using tools activity when the session has a running tool call', async () => {
+    toolCalls.findOne.mockResolvedValue({
+      name: 'run_command',
+    } as ToolCall);
+
+    const result = await service.get('owner-1', 'session-1');
+
+    expect(result.agentActivity).toEqual({
+      status: 'using_tools',
+      toolName: 'run_command',
+    });
   });
 
   it('returns provider search results for /connect queries', async () => {

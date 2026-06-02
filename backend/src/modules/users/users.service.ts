@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { UserRole } from '../../common/enums/user-role.enum';
 import { User } from './user.entity';
+import { mergeUserPreferences, UserPreferencesPatch } from './user-preferences';
 
 @Injectable()
 export class UsersService {
@@ -52,5 +53,10 @@ export class UsersService {
       .where('user.email = :email', { email: email.toLowerCase() })
       .getOne();
   }
-}
 
+  async updatePreferences(id: string, patch: UserPreferencesPatch): Promise<User> {
+    const user = await this.findById(id);
+    user.preferences = mergeUserPreferences(user.preferences, patch);
+    return this.users.save(user);
+  }
+}

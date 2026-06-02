@@ -3,6 +3,8 @@ import { RequestWithUser } from '../../common/types/request-with-user';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { UsersService } from '../users/users.service';
 import { CreateProjectDto } from './dto/create-project.dto';
+import { GitCommitDto } from './dto/git-commit.dto';
+import { GitPathDto } from './dto/git-path.dto';
 import { ImportGitDto } from './dto/import-git.dto';
 import { ProjectsService } from './projects.service';
 
@@ -33,6 +35,59 @@ export class ProjectsController {
   ) {
     const owner = await this.users.findById(request.user.sub);
     return this.projects.importGit(owner, id, dto);
+  }
+
+  @Get(':id/git/status')
+  gitStatus(@Req() request: RequestWithUser, @Param('id') id: string) {
+    return this.projects.gitStatus(request.user.sub, id);
+  }
+
+  @Post(':id/git/stage')
+  async gitStage(
+    @Req() request: RequestWithUser,
+    @Param('id') id: string,
+    @Body() dto: GitPathDto,
+  ) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.projects.stageGitPath(owner, id, dto.path);
+  }
+
+  @Post(':id/git/unstage')
+  async gitUnstage(
+    @Req() request: RequestWithUser,
+    @Param('id') id: string,
+    @Body() dto: GitPathDto,
+  ) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.projects.unstageGitPath(owner, id, dto.path);
+  }
+
+  @Post(':id/git/stage-all')
+  async gitStageAll(@Req() request: RequestWithUser, @Param('id') id: string) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.projects.stageAllGit(owner, id);
+  }
+
+  @Post(':id/git/unstage-all')
+  async gitUnstageAll(@Req() request: RequestWithUser, @Param('id') id: string) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.projects.unstageAllGit(owner, id);
+  }
+
+  @Post(':id/git/commit')
+  async gitCommit(
+    @Req() request: RequestWithUser,
+    @Param('id') id: string,
+    @Body() dto: GitCommitDto,
+  ) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.projects.commitGit(owner, id, dto);
+  }
+
+  @Post(':id/git/push')
+  async gitPush(@Req() request: RequestWithUser, @Param('id') id: string) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.projects.pushGit(owner, id);
   }
 
   @Delete(':id')

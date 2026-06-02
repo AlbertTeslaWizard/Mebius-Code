@@ -19,6 +19,50 @@ export interface TreeNode {
   children?: TreeNode[];
 }
 
+export interface GitRemoteInfo {
+  name: string;
+  fetchUrl?: string;
+  pushUrl?: string;
+}
+
+export interface GitStatusFile {
+  path: string;
+  indexStatus: string;
+  workTreeStatus: string;
+  state: 'untracked' | 'staged' | 'modified' | 'deleted' | 'renamed' | 'conflicted' | 'unknown';
+}
+
+export interface GitStatusView {
+  isGitRepo: boolean;
+  branch: string | null;
+  tracking: string | null;
+  ahead: number;
+  behind: number;
+  hasRemote: boolean;
+  remotes: GitRemoteInfo[];
+  files: GitStatusFile[];
+  counts: {
+    staged: number;
+    unstaged: number;
+    untracked: number;
+  };
+}
+
+export interface GitCommitResult {
+  summary: string;
+  commitSha: string;
+}
+
+export interface GitActionResult {
+  summary: string;
+}
+
+export interface GitPushResult {
+  summary: string;
+  branch: string | null;
+  remote: string | null;
+}
+
 @Injectable()
 export class ProjectsService {
   constructor(
@@ -141,6 +185,162 @@ export class ProjectsService {
     return this.readTree(projectRoot, root, depth);
   }
 
+  async gitStatus(ownerId: string, projectId: string): Promise<GitStatusView> {
+    const project = await this.findOwned(ownerId, projectId);
+    const projectRoot = await this.ensureCurrentWorkspacePath(project);
+    const isGitRepo = await this.isGitRepository(projectRoot);
+    if (!isGitRepo) {
+      return {
+        isGitRepo: false,
+        branch: null,
+        tracking: null,
+        ahead: 0,
+        behind: 0,
+        hasRemote: false,
+        remotes: [],
+        files: [],
+        counts: { staged: 0, unstaged: 0, untracked: 0 },
+      };
+    }
+
+    const [statusResult, remotes] = await Promise.all([
+      this.runGit(projectRoot, ['status', '--short', '--branch']),
+      this.listGitRemotes(projectRoot),
+    ]);
+    return this.parseGitStatus(statusResult.stdout, remotes);
+  }
+
+  async stageGitPath(owner: User, projectId: string, filePath: string): Promise<GitActionResult> {
+    const project = await this.findOwned(owner.id, projectId);
+    const projectRoot = await this.ensureCurrentWorkspacePath(project);
+    await this.assertGitRepository(projectRoot);
+    const safePath = this.paths.normalizeRelativePath(filePath);
+
+    await this.runGit(projectRoot, ['add', '--', safePath]);
+    await this.audit.record({
+      actor: owner,
+      action: 'project.git_staged',
+      resourceType: 'project',
+      resourceId: project.id,
+      metadata: { path: safePath },
+    });
+    return {
+      summary: `Staged ${safePath}.`,
+    };
+  }
+
+  async unstageGitPath(owner: User, projectId: string, filePath: string): Promise<GitActionResult> {
+    const project = await this.findOwned(owner.id, projectId);
+    const projectRoot = await this.ensureCurrentWorkspacePath(project);
+    await this.assertGitRepository(projectRoot);
+    const safePath = this.paths.normalizeRelativePath(filePath);
+
+    await this.runGit(projectRoot, ['restore', '--staged', '--', safePath]);
+    await this.audit.record({
+      actor: owner,
+      action: 'project.git_unstaged',
+      resourceType: 'project',
+      resourceId: project.id,
+      metadata: { path: safePath },
+    });
+    return {
+      summary: `Unstaged ${safePath}.`,
+    };
+  }
+
+  async stageAllGit(owner: User, projectId: string): Promise<GitActionResult> {
+    const project = await this.findOwned(owner.id, projectId);
+    const projectRoot = await this.ensureCurrentWorkspacePath(project);
+    await this.assertGitRepository(projectRoot);
+
+    await this.runGit(projectRoot, ['add', '-A']);
+    await this.audit.record({
+      actor: owner,
+      action: 'project.git_staged_all',
+      resourceType: 'project',
+      resourceId: project.id,
+    });
+    return {
+      summary: 'Staged all changes.',
+    };
+  }
+
+  async unstageAllGit(owner: User, projectId: string): Promise<GitActionResult> {
+    const project = await this.findOwned(owner.id, projectId);
+    const projectRoot = await this.ensureCurrentWorkspacePath(project);
+    await this.assertGitRepository(projectRoot);
+
+    await this.runGit(projectRoot, ['restore', '--staged', '.']);
+    await this.audit.record({
+      actor: owner,
+      action: 'project.git_unstaged_all',
+      resourceType: 'project',
+      resourceId: project.id,
+    });
+    return {
+      summary: 'Unstaged all changes.',
+    };
+  }
+
+  async commitGit(
+    owner: User,
+    projectId: string,
+    input: { message: string },
+  ): Promise<GitCommitResult> {
+    const message = input.message.trim();
+    if (!message) {
+      throw new BadRequestException('Commit message cannot be empty.');
+    }
+
+    const project = await this.findOwned(owner.id, projectId);
+    const projectRoot = await this.ensureCurrentWorkspacePath(project);
+    await this.assertGitRepository(projectRoot);
+    const status = await this.gitStatus(owner.id, projectId);
+    if (status.counts.staged === 0) {
+      throw new BadRequestException('There are no staged changes to commit.');
+    }
+
+    const commitResult = await this.runGit(projectRoot, ['commit', '-m', message]);
+    const commitSha = (await this.runGit(projectRoot, ['rev-parse', 'HEAD'])).stdout.trim();
+    await this.audit.record({
+      actor: owner,
+      action: 'project.git_committed',
+      resourceType: 'project',
+      resourceId: project.id,
+      metadata: { message, commitSha },
+    });
+    return {
+      summary: this.compactCommandOutput(commitResult.stdout, commitResult.stderr) || 'Commit created.',
+      commitSha,
+    };
+  }
+
+  async pushGit(owner: User, projectId: string): Promise<GitPushResult> {
+    const project = await this.findOwned(owner.id, projectId);
+    const projectRoot = await this.ensureCurrentWorkspacePath(project);
+    await this.assertGitRepository(projectRoot);
+
+    const status = await this.gitStatus(owner.id, projectId);
+    if (!status.hasRemote || status.remotes.length === 0) {
+      throw new BadRequestException('This repository has no remote configured.');
+    }
+
+    const pushResult = await this.runGit(projectRoot, ['push']);
+    const remote = status.remotes[0]?.name ?? null;
+    await this.audit.record({
+      actor: owner,
+      action: 'project.git_pushed',
+      resourceType: 'project',
+      resourceId: project.id,
+      metadata: { remote, branch: status.branch },
+    });
+    return {
+      summary: this.compactCommandOutput(pushResult.stdout, pushResult.stderr) || 'Push completed.',
+      branch: status.branch,
+      remote,
+    };
+  }
+
   private async ensureCurrentWorkspacePath(project: Project): Promise<string> {
     const workspacePath = await this.paths.ensureProjectRoot(project.id);
 
@@ -203,6 +403,158 @@ export class ProjectsService {
         } else {
           reject(new BadRequestException(stderr || `git clone failed with exit code ${code}`));
         }
+      });
+    });
+  }
+
+  private async assertGitRepository(projectRoot: string): Promise<void> {
+    if (!(await this.isGitRepository(projectRoot))) {
+      throw new BadRequestException('This project is not a Git repository.');
+    }
+  }
+
+  private async isGitRepository(projectRoot: string): Promise<boolean> {
+    try {
+      const result = await this.runGit(projectRoot, ['rev-parse', '--is-inside-work-tree'], true);
+      return result.exitCode === 0 && result.stdout.trim() === 'true';
+    } catch {
+      return false;
+    }
+  }
+
+  private async listGitRemotes(projectRoot: string): Promise<GitRemoteInfo[]> {
+    const result = await this.runGit(projectRoot, ['remote', '-v'], true);
+    if (result.exitCode !== 0) {
+      return [];
+    }
+
+    const remotes = new Map<string, GitRemoteInfo>();
+    result.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .forEach((line) => {
+        const match = line.match(/^(\S+)\s+(\S+)\s+\((fetch|push)\)$/);
+        if (!match) return;
+        const [, name, url, kind] = match;
+        const existing = remotes.get(name) ?? { name };
+        if (kind === 'fetch') {
+          existing.fetchUrl = url;
+        } else {
+          existing.pushUrl = url;
+        }
+        remotes.set(name, existing);
+      });
+
+    return [...remotes.values()];
+  }
+
+  private parseGitStatus(output: string, remotes: GitRemoteInfo[]): GitStatusView {
+    const lines = output.split(/\r?\n/).filter(Boolean);
+    const branchLine = lines[0]?.startsWith('## ') ? lines.shift()?.slice(3) ?? '' : '';
+    const { branch, tracking, ahead, behind } = this.parseBranchLine(branchLine);
+    const files = lines.map((line) => this.parseStatusLine(line));
+
+    return {
+      isGitRepo: true,
+      branch,
+      tracking,
+      ahead,
+      behind,
+      hasRemote: remotes.length > 0,
+      remotes,
+      files,
+      counts: {
+        staged: files.filter((file) => file.indexStatus !== ' ' && file.indexStatus !== '?').length,
+        unstaged: files.filter((file) => file.workTreeStatus !== ' ' && file.workTreeStatus !== '?').length,
+        untracked: files.filter((file) => file.state === 'untracked').length,
+      },
+    };
+  }
+
+  private parseBranchLine(value: string): {
+    branch: string | null;
+    tracking: string | null;
+    ahead: number;
+    behind: number;
+  } {
+    if (!value) {
+      return { branch: null, tracking: null, ahead: 0, behind: 0 };
+    }
+
+    const [head, divergencePart] = value.split(' [', 2);
+    const [branchPart, trackingPart] = head.split('...', 2);
+    const divergence = divergencePart?.replace(/\]$/, '') ?? '';
+    const ahead = Number(divergence.match(/ahead (\d+)/)?.[1] ?? 0);
+    const behind = Number(divergence.match(/behind (\d+)/)?.[1] ?? 0);
+    return {
+      branch: branchPart || null,
+      tracking: trackingPart || null,
+      ahead,
+      behind,
+    };
+  }
+
+  private parseStatusLine(line: string): GitStatusFile {
+    const indexStatus = line[0] ?? ' ';
+    const workTreeStatus = line[1] ?? ' ';
+    const path = line.slice(3).trim();
+    return {
+      path,
+      indexStatus,
+      workTreeStatus,
+      state: this.resolveGitFileState(indexStatus, workTreeStatus),
+    };
+  }
+
+  private resolveGitFileState(indexStatus: string, workTreeStatus: string): GitStatusFile['state'] {
+    if (indexStatus === '?' && workTreeStatus === '?') return 'untracked';
+    if (indexStatus === 'U' || workTreeStatus === 'U') return 'conflicted';
+    if (indexStatus === 'R' || workTreeStatus === 'R') return 'renamed';
+    if (indexStatus === 'D' || workTreeStatus === 'D') return 'deleted';
+    if (indexStatus !== ' ' && indexStatus !== '?') return 'staged';
+    if (workTreeStatus === 'M') return 'modified';
+    return 'unknown';
+  }
+
+  private compactCommandOutput(stdout: string, stderr: string): string {
+    return [stdout.trim(), stderr.trim()].filter(Boolean).join('\n').trim();
+  }
+
+  private runGit(
+    cwd: string,
+    args: string[],
+    allowFailure = false,
+  ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    return new Promise((resolvePromise, reject) => {
+      const child = spawn('git', args, { cwd, shell: false });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk: Buffer) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+      child.on('error', (error) => {
+        if (allowFailure) {
+          resolvePromise({ exitCode: 1, stdout, stderr: stderr + error.message });
+          return;
+        }
+        reject(new BadRequestException(error.message));
+      });
+      child.on('close', (code) => {
+        const exitCode = code ?? 1;
+        const result = {
+          exitCode,
+          stdout: stdout.trim(),
+          stderr: stderr.trim(),
+        };
+        if (exitCode === 0 || allowFailure) {
+          resolvePromise(result);
+          return;
+        }
+        reject(new BadRequestException(result.stderr || result.stdout || `git ${args[0]} failed.`));
       });
     });
   }

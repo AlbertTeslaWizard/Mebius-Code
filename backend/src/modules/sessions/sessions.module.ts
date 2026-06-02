@@ -4,6 +4,8 @@ import { AuthModule } from '../auth/auth.module';
 import { EventsModule } from '../events/events.module';
 import { ModelConfigsModule } from '../model-configs/model-configs.module';
 import { ProjectsModule } from '../projects/projects.module';
+import { ToolApproval } from '../tools/tool-approval.entity';
+import { ToolCall } from '../tools/tool-call.entity';
 import { UsersModule } from '../users/users.module';
 import { ConversationSummary } from './conversation-summary.entity';
 import { Message } from './message.entity';
@@ -13,7 +15,7 @@ import { SessionsService } from './sessions.service';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Session, Message, ConversationSummary]),
+    TypeOrmModule.forFeature([Session, Message, ConversationSummary, ToolCall, ToolApproval]),
     AuthModule,
     EventsModule,
     UsersModule,
@@ -25,4 +27,3 @@ import { SessionsService } from './sessions.service';
   exports: [SessionsService, TypeOrmModule],
 })
 export class SessionsModule {}
-

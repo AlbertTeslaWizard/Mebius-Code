@@ -1,17 +1,14 @@
-import { Body, Controller, Get, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Patch, Post, Req, UseGuards } from '@nestjs/common';
 import { RequestWithUser } from '../../common/types/request-with-user';
-import { UsersService } from '../users/users.service';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
+import { UpdateUserPreferencesDto } from './dto/update-user-preferences.dto';
 import { JwtAuthGuard } from './jwt-auth.guard';
 
 @Controller('auth')
 export class AuthController {
-  constructor(
-    private readonly auth: AuthService,
-    private readonly users: UsersService,
-  ) {}
+  constructor(private readonly auth: AuthService) {}
 
   @Post('register')
   register(@Body() dto: RegisterDto) {
@@ -26,7 +23,12 @@ export class AuthController {
   @Get('me')
   @UseGuards(JwtAuthGuard)
   me(@Req() request: RequestWithUser) {
-    return this.users.findById(request.user.sub);
+    return this.auth.currentUser(request.user.sub);
+  }
+
+  @Patch('me/preferences')
+  @UseGuards(JwtAuthGuard)
+  updatePreferences(@Req() request: RequestWithUser, @Body() dto: UpdateUserPreferencesDto) {
+    return this.auth.updatePreferences(request.user.sub, dto);
   }
 }
-

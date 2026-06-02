@@ -1,8 +1,22 @@
+export interface LayoutPreferences {
+  leftSidebarCollapsed: boolean;
+  rightSidebarCollapsed: boolean;
+}
+
+export interface UserPreferences {
+  layout: LayoutPreferences;
+}
+
+export type UserPreferencesPatch = {
+  layout?: Partial<LayoutPreferences>;
+};
+
 export interface User {
   id: string;
   email: string;
   name: string;
   role: 'user' | 'admin';
+  preferences: UserPreferences;
   createdAt: string;
   updatedAt: string;
 }
@@ -47,6 +61,10 @@ export interface Session {
   title: string;
   status: string;
   activeModelConfig: ModelConfig | null;
+  agentActivity?: {
+    status: 'using_tools' | 'waiting_for_approval';
+    toolName?: string;
+  } | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -57,6 +75,7 @@ export interface Message {
   content: string;
   metadata: Record<string, unknown>;
   createdAt: string;
+  streaming?: boolean;
 }
 
 export interface TreeNode {
@@ -70,6 +89,50 @@ export interface ProjectFile {
   path: string;
   content: string;
   size: number;
+}
+
+export interface GitRemoteInfo {
+  name: string;
+  fetchUrl?: string;
+  pushUrl?: string;
+}
+
+export interface GitStatusFile {
+  path: string;
+  indexStatus: string;
+  workTreeStatus: string;
+  state: 'untracked' | 'staged' | 'modified' | 'deleted' | 'renamed' | 'conflicted' | 'unknown';
+}
+
+export interface GitStatus {
+  isGitRepo: boolean;
+  branch: string | null;
+  tracking: string | null;
+  ahead: number;
+  behind: number;
+  hasRemote: boolean;
+  remotes: GitRemoteInfo[];
+  files: GitStatusFile[];
+  counts: {
+    staged: number;
+    unstaged: number;
+    untracked: number;
+  };
+}
+
+export interface GitCommitResult {
+  summary: string;
+  commitSha: string;
+}
+
+export interface GitActionResult {
+  summary: string;
+}
+
+export interface GitPushResult {
+  summary: string;
+  branch: string | null;
+  remote: string | null;
 }
 
 export interface ListResponse<T> {

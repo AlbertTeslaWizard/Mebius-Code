@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { forwardRef, Inject, Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { spawn } from 'child_process';
 import { existsSync } from 'fs';
@@ -14,6 +14,8 @@ import {
 import { CommandPolicyService } from '../../common/security/command-policy.service';
 import { PathSandboxService } from '../../common/security/path-sandbox.service';
 import { AuditService } from '../audit/audit.service';
+import { PendingToolResumeContext } from '../agent/agent-resume.types';
+import { AgentService } from '../agent/agent.service';
 import { EventsService } from '../events/events.service';
 import { Project } from '../projects/project.entity';
 import { SessionsService } from '../sessions/sessions.service';
@@ -41,6 +43,8 @@ export class ToolsService {
     private readonly commandPolicy: CommandPolicyService,
     private readonly audit: AuditService,
     private readonly events: EventsService,
+    @Inject(forwardRef(() => AgentService))
+    private readonly agent: AgentService,
   ) {}
 
   async requestOrExecute(input: {
@@ -48,6 +52,7 @@ export class ToolsService {
     sessionId: string;
     name: string;
     args: Record<string, unknown>;
+    resumeContext?: PendingToolResumeContext;
   }): Promise<ToolCall> {
     const session = await this.sessions.findOwned(input.owner.id, input.sessionId);
     const requiresApproval = APPROVAL_REQUIRED_TOOLS.has(input.name);
@@ -58,6 +63,7 @@ export class ToolsService {
         arguments: input.args,
         requiresApproval,
         status: requiresApproval ? ToolCallStatus.PendingApproval : ToolCallStatus.Running,
+        resultText: requiresApproval ? this.encodeResumeContext(input.resumeContext) : undefined,
       }),
     );
 
@@ -109,8 +115,14 @@ export class ToolsService {
     await this.approvals.save(approval);
 
     const toolCall = approval.toolCall;
+    const resumeContext = this.decodeResumeContext(toolCall.resultText);
     toolCall.status = ToolCallStatus.Running;
     await this.toolCalls.save(toolCall);
+    this.events.publish(toolCall.session.id, 'agent_status', {
+      status: 'using_tools',
+      toolName: toolCall.name,
+      tools: [toolCall.name],
+    });
 
     try {
       const result = await this.executeTool(toolCall, owner);
@@ -122,21 +134,69 @@ export class ToolsService {
         name: saved.name,
         result,
       });
+      if (resumeContext) {
+        await this.agent.recordToolResultMessage(
+          saved.session,
+          resumeContext.approvedToolCallId,
+          saved.name,
+          saved.status,
+          result,
+        );
+      }
+      if (resumeContext) {
+        void this.agent.resumeAfterToolApproval(owner, saved, resumeContext).catch(() => undefined);
+      }
       return saved;
     } catch (error) {
       toolCall.status = ToolCallStatus.Failed;
       toolCall.resultText = error instanceof Error ? error.message : 'Tool execution failed.';
-      return this.toolCalls.save(toolCall);
+      const saved = await this.toolCalls.save(toolCall);
+      this.events.publish(toolCall.session.id, 'tool_call_result', {
+        toolCallId: saved.id,
+        name: saved.name,
+        result: saved.resultText,
+        status: saved.status,
+      });
+      if (resumeContext) {
+        await this.agent.recordToolResultMessage(
+          saved.session,
+          resumeContext.approvedToolCallId,
+          saved.name,
+          saved.status,
+          saved.resultText ?? 'Tool execution failed.',
+        );
+      }
+      this.events.publish(toolCall.session.id, 'agent_status', {
+        status: 'failed',
+        message: saved.resultText,
+      });
+      this.events.complete(toolCall.session.id);
+      return saved;
     }
   }
 
   async reject(owner: User, approvalId: string): Promise<ToolApproval> {
     const approval = await this.findPendingApproval(owner.id, approvalId);
+    const resumeContext = this.decodeResumeContext(approval.toolCall.resultText);
     approval.status = ApprovalStatus.Rejected;
     approval.approver = owner;
     approval.toolCall.status = ToolCallStatus.Rejected;
     await this.toolCalls.save(approval.toolCall);
-    return this.approvals.save(approval);
+    const saved = await this.approvals.save(approval);
+    if (resumeContext) {
+      await this.agent.recordToolResultMessage(
+        approval.toolCall.session,
+        resumeContext.approvedToolCallId,
+        approval.toolCall.name,
+        approval.toolCall.status,
+        `Tool ${approval.toolCall.name} was rejected by the user.`,
+      );
+    }
+    this.events.publish(approval.toolCall.session.id, 'agent_status', {
+      status: 'completed',
+    });
+    this.events.complete(approval.toolCall.session.id);
+    return saved;
   }
 
   private async executeTool(toolCall: ToolCall, owner: User): Promise<string> {
@@ -387,5 +447,29 @@ export class ToolsService {
       });
     });
   }
-}
 
+  private encodeResumeContext(resumeContext?: PendingToolResumeContext): string | undefined {
+    if (!resumeContext) {
+      return undefined;
+    }
+    return JSON.stringify({ kind: 'pending_tool_resume', payload: resumeContext });
+  }
+
+  private decodeResumeContext(value?: string): PendingToolResumeContext | null {
+    if (!value) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(value) as {
+        kind?: string;
+        payload?: PendingToolResumeContext;
+      };
+      if (parsed.kind !== 'pending_tool_resume' || !parsed.payload) {
+        return null;
+      }
+      return parsed.payload;
+    } catch {
+      return null;
+    }
+  }
+}

@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
 import { request } from '../api/http';
 import type { Approval } from '../api/types';
+import { useWorkspaceStore } from './workspace';
 
 interface ApprovalState {
   pending: Approval[];
@@ -22,12 +23,20 @@ export const useApprovalStore = defineStore('approvals', {
       }
     },
     async approve(id: string) {
+      const workspace = useWorkspaceStore();
       await request(`/approvals/${id}/approve`, { method: 'POST' });
       await this.loadPending();
+      if (workspace.currentSession) {
+        await workspace.selectSession(workspace.currentSession);
+      }
     },
     async reject(id: string) {
+      const workspace = useWorkspaceStore();
       await request(`/approvals/${id}/reject`, { method: 'POST' });
       await this.loadPending();
+      if (workspace.currentSession) {
+        await workspace.selectSession(workspace.currentSession);
+      }
     },
   },
 });

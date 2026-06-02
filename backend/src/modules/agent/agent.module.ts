@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { forwardRef, Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { EventsModule } from '../events/events.module';
 import { ModelConfigsModule } from '../model-configs/model-configs.module';
@@ -17,11 +17,11 @@ import { Plan } from './plan.entity';
     EventsModule,
     ModelConfigsModule,
     SessionsModule,
-    ToolsModule,
+    forwardRef(() => ToolsModule),
     UsersModule,
   ],
   controllers: [AgentController],
   providers: [AgentService, OpenAiCompatibleService],
+  exports: [AgentService],
 })
 export class AgentModule {}
-
