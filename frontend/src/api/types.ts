@@ -1,6 +1,8 @@
 export interface LayoutPreferences {
   leftSidebarCollapsed: boolean;
   rightSidebarCollapsed: boolean;
+  leftSidebarWidth: number;
+  rightSidebarWidth: number;
 }
 
 export interface UserPreferences {

@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsBoolean, IsOptional, ValidateNested } from 'class-validator';
+import { IsBoolean, IsInt, IsOptional, Max, Min, ValidateNested } from 'class-validator';
 
 export class UpdateLayoutPreferencesDto {
   @IsOptional()
@@ -9,6 +9,18 @@ export class UpdateLayoutPreferencesDto {
   @IsOptional()
   @IsBoolean()
   rightSidebarCollapsed?: boolean;
+
+  @IsOptional()
+  @IsInt()
+  @Min(220)
+  @Max(420)
+  leftSidebarWidth?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(320)
+  @Max(820)
+  rightSidebarWidth?: number;
 }
 
 export class UpdateUserPreferencesDto {

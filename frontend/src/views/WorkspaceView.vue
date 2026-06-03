@@ -45,6 +45,14 @@ import { useLocaleStore } from '../stores/locale';
 import { useWorkspaceStore } from '../stores/workspace';
 
 type ComposerMode = 'build' | 'plan';
+type SidebarSide = 'left' | 'right';
+
+const mainWorkspaceMinWidth = 420;
+const sidebarResizeStep = 16;
+const sidebarWidthLimits = {
+  left: { min: 220, max: 420, defaultValue: 280 },
+  right: { min: 320, max: 820, defaultValue: 420 },
+};
 
 const auth = useAuthStore();
 const workspace = useWorkspaceStore();
@@ -74,8 +82,13 @@ const leftOverlayOpen = ref(false);
 const rightOverlayOpen = ref(false);
 const busy = ref(false);
 const error = ref('');
+const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth);
+const liveLeftSidebarWidth = ref<number>(sidebarWidthLimits.left.defaultValue);
+const liveRightSidebarWidth = ref<number>(sidebarWidthLimits.right.defaultValue);
+const activeResizeSide = ref<SidebarSide | null>(null);
 let compactViewportQuery: MediaQueryList | null = null;
 let filePreviewRequest = 0;
+let sidebarResizeState: { side: SidebarSide; startX: number; startWidth: number } | null = null;
 
 const canChat = computed(() => Boolean(workspace.currentSession));
 const fileTreeStats = computed(() => countTree(workspace.fileTree));
@@ -113,6 +126,15 @@ const connectReady = computed(() =>
 const layoutPreferences = computed(() => auth.user?.preferences ?? defaultUserPreferences);
 const leftSidebarCollapsed = computed(() => layoutPreferences.value.layout.leftSidebarCollapsed);
 const rightSidebarCollapsed = computed(() => layoutPreferences.value.layout.rightSidebarCollapsed);
+const resolvedSidebarWidths = computed(() =>
+  resolveSidebarWidths(
+    leftSidebarCollapsed.value ? 0 : liveLeftSidebarWidth.value,
+    rightSidebarCollapsed.value ? 0 : liveRightSidebarWidth.value,
+    activeResizeSide.value,
+  ),
+);
+const effectiveLeftSidebarWidth = computed(() => resolvedSidebarWidths.value.left);
+const effectiveRightSidebarWidth = computed(() => resolvedSidebarWidths.value.right);
 const leftSidebarInert = computed(() =>
   isCompactViewport.value ? !leftOverlayOpen.value : leftSidebarCollapsed.value,
 );
@@ -121,8 +143,8 @@ const rightSidebarInert = computed(() =>
 );
 const hasOverlayOpen = computed(() => leftOverlayOpen.value || rightOverlayOpen.value);
 const workspaceGridStyle = computed<Record<string, string>>(() => ({
-  '--left-sidebar-width': leftSidebarCollapsed.value ? '0px' : '280px',
-  '--right-sidebar-width': rightSidebarCollapsed.value ? '0px' : '360px',
+  '--left-sidebar-width': `${effectiveLeftSidebarWidth.value}px`,
+  '--right-sidebar-width': `${effectiveRightSidebarWidth.value}px`,
 }));
 const leftSidebarToggleLabel = computed(() => {
   if (isCompactViewport.value) {
@@ -245,14 +267,37 @@ const agentActivityToneClass = computed(() => {
 
 onMounted(async () => {
   setupCompactViewportQuery();
+  window.addEventListener('resize', handleWindowResize);
   await Promise.all([auth.fetchMe(), approvals.loadPending()]);
   await workspace.bootstrap();
 });
 
 onBeforeUnmount(() => {
+  cancelSidebarResize();
+  window.removeEventListener('resize', handleWindowResize);
   workspace.disconnectEvents();
   compactViewportQuery?.removeEventListener('change', handleCompactViewportChange);
 });
+
+watch(
+  () => layoutPreferences.value.layout.leftSidebarWidth,
+  (width) => {
+    if (activeResizeSide.value !== 'left') {
+      liveLeftSidebarWidth.value = normalizeSidebarWidth('left', width);
+    }
+  },
+  { immediate: true },
+);
+
+watch(
+  () => layoutPreferences.value.layout.rightSidebarWidth,
+  (width) => {
+    if (activeResizeSide.value !== 'right') {
+      liveRightSidebarWidth.value = normalizeSidebarWidth('right', width);
+    }
+  },
+  { immediate: true },
+);
 
 watch(composer, (value) => {
   const query = parseConnectCommand(value);
@@ -336,9 +381,149 @@ function toggleRightSidebar() {
   });
 }
 
+function startSidebarResize(side: SidebarSide, event: PointerEvent) {
+  if (isCompactViewport.value || isSidebarCollapsed(side)) return;
+
+  const target = event.currentTarget;
+  if (target instanceof HTMLElement) {
+    target.setPointerCapture(event.pointerId);
+  }
+
+  sidebarResizeState = {
+    side,
+    startX: event.clientX,
+    startWidth: getSidebarWidth(side),
+  };
+  activeResizeSide.value = side;
+  window.addEventListener('pointermove', handleSidebarResizeMove);
+  window.addEventListener('pointerup', finishSidebarResize);
+  window.addEventListener('pointercancel', finishSidebarResize);
+  event.preventDefault();
+}
+
+function handleSidebarResizeMove(event: PointerEvent) {
+  if (!sidebarResizeState) return;
+
+  const delta = event.clientX - sidebarResizeState.startX;
+  const nextWidth =
+    sidebarResizeState.side === 'left'
+      ? sidebarResizeState.startWidth + delta
+      : sidebarResizeState.startWidth - delta;
+  setSidebarWidth(sidebarResizeState.side, nextWidth);
+}
+
+function finishSidebarResize() {
+  const state = sidebarResizeState;
+  cancelSidebarResize();
+  if (!state) return;
+
+  void persistSidebarWidth(state.side);
+}
+
+function cancelSidebarResize() {
+  sidebarResizeState = null;
+  activeResizeSide.value = null;
+  window.removeEventListener('pointermove', handleSidebarResizeMove);
+  window.removeEventListener('pointerup', finishSidebarResize);
+  window.removeEventListener('pointercancel', finishSidebarResize);
+}
+
+function handleSidebarResizeKeydown(side: SidebarSide, event: KeyboardEvent) {
+  if (isCompactViewport.value || isSidebarCollapsed(side)) return;
+
+  const direction = side === 'left' ? 1 : -1;
+  let nextWidth = getSidebarWidth(side);
+
+  if (event.key === 'ArrowRight') {
+    nextWidth += sidebarResizeStep * direction;
+  } else if (event.key === 'ArrowLeft') {
+    nextWidth -= sidebarResizeStep * direction;
+  } else if (event.key === 'Home') {
+    nextWidth = sidebarWidthLimits[side].min;
+  } else if (event.key === 'End') {
+    nextWidth = sidebarWidthLimits[side].max;
+  } else {
+    return;
+  }
+
+  event.preventDefault();
+  activeResizeSide.value = side;
+  setSidebarWidth(side, nextWidth);
+  void persistSidebarWidth(side).finally(() => {
+    if (!sidebarResizeState && activeResizeSide.value === side) {
+      activeResizeSide.value = null;
+    }
+  });
+}
+
+function getSidebarWidth(side: SidebarSide): number {
+  return side === 'left' ? liveLeftSidebarWidth.value : liveRightSidebarWidth.value;
+}
+
+function setSidebarWidth(side: SidebarSide, width: number) {
+  const normalized = normalizeSidebarWidth(side, width);
+  if (side === 'left') {
+    liveLeftSidebarWidth.value = normalized;
+  } else {
+    liveRightSidebarWidth.value = normalized;
+  }
+}
+
+async function persistSidebarWidth(side: SidebarSide) {
+  if (side === 'left') {
+    await updateLayoutPreferences({ leftSidebarWidth: liveLeftSidebarWidth.value });
+    return;
+  }
+  await updateLayoutPreferences({ rightSidebarWidth: liveRightSidebarWidth.value });
+}
+
+function isSidebarCollapsed(side: SidebarSide) {
+  return side === 'left' ? leftSidebarCollapsed.value : rightSidebarCollapsed.value;
+}
+
+function normalizeSidebarWidth(side: SidebarSide, width: unknown): number {
+  const limits = sidebarWidthLimits[side];
+  if (typeof width !== 'number' || !Number.isFinite(width)) {
+    return limits.defaultValue;
+  }
+  return Math.min(limits.max, Math.max(limits.min, Math.round(width)));
+}
+
+function resolveSidebarWidths(left: number, right: number, priority: SidebarSide | null) {
+  const next = { left, right };
+  const available = Math.max(0, viewportWidth.value - mainWorkspaceMinWidth);
+  let overflow = next.left + next.right - available;
+
+  if (overflow <= 0) {
+    return next;
+  }
+
+  const reductionOrder: SidebarSide[] = priority === 'left' ? ['right', 'left'] : ['left', 'right'];
+  reductionOrder.forEach((side) => {
+    if (overflow <= 0 || next[side] <= 0) return;
+    const minWidth = sidebarWidthLimits[side].min;
+    const reduction = Math.min(Math.max(0, next[side] - minWidth), overflow);
+    next[side] -= reduction;
+    overflow -= reduction;
+  });
+
+  reductionOrder.forEach((side) => {
+    if (overflow <= 0 || next[side] <= 0) return;
+    const reduction = Math.min(next[side], overflow);
+    next[side] -= reduction;
+    overflow -= reduction;
+  });
+
+  return next;
+}
+
 function closeSidebars() {
   leftOverlayOpen.value = false;
   rightOverlayOpen.value = false;
+}
+
+function handleWindowResize() {
+  viewportWidth.value = window.innerWidth;
 }
 
 function setupCompactViewportQuery() {
@@ -720,7 +905,7 @@ function truncate(value: string, maxLength: number) {
 
 <template>
   <main class="h-screen overflow-hidden bg-mebius-bg text-mebius-ink">
-    <div class="workspace-shell" :style="workspaceGridStyle">
+    <div class="workspace-shell" :class="{ 'is-resizing-sidebar': activeResizeSide }" :style="workspaceGridStyle">
       <button
         v-if="isCompactViewport && hasOverlayOpen"
         class="fixed inset-0 z-20 bg-slate-950/20 lg:hidden"
@@ -985,9 +1170,24 @@ function truncate(value: string, maxLength: number) {
             {{ gitPublishFeedback }}
           </p>
         </section>
+
+        <div
+          v-if="!isCompactViewport && !leftSidebarCollapsed"
+          class="sidebar-resize-handle sidebar-resize-handle--left"
+          :class="{ 'is-active': activeResizeSide === 'left' }"
+          role="separator"
+          aria-orientation="vertical"
+          :aria-label="locale.t('resizeLeftSidebar')"
+          :aria-valuemin="sidebarWidthLimits.left.min"
+          :aria-valuemax="sidebarWidthLimits.left.max"
+          :aria-valuenow="effectiveLeftSidebarWidth"
+          tabindex="0"
+          @pointerdown="startSidebarResize('left', $event)"
+          @keydown="handleSidebarResizeKeydown('left', $event)"
+        />
       </aside>
 
-      <section class="flex min-h-0 min-w-0 flex-col">
+      <section class="workspace-main flex min-h-0 min-w-0 flex-col">
         <header class="flex items-center justify-between border-b border-mebius-border bg-white px-4 py-3">
           <div class="flex min-w-0 items-center gap-2">
             <n-button
@@ -1174,6 +1374,20 @@ function truncate(value: string, maxLength: number) {
         :inert="rightSidebarInert"
         :aria-hidden="rightSidebarInert"
       >
+        <div
+          v-if="!isCompactViewport && !rightSidebarCollapsed"
+          class="sidebar-resize-handle sidebar-resize-handle--right"
+          :class="{ 'is-active': activeResizeSide === 'right' }"
+          role="separator"
+          aria-orientation="vertical"
+          :aria-label="locale.t('resizeRightSidebar')"
+          :aria-valuemin="sidebarWidthLimits.right.min"
+          :aria-valuemax="sidebarWidthLimits.right.max"
+          :aria-valuenow="effectiveRightSidebarWidth"
+          tabindex="0"
+          @pointerdown="startSidebarResize('right', $event)"
+          @keydown="handleSidebarResizeKeydown('right', $event)"
+        />
         <n-button
           v-if="isCompactViewport"
           class="absolute right-2 top-2 z-10"
@@ -1427,8 +1641,74 @@ function truncate(value: string, maxLength: number) {
   min-width: 0;
 }
 
+.workspace-main {
+  min-width: 0;
+}
+
 .workspace-side-panel--right {
   background: #f8fafc;
+}
+
+.sidebar-resize-handle {
+  background: transparent;
+  bottom: 0;
+  cursor: col-resize;
+  display: none;
+  outline: none;
+  position: absolute;
+  top: 0;
+  touch-action: none;
+  width: 12px;
+  z-index: 20;
+}
+
+.sidebar-resize-handle--left {
+  right: 0;
+}
+
+.sidebar-resize-handle--right {
+  left: 0;
+}
+
+.sidebar-resize-handle::before,
+.sidebar-resize-handle::after {
+  content: "";
+  left: 50%;
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  transition:
+    background-color 140ms ease,
+    box-shadow 140ms ease,
+    opacity 140ms ease;
+}
+
+.sidebar-resize-handle::before {
+  background: transparent;
+  bottom: 0;
+  width: 1px;
+}
+
+.sidebar-resize-handle::after {
+  background: #0f766e;
+  border-radius: 999px;
+  box-shadow: 0 0 0 3px rgb(15 118 110 / 12%);
+  height: 44px;
+  opacity: 0;
+  top: 50%;
+  width: 3px;
+}
+
+.sidebar-resize-handle:hover::before,
+.sidebar-resize-handle:focus-visible::before,
+.sidebar-resize-handle.is-active::before {
+  background: #99f6e4;
+}
+
+.sidebar-resize-handle:hover::after,
+.sidebar-resize-handle:focus-visible::after,
+.sidebar-resize-handle.is-active::after {
+  opacity: 1;
 }
 
 .workbench-tabs {
@@ -1781,6 +2061,16 @@ function truncate(value: string, maxLength: number) {
   .workspace-side-panel {
     position: relative;
     transition: opacity 120ms ease;
+  }
+
+  .sidebar-resize-handle {
+    display: block;
+  }
+
+  .workspace-shell.is-resizing-sidebar,
+  .workspace-shell.is-resizing-sidebar * {
+    cursor: col-resize !important;
+    user-select: none;
   }
 
   .workspace-side-panel.is-collapsed {

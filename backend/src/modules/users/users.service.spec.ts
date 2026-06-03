@@ -19,12 +19,14 @@ describe('UsersService', () => {
       layout: {
         leftSidebarCollapsed: true,
         rightSidebarCollapsed: false,
+        leftSidebarWidth: 310,
+        rightSidebarWidth: 480,
       },
     });
     users.findOne.mockResolvedValue(user);
 
     const result = await service.updatePreferences(user.id, {
-      layout: { rightSidebarCollapsed: true },
+      layout: { rightSidebarCollapsed: true, rightSidebarWidth: 640 },
     });
 
     expect(users.save).toHaveBeenCalledWith(
@@ -33,15 +35,19 @@ describe('UsersService', () => {
           layout: {
             leftSidebarCollapsed: true,
             rightSidebarCollapsed: true,
+            leftSidebarWidth: 310,
+            rightSidebarWidth: 640,
           },
         },
       }),
     );
     expect(result.preferences.layout.leftSidebarCollapsed).toBe(true);
     expect(result.preferences.layout.rightSidebarCollapsed).toBe(true);
+    expect(result.preferences.layout.leftSidebarWidth).toBe(310);
+    expect(result.preferences.layout.rightSidebarWidth).toBe(640);
   });
 
-  it('normalizes missing preferences to expanded sidebars', async () => {
+  it('normalizes missing preferences to expanded sidebars with default widths', async () => {
     const user = userFixture(undefined);
     users.findOne.mockResolvedValue(user);
 
@@ -51,12 +57,37 @@ describe('UsersService', () => {
       layout: {
         leftSidebarCollapsed: false,
         rightSidebarCollapsed: false,
+        leftSidebarWidth: 280,
+        rightSidebarWidth: 420,
+      },
+    });
+  });
+
+  it('normalizes invalid or missing layout widths', async () => {
+    const user = userFixture({
+      layout: {
+        leftSidebarCollapsed: false,
+        rightSidebarCollapsed: true,
+        leftSidebarWidth: 'wide',
+        rightSidebarWidth: 9999,
+      },
+    });
+    users.findOne.mockResolvedValue(user);
+
+    const result = await service.updatePreferences(user.id, {});
+
+    expect(result.preferences).toEqual({
+      layout: {
+        leftSidebarCollapsed: false,
+        rightSidebarCollapsed: true,
+        leftSidebarWidth: 280,
+        rightSidebarWidth: 820,
       },
     });
   });
 });
 
-function userFixture(preferences: User['preferences'] | undefined): User {
+function userFixture(preferences: unknown): User {
   const createdAt = new Date('2026-06-01T00:00:00.000Z');
   return {
     id: 'user-1',
@@ -64,7 +95,7 @@ function userFixture(preferences: User['preferences'] | undefined): User {
     name: 'Test User',
     passwordHash: 'hash',
     role: UserRole.User,
-    preferences,
+    preferences: preferences as User['preferences'],
     createdAt,
     updatedAt: createdAt,
   } as User;
