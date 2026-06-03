@@ -1,13 +1,19 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { RouterLink } from 'vue-router';
-import type { TreeOption } from 'naive-ui';
 import {
+  Activity,
+  AlertCircle,
   Cable,
   Check,
+  CheckCircle2,
+  CircleDot,
+  Clock3,
   FileText,
   Folder,
+  FolderTree,
   GitBranch,
+  Info,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
@@ -22,13 +28,17 @@ import {
   X,
 } from 'lucide-vue-next';
 import type {
+  Approval,
   ConnectField,
   ConnectProvider,
   GitStatusFile,
   LayoutPreferences,
+  SsePayload,
   TreeNode,
 } from '../api/types';
+import CodePreview from '../components/CodePreview.vue';
 import MessageContent from '../components/MessageContent.vue';
+import WorkspaceFileTree from '../components/WorkspaceFileTree.vue';
 import { useApprovalStore } from '../stores/approvals';
 import { defaultUserPreferences, useAuthStore } from '../stores/auth';
 import { useLocaleStore } from '../stores/locale';
@@ -47,7 +57,11 @@ const gitCommitMessage = ref('');
 const sessionTitle = ref('');
 const composer = ref('');
 const composerMode = ref<ComposerMode>('build');
-const selectedFileKeys = ref<Array<string | number>>([]);
+const selectedFilePath = ref('');
+const expandedFilePaths = ref<string[]>([]);
+const filePreviewLoading = ref(false);
+const fileTreeRefreshing = ref(false);
+const filePreviewError = ref('');
 const connectModal = ref(false);
 const connectQuery = ref('');
 const connectProviders = ref<ConnectProvider[]>([]);
@@ -61,9 +75,10 @@ const rightOverlayOpen = ref(false);
 const busy = ref(false);
 const error = ref('');
 let compactViewportQuery: MediaQueryList | null = null;
+let filePreviewRequest = 0;
 
-const treeOptions = computed<TreeOption[]>(() => workspace.fileTree.map(toTreeOption));
 const canChat = computed(() => Boolean(workspace.currentSession));
+const fileTreeStats = computed(() => countTree(workspace.fileTree));
 const activeModelLabel = computed(
   () =>
     workspace.currentSession?.activeModelConfig?.displayName ||
@@ -143,6 +158,7 @@ const isImportingGit = computed(() => workspace.gitImportStatus === 'running');
 const isLoadingGitStatus = computed(() => workspace.gitStatusLoading);
 const isPublishingGit = computed(() => workspace.gitPublishStatus === 'running');
 const gitStatus = computed(() => workspace.gitStatus);
+const pushableGitCommits = computed(() => gitStatus.value?.pushableCommits ?? 0);
 const gitImportFeedback = computed(() => {
   if (workspace.gitImportStatus === 'running') return locale.t('gitImportRunning');
   if (workspace.gitImportStatus === 'success') return locale.t('gitImportComplete');
@@ -174,6 +190,7 @@ const canPushGit = computed(
     Boolean(workspace.currentProject) &&
     gitStatus.value?.isGitRepo === true &&
     gitStatus.value.hasRemote &&
+    pushableGitCommits.value > 0 &&
     !busy.value &&
     !isPublishingGit.value,
 );
@@ -181,8 +198,8 @@ const pushStatusHint = computed(() => {
   if (gitStatus.value?.isGitRepo !== true) return '';
   if (isPublishingGit.value || busy.value) return locale.t('gitPushBusy');
   if (!gitStatus.value.hasRemote) return locale.t('gitRequiresRemote');
-  if (gitStatus.value.ahead > 0) {
-    return locale.t('gitReadyToPush', { count: String(gitStatus.value.ahead) });
+  if (pushableGitCommits.value > 0) {
+    return locale.t('gitReadyToPush', { count: String(pushableGitCommits.value) });
   }
   return locale.t('gitNoCommitsToPush');
 });
@@ -248,6 +265,31 @@ watch(composer, (value) => {
   lastConnectCommandQuery.value = query;
   void openConnect(query);
 });
+
+watch(
+  () => workspace.currentProject?.id,
+  () => {
+    selectedFilePath.value = '';
+    expandedFilePaths.value = [];
+    filePreviewError.value = '';
+    filePreviewLoading.value = false;
+  },
+);
+
+watch(
+  () => workspace.fileTree,
+  (nodes) => {
+    const existing = new Set(expandedFilePaths.value);
+    const next = new Set<string>(collectInitialDirectoryPaths(nodes));
+    existing.forEach((path) => {
+      if (findTreeNode(nodes, path)?.type === 'directory') {
+        next.add(path);
+      }
+    });
+    expandedFilePaths.value = Array.from(next);
+  },
+  { deep: true },
+);
 
 async function runTask(action: () => Promise<unknown>) {
   busy.value = true;
@@ -533,22 +575,71 @@ function providerDescription(provider: ConnectProvider): string {
   return provider.description;
 }
 
-function onFileSelect(keys: Array<string | number>) {
-  selectedFileKeys.value = keys;
-  const selectedPath = String(keys[0] ?? '');
-  const node = findTreeNode(workspace.fileTree, selectedPath);
-  if (node?.type === 'file') {
-    void workspace.loadFile(node.path);
+async function refreshFileTree() {
+  fileTreeRefreshing.value = true;
+  filePreviewError.value = '';
+  try {
+    await workspace.loadTree();
+  } catch (err) {
+    filePreviewError.value = err instanceof Error ? err.message : locale.t('operationFailed');
+  } finally {
+    fileTreeRefreshing.value = false;
   }
 }
 
-function toTreeOption(node: TreeNode): TreeOption {
-  return {
-    key: node.path,
-    label: node.name,
-    isLeaf: node.type === 'file',
-    children: node.children?.map(toTreeOption),
-  };
+function toggleFileDirectory(path: string) {
+  const expanded = new Set(expandedFilePaths.value);
+  if (expanded.has(path)) {
+    expanded.delete(path);
+  } else {
+    expanded.add(path);
+  }
+  expandedFilePaths.value = Array.from(expanded);
+}
+
+async function onFileSelect(node: TreeNode) {
+  if (node.type !== 'file') return;
+  selectedFilePath.value = node.path;
+  filePreviewError.value = '';
+  filePreviewLoading.value = true;
+  const requestId = ++filePreviewRequest;
+
+  try {
+    await workspace.loadFile(node.path);
+  } catch (err) {
+    if (requestId === filePreviewRequest) {
+      filePreviewError.value = err instanceof Error ? err.message : locale.t('operationFailed');
+    }
+  } finally {
+    if (requestId === filePreviewRequest) {
+      filePreviewLoading.value = false;
+    }
+  }
+}
+
+function countTree(nodes: TreeNode[]) {
+  return nodes.reduce(
+    (stats, node) => {
+      if (node.type === 'directory') {
+        stats.directories += 1;
+        const childStats = countTree(node.children ?? []);
+        stats.files += childStats.files;
+        stats.directories += childStats.directories;
+      } else {
+        stats.files += 1;
+      }
+      return stats;
+    },
+    { files: 0, directories: 0 },
+  );
+}
+
+function collectInitialDirectoryPaths(nodes: TreeNode[], depth = 0): string[] {
+  return nodes.flatMap((node) => {
+    if (node.type !== 'directory') return [];
+    const children = depth < 1 ? collectInitialDirectoryPaths(node.children ?? [], depth + 1) : [];
+    return [node.path, ...children];
+  });
 }
 
 function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
@@ -558,6 +649,72 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
     if (found) return found;
   }
   return null;
+}
+
+function approvalArguments(approval: Approval) {
+  return JSON.stringify(approval.toolCall.arguments, null, 2);
+}
+
+function approvalContext(approval: Approval) {
+  return approval.toolCall.session?.project?.name ?? locale.t('workspace');
+}
+
+function eventToneClass(type: string) {
+  const normalized = type.toLowerCase();
+  if (normalized.includes('error') || normalized.includes('failed')) return 'is-danger';
+  if (normalized.includes('approval') || normalized.includes('requested')) return 'is-warning';
+  if (normalized.includes('done') || normalized.includes('created') || normalized.includes('result')) {
+    return 'is-success';
+  }
+  return 'is-info';
+}
+
+function eventToneIcon(type: string) {
+  const normalized = type.toLowerCase();
+  if (normalized.includes('error') || normalized.includes('failed')) return AlertCircle;
+  if (normalized.includes('done') || normalized.includes('created') || normalized.includes('result')) {
+    return CheckCircle2;
+  }
+  if (normalized.includes('approval') || normalized.includes('requested')) return Clock3;
+  return Info;
+}
+
+function eventTitle(type: string) {
+  return type
+    .split('_')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function eventSummary(data: SsePayload) {
+  const keys = ['message', 'summary', 'name', 'toolName', 'status', 'command', 'path', 'content'];
+  for (const key of keys) {
+    const value = data[key];
+    if (typeof value === 'string' && value.trim()) {
+      return truncate(value.trim(), 92);
+    }
+  }
+  return locale.t('eventPayload');
+}
+
+function formatEventTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleTimeString(locale.current, {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+function stringifyPayload(value: unknown) {
+  return JSON.stringify(value, null, 2);
+}
+
+function truncate(value: string, maxLength: number) {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength - 1)}...`;
 }
 </script>
 
@@ -1028,79 +1185,174 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
         >
           <template #icon><n-icon><X /></n-icon></template>
         </n-button>
-        <n-tabs type="line" animated class="min-h-0 flex-1" pane-class="h-full">
+        <n-tabs type="line" animated class="workbench-tabs min-h-0 flex-1" pane-class="h-full min-h-0">
           <n-tab-pane name="files" :tab="locale.t('files')">
-            <div class="grid h-[calc(100vh-48px)] grid-rows-[250px_1fr]">
-              <div class="overflow-y-auto border-b border-mebius-border p-3 scrollbar-thin">
-                <div class="mb-2 flex items-center justify-between">
-                  <span class="flex items-center gap-2 text-sm font-medium">
-                    <n-icon><FileText /></n-icon>
-                    {{ locale.t('fileTree') }}
-                  </span>
-                  <n-button circle quaternary size="small" @click="workspace.loadTree()">
+            <div class="workbench-pane workbench-pane--files">
+              <section class="workbench-section workbench-section--tree">
+                <header class="workbench-section__header">
+                  <div class="min-w-0">
+                    <div class="workbench-section__title">
+                      <n-icon><FolderTree /></n-icon>
+                      <span>{{ locale.t('fileTree') }}</span>
+                    </div>
+                    <p class="workbench-section__subtitle">
+                      {{ locale.t('fileTreeSummary', { files: fileTreeStats.files, directories: fileTreeStats.directories }) }}
+                    </p>
+                  </div>
+                  <n-button
+                    circle
+                    secondary
+                    size="small"
+                    :loading="fileTreeRefreshing"
+                    :title="locale.t('refresh')"
+                    @click="refreshFileTree"
+                  >
                     <template #icon><n-icon><RefreshCw /></n-icon></template>
                   </n-button>
+                </header>
+                <div class="workbench-tree-shell scrollbar-thin">
+                  <WorkspaceFileTree
+                    :nodes="workspace.fileTree"
+                    :selected-path="selectedFilePath"
+                    :expanded-paths="expandedFilePaths"
+                    :empty-label="locale.t('emptyFileTree')"
+                    @select="onFileSelect"
+                    @toggle="toggleFileDirectory"
+                  />
                 </div>
-                <n-tree
-                  block-line
-                  :data="treeOptions"
-                  :selected-keys="selectedFileKeys"
-                  @update:selected-keys="onFileSelect"
+              </section>
+
+              <section class="workbench-section workbench-section--preview">
+                <CodePreview
+                  v-if="workspace.currentFile || filePreviewLoading || filePreviewError"
+                  :path="workspace.currentFile?.path ?? selectedFilePath"
+                  :content="workspace.currentFile?.content ?? ''"
+                  :size="workspace.currentFile?.size ?? 0"
+                  :loading="filePreviewLoading"
+                  :error="filePreviewError"
+                  :copy-label="locale.t('copyFileContent')"
+                  :copied-label="locale.t('copied')"
+                  :loading-label="locale.t('loadingFilePreview')"
+                  :line-label="locale.t('lines')"
+                  :bytes-label="locale.t('bytes')"
                 />
-              </div>
-              <div class="min-h-0 overflow-y-auto p-3 scrollbar-thin">
-                <div v-if="workspace.currentFile" class="text-xs">
-                  <div class="mb-2 font-medium">{{ workspace.currentFile.path }}</div>
-                  <pre class="m-0 whitespace-pre-wrap rounded bg-slate-950 p-3 text-slate-100">{{ workspace.currentFile.content }}</pre>
+                <div v-else class="workbench-empty-state">
+                  <n-icon><FileText /></n-icon>
+                  <span>{{ locale.t('selectFilePreview') }}</span>
                 </div>
-                <div v-else class="text-sm text-mebius-muted">{{ locale.t('selectFilePreview') }}</div>
-              </div>
+              </section>
             </div>
           </n-tab-pane>
 
           <n-tab-pane name="approvals" :tab="locale.t('approvals')">
-            <div class="h-[calc(100vh-48px)] overflow-y-auto p-3 scrollbar-thin">
-              <div class="mb-3 flex items-center justify-between">
-                <span class="flex items-center gap-2 text-sm font-medium">
-                  <n-icon><ShieldCheck /></n-icon>
-                  {{ locale.t('pendingApprovals') }}
-                </span>
-                <n-button circle quaternary size="small" @click="approvals.loadPending">
-                  <template #icon><n-icon><RefreshCw /></n-icon></template>
-                </n-button>
-              </div>
-              <n-empty v-if="approvals.pending.length === 0" :description="locale.t('noPendingApprovals')" />
-              <div
-                v-for="approval in approvals.pending"
-                :key="approval.id"
-                class="mb-3 rounded border border-mebius-border p-3"
-              >
-                <div class="mb-1 text-sm font-semibold">{{ approval.toolCall.name }}</div>
-                <pre class="max-h-32 overflow-auto rounded bg-slate-100 p-2 text-xs">{{ JSON.stringify(approval.toolCall.arguments, null, 2) }}</pre>
-                <n-space class="mt-2">
-                  <n-button size="small" type="primary" @click="approvals.approve(approval.id)">
-                    <template #icon><n-icon><Check /></n-icon></template>
-                    {{ locale.t('approve') }}
+            <div class="workbench-pane">
+              <section class="workbench-section">
+                <header class="workbench-section__header">
+                  <div class="min-w-0">
+                    <div class="workbench-section__title">
+                      <n-icon><ShieldCheck /></n-icon>
+                      <span>{{ locale.t('pendingApprovals') }}</span>
+                    </div>
+                    <p class="workbench-section__subtitle">
+                      {{ locale.t('approvalSummary', { count: approvals.pending.length }) }}
+                    </p>
+                  </div>
+                  <n-button
+                    circle
+                    secondary
+                    size="small"
+                    :loading="approvals.loading"
+                    :title="locale.t('refresh')"
+                    @click="approvals.loadPending"
+                  >
+                    <template #icon><n-icon><RefreshCw /></n-icon></template>
                   </n-button>
-                  <n-button size="small" @click="approvals.reject(approval.id)">
-                    <template #icon><n-icon><X /></n-icon></template>
-                    {{ locale.t('reject') }}
-                  </n-button>
-                </n-space>
-              </div>
+                </header>
+
+                <div class="workbench-list scrollbar-thin">
+                  <div v-if="approvals.pending.length === 0" class="workbench-empty-state">
+                    <n-icon><CheckCircle2 /></n-icon>
+                    <span>{{ locale.t('noPendingApprovals') }}</span>
+                  </div>
+                  <article
+                    v-for="approval in approvals.pending"
+                    v-else
+                    :key="approval.id"
+                    class="approval-card"
+                  >
+                    <header class="approval-card__header">
+                      <div class="min-w-0">
+                        <div class="approval-card__title">{{ approval.toolCall.name }}</div>
+                        <div class="approval-card__meta">
+                          {{ approvalContext(approval) }} · {{ formatEventTime(approval.createdAt) }}
+                        </div>
+                      </div>
+                      <span class="approval-card__status">{{ approval.status }}</span>
+                    </header>
+                    <pre class="approval-card__payload scrollbar-thin">{{ approvalArguments(approval) }}</pre>
+                    <div class="approval-card__actions">
+                      <n-button size="small" type="primary" @click="approvals.approve(approval.id)">
+                        <template #icon><n-icon><Check /></n-icon></template>
+                        {{ locale.t('approve') }}
+                      </n-button>
+                      <n-button size="small" secondary @click="approvals.reject(approval.id)">
+                        <template #icon><n-icon><X /></n-icon></template>
+                        {{ locale.t('reject') }}
+                      </n-button>
+                    </div>
+                  </article>
+                </div>
+              </section>
             </div>
           </n-tab-pane>
 
           <n-tab-pane name="events" :tab="locale.t('events')">
-            <div class="h-[calc(100vh-48px)] overflow-y-auto p-3 scrollbar-thin">
-              <div
-                v-for="event in workspace.eventLog"
-                :key="`${event.time}-${event.type}`"
-                class="mb-2 rounded border border-mebius-border p-2 text-xs"
-              >
-                <div class="mb-1 font-semibold">{{ event.type }}</div>
-                <pre class="m-0 whitespace-pre-wrap">{{ JSON.stringify(event.data, null, 2) }}</pre>
-              </div>
+            <div class="workbench-pane">
+              <section class="workbench-section">
+                <header class="workbench-section__header">
+                  <div class="min-w-0">
+                    <div class="workbench-section__title">
+                      <n-icon><Activity /></n-icon>
+                      <span>{{ locale.t('events') }}</span>
+                    </div>
+                    <p class="workbench-section__subtitle">
+                      {{ locale.t('eventSummary', { count: workspace.eventLog.length, status: workspace.eventStatus }) }}
+                    </p>
+                  </div>
+                  <span class="event-status" :class="`is-${workspace.eventStatus}`">
+                    <n-icon><CircleDot /></n-icon>
+                    {{ workspace.eventStatus }}
+                  </span>
+                </header>
+
+                <div class="event-timeline scrollbar-thin">
+                  <div v-if="workspace.eventLog.length === 0" class="workbench-empty-state">
+                    <n-icon><Clock3 /></n-icon>
+                    <span>{{ locale.t('noEvents') }}</span>
+                  </div>
+                  <article
+                    v-for="event in workspace.eventLog"
+                    v-else
+                    :key="`${event.time}-${event.type}`"
+                    class="event-item"
+                    :class="eventToneClass(event.type)"
+                  >
+                    <div class="event-item__rail">
+                      <span class="event-item__dot">
+                        <n-icon><component :is="eventToneIcon(event.type)" /></n-icon>
+                      </span>
+                    </div>
+                    <div class="event-item__body">
+                      <header class="event-item__header">
+                        <span class="event-item__type">{{ eventTitle(event.type) }}</span>
+                        <time class="event-item__time">{{ formatEventTime(event.time) }}</time>
+                      </header>
+                      <p class="event-item__summary">{{ eventSummary(event.data) }}</p>
+                      <pre class="event-item__payload scrollbar-thin">{{ stringifyPayload(event.data) }}</pre>
+                    </div>
+                  </article>
+                </div>
+              </section>
             </div>
           </n-tab-pane>
         </n-tabs>
@@ -1173,6 +1425,350 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
 
 .workspace-side-panel {
   min-width: 0;
+}
+
+.workspace-side-panel--right {
+  background: #f8fafc;
+}
+
+.workbench-tabs {
+  background: #f8fafc;
+}
+
+.workbench-tabs :deep(.n-tabs-nav) {
+  background: #ffffff;
+  border-bottom: 1px solid #d9dee7;
+  padding: 0 0.75rem;
+}
+
+.workbench-tabs :deep(.n-tabs-tab) {
+  letter-spacing: 0;
+}
+
+.workbench-tabs :deep(.n-tabs-pane-wrapper),
+.workbench-tabs :deep(.n-tab-pane) {
+  min-height: 0;
+}
+
+.workbench-pane {
+  height: calc(100vh - 48px);
+  min-height: 0;
+  overflow: hidden;
+  padding: 0.75rem;
+}
+
+.workbench-pane--files {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-rows: minmax(190px, 30vh) minmax(0, 1fr);
+}
+
+.workbench-section {
+  background:
+    linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%),
+    radial-gradient(circle at top right, rgb(20 184 166 / 10%), transparent 42%);
+  border: 1px solid #d9dee7;
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 4%);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.workbench-section--preview {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+.workbench-section__header {
+  align-items: center;
+  border-bottom: 1px solid #e3e8ef;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: space-between;
+  min-height: 58px;
+  padding: 0.65rem 0.75rem;
+}
+
+.workbench-section__title {
+  align-items: center;
+  color: #0f172a;
+  display: flex;
+  font-size: 13px;
+  font-weight: 700;
+  gap: 0.45rem;
+  letter-spacing: 0;
+  line-height: 1.2;
+}
+
+.workbench-section__title .n-icon {
+  color: #0f766e;
+}
+
+.workbench-section__subtitle {
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.35;
+  margin: 0.2rem 0 0;
+}
+
+.workbench-tree-shell,
+.workbench-list,
+.event-timeline {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.workbench-tree-shell {
+  background:
+    linear-gradient(90deg, rgb(226 232 240 / 55%) 1px, transparent 1px) 18px 0 / 18px 100%,
+    #ffffff;
+  padding: 0.25rem;
+}
+
+.workbench-list {
+  padding: 0.75rem;
+}
+
+.workbench-empty-state {
+  align-items: center;
+  background: #f8fafc;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  color: #64748b;
+  display: flex;
+  flex-direction: column;
+  font-size: 13px;
+  gap: 0.5rem;
+  justify-content: center;
+  min-height: 160px;
+  padding: 1.25rem;
+  text-align: center;
+}
+
+.workbench-empty-state .n-icon {
+  color: #94a3b8;
+  font-size: 22px;
+}
+
+.approval-card {
+  background: #ffffff;
+  border: 1px solid #d9dee7;
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 4%);
+  margin-bottom: 0.75rem;
+  overflow: hidden;
+}
+
+.approval-card__header {
+  align-items: flex-start;
+  display: flex;
+  gap: 0.65rem;
+  justify-content: space-between;
+  padding: 0.75rem 0.75rem 0.5rem;
+}
+
+.approval-card__title {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approval-card__meta {
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.4;
+  margin-top: 0.15rem;
+}
+
+.approval-card__status {
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 999px;
+  color: #c2410c;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0.3rem 0.45rem;
+  text-transform: uppercase;
+}
+
+.approval-card__payload {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-left: 0;
+  border-right: 0;
+  color: #334155;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  margin: 0;
+  max-height: 150px;
+  overflow: auto;
+  padding: 0.65rem 0.75rem;
+}
+
+.approval-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.65rem 0.75rem 0.75rem;
+}
+
+.event-status {
+  align-items: center;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  color: #64748b;
+  display: inline-flex;
+  flex-shrink: 0;
+  font-size: 11px;
+  gap: 0.3rem;
+  line-height: 1;
+  padding: 0.38rem 0.55rem;
+}
+
+.event-status.is-open {
+  background: #ecfdf3;
+  border-color: #bbf7d0;
+  color: #15803d;
+}
+
+.event-status.is-connecting {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #b45309;
+}
+
+.event-status.is-closed {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #b42318;
+}
+
+.event-timeline {
+  padding: 0.75rem 0.75rem 0.75rem 0;
+}
+
+.event-item {
+  display: grid;
+  gap: 0.55rem;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  margin-bottom: 0.75rem;
+}
+
+.event-item__rail {
+  display: flex;
+  justify-content: center;
+  position: relative;
+}
+
+.event-item__rail::after {
+  background: #dbe3ee;
+  bottom: -0.9rem;
+  content: "";
+  position: absolute;
+  top: 2rem;
+  width: 1px;
+}
+
+.event-item:last-child .event-item__rail::after {
+  display: none;
+}
+
+.event-item__dot {
+  align-items: center;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  color: #2563eb;
+  display: inline-flex;
+  height: 24px;
+  justify-content: center;
+  margin-top: 0.2rem;
+  width: 24px;
+  z-index: 1;
+}
+
+.event-item.is-success .event-item__dot {
+  background: #ecfdf3;
+  border-color: #bbf7d0;
+  color: #15803d;
+}
+
+.event-item.is-warning .event-item__dot {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #b45309;
+}
+
+.event-item.is-danger .event-item__dot {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #b42318;
+}
+
+.event-item__body {
+  background: #ffffff;
+  border: 1px solid #d9dee7;
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 4%);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.event-item__header {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+  justify-content: space-between;
+  padding: 0.65rem 0.7rem 0.2rem;
+}
+
+.event-item__type {
+  color: #0f172a;
+  font-size: 12px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.event-item__time {
+  color: #94a3b8;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.event-item__summary {
+  color: #475569;
+  font-size: 11px;
+  line-height: 1.45;
+  margin: 0;
+  padding: 0.15rem 0.7rem 0.55rem;
+}
+
+.event-item__payload {
+  background: #f8fafc;
+  border-top: 1px solid #e2e8f0;
+  color: #475569;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 10.5px;
+  line-height: 1.5;
+  margin: 0;
+  max-height: 120px;
+  overflow: auto;
+  padding: 0.55rem 0.7rem;
+  white-space: pre-wrap;
 }
 
 @media (min-width: 1024px) {

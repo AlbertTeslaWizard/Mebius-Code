@@ -110,6 +110,7 @@ export interface GitStatus {
   tracking: string | null;
   ahead: number;
   behind: number;
+  pushableCommits: number;
   hasRemote: boolean;
   remotes: GitRemoteInfo[];
   files: GitStatusFile[];

@@ -38,6 +38,7 @@ export interface GitStatusView {
   tracking: string | null;
   ahead: number;
   behind: number;
+  pushableCommits: number;
   hasRemote: boolean;
   remotes: GitRemoteInfo[];
   files: GitStatusFile[];
@@ -196,6 +197,7 @@ export class ProjectsService {
         tracking: null,
         ahead: 0,
         behind: 0,
+        pushableCommits: 0,
         hasRemote: false,
         remotes: [],
         files: [],
@@ -207,7 +209,11 @@ export class ProjectsService {
       this.runGit(projectRoot, ['status', '--short', '--branch']),
       this.listGitRemotes(projectRoot),
     ]);
-    return this.parseGitStatus(statusResult.stdout, remotes);
+    const status = this.parseGitStatus(statusResult.stdout, remotes);
+    return {
+      ...status,
+      pushableCommits: await this.resolvePushableCommits(projectRoot, status),
+    };
   }
 
   async stageGitPath(owner: User, projectId: string, filePath: string): Promise<GitActionResult> {
@@ -324,9 +330,13 @@ export class ProjectsService {
     if (!status.hasRemote || status.remotes.length === 0) {
       throw new BadRequestException('This repository has no remote configured.');
     }
+    if (status.pushableCommits <= 0) {
+      throw new BadRequestException('There are no local commits to push.');
+    }
 
-    const pushResult = await this.runGit(projectRoot, ['push']);
     const remote = status.remotes[0]?.name ?? null;
+    const pushArgs = status.tracking || !remote ? ['push'] : ['push', '-u', remote, 'HEAD'];
+    const pushResult = await this.runGit(projectRoot, pushArgs);
     await this.audit.record({
       actor: owner,
       action: 'project.git_pushed',
@@ -461,6 +471,7 @@ export class ProjectsService {
       tracking,
       ahead,
       behind,
+      pushableCommits: ahead,
       hasRemote: remotes.length > 0,
       remotes,
       files,
@@ -493,6 +504,23 @@ export class ProjectsService {
       ahead,
       behind,
     };
+  }
+
+  private async resolvePushableCommits(projectRoot: string, status: GitStatusView): Promise<number> {
+    if (!status.hasRemote) {
+      return 0;
+    }
+    if (status.tracking) {
+      return status.ahead;
+    }
+
+    const result = await this.runGit(projectRoot, ['rev-list', '--count', 'HEAD', '--not', '--remotes'], true);
+    if (result.exitCode !== 0) {
+      return 0;
+    }
+
+    const count = Number(result.stdout.trim());
+    return Number.isFinite(count) && count > 0 ? count : 0;
   }
 
   private parseStatusLine(line: string): GitStatusFile {

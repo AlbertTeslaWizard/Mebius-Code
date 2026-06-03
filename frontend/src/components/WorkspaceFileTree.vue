@@ -1,0 +1,234 @@
+<script setup lang="ts">
+import { computed } from 'vue';
+import {
+  Braces,
+  ChevronRight,
+  File,
+  FileCode2,
+  FileJson,
+  FileText,
+  Folder,
+  FolderOpen,
+  TerminalSquare,
+} from 'lucide-vue-next';
+import type { TreeNode } from '../api/types';
+
+defineOptions({ name: 'WorkspaceFileTree' });
+
+const props = withDefaults(
+  defineProps<{
+    nodes: TreeNode[];
+    selectedPath: string;
+    expandedPaths: string[];
+    emptyLabel: string;
+    depth?: number;
+  }>(),
+  {
+    depth: 0,
+  },
+);
+
+const emit = defineEmits<{
+  select: [node: TreeNode];
+  toggle: [path: string];
+}>();
+
+const expandedSet = computed(() => new Set(props.expandedPaths));
+
+function isExpanded(node: TreeNode) {
+  return node.type === 'directory' && expandedSet.value.has(node.path);
+}
+
+function isSelected(node: TreeNode) {
+  return node.type === 'file' && node.path === props.selectedPath;
+}
+
+function rowPadding(depth: number) {
+  return `${depth * 0.75 + 0.35}rem`;
+}
+
+function handleNodeClick(node: TreeNode) {
+  if (node.type === 'directory') {
+    emit('toggle', node.path);
+    return;
+  }
+  emit('select', node);
+}
+
+function nodeIcon(node: TreeNode) {
+  if (node.type === 'directory') {
+    return isExpanded(node) ? FolderOpen : Folder;
+  }
+
+  const name = node.name.toLowerCase();
+  const extension = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1) : '';
+  if (['json', 'jsonc'].includes(extension)) return FileJson;
+  if (['md', 'markdown', 'txt', 'log'].includes(extension)) return FileText;
+  if (['sh', 'ps1', 'bat', 'cmd'].includes(extension)) return TerminalSquare;
+  if (['css', 'scss', 'html', 'xml', 'vue'].includes(extension)) return Braces;
+  if (
+    [
+      'c',
+      'cpp',
+      'cs',
+      'go',
+      'h',
+      'java',
+      'js',
+      'jsx',
+      'kt',
+      'php',
+      'py',
+      'rb',
+      'rs',
+      'swift',
+      'ts',
+      'tsx',
+    ].includes(extension)
+  ) {
+    return FileCode2;
+  }
+  return File;
+}
+</script>
+
+<template>
+  <div v-if="depth === 0 && nodes.length === 0" class="workspace-file-tree__empty">
+    {{ emptyLabel }}
+  </div>
+  <ul v-else class="workspace-file-tree" :class="{ 'is-root': depth === 0 }">
+    <li v-for="node in nodes" :key="node.path" class="workspace-file-tree__item">
+      <button
+        type="button"
+        class="workspace-file-tree__row"
+        :class="{
+          'is-directory': node.type === 'directory',
+          'is-file': node.type === 'file',
+          'is-selected': isSelected(node),
+        }"
+        :style="{ paddingLeft: rowPadding(depth) }"
+        :title="node.path"
+        @click="handleNodeClick(node)"
+      >
+        <span class="workspace-file-tree__chevron" :class="{ 'is-expanded': isExpanded(node) }">
+          <n-icon v-if="node.type === 'directory'"><ChevronRight /></n-icon>
+        </span>
+        <n-icon class="workspace-file-tree__icon">
+          <component :is="nodeIcon(node)" />
+        </n-icon>
+        <span class="workspace-file-tree__name">{{ node.name }}</span>
+      </button>
+
+      <WorkspaceFileTree
+        v-if="node.type === 'directory' && node.children?.length && isExpanded(node)"
+        :nodes="node.children"
+        :selected-path="selectedPath"
+        :expanded-paths="expandedPaths"
+        :empty-label="emptyLabel"
+        :depth="depth + 1"
+        @select="emit('select', $event)"
+        @toggle="emit('toggle', $event)"
+      />
+    </li>
+  </ul>
+</template>
+
+<style scoped>
+.workspace-file-tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.workspace-file-tree.is-root {
+  padding: 0.2rem;
+}
+
+.workspace-file-tree__item {
+  min-width: 0;
+}
+
+.workspace-file-tree__row {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: #334155;
+  display: grid;
+  font-size: 12px;
+  gap: 0.35rem;
+  grid-template-columns: 14px 18px minmax(0, 1fr);
+  height: 29px;
+  letter-spacing: 0;
+  line-height: 1;
+  margin: 1px 0;
+  outline: none;
+  padding-bottom: 0;
+  padding-right: 0.45rem;
+  padding-top: 0;
+  text-align: left;
+  width: 100%;
+}
+
+.workspace-file-tree__row:hover {
+  background: #eef6f4;
+  color: #0f172a;
+}
+
+.workspace-file-tree__row:focus-visible {
+  box-shadow: 0 0 0 2px rgb(20 184 166 / 24%);
+}
+
+.workspace-file-tree__row.is-selected {
+  background: #dff4ee;
+  color: #0f766e;
+  font-weight: 650;
+}
+
+.workspace-file-tree__row.is-directory {
+  color: #1e293b;
+}
+
+.workspace-file-tree__chevron {
+  align-items: center;
+  color: #94a3b8;
+  display: inline-flex;
+  justify-content: center;
+  transition: transform 120ms ease;
+}
+
+.workspace-file-tree__chevron.is-expanded {
+  transform: rotate(90deg);
+}
+
+.workspace-file-tree__icon {
+  color: #64748b;
+}
+
+.workspace-file-tree__row.is-directory .workspace-file-tree__icon {
+  color: #d28b21;
+}
+
+.workspace-file-tree__row.is-selected .workspace-file-tree__icon {
+  color: #0f766e;
+}
+
+.workspace-file-tree__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-file-tree__empty {
+  align-items: center;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  color: #64748b;
+  display: flex;
+  font-size: 13px;
+  justify-content: center;
+  min-height: 120px;
+  padding: 1rem;
+  text-align: center;
+}
+</style>

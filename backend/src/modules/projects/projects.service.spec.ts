@@ -132,6 +132,7 @@ describe('ProjectsService', () => {
       tracking: 'origin/main',
       ahead: 1,
       behind: 0,
+      pushableCommits: 1,
       hasRemote: true,
       remotes: [
         {
@@ -162,6 +163,67 @@ describe('ProjectsService', () => {
     });
   });
 
+  it('counts pushable commits for a branch without upstream tracking', async () => {
+    const project = projectFixture(paths.getProjectRoot('project-1'));
+    projects.findOne.mockResolvedValue(project);
+    const runGit = jest.spyOn(service as any, 'runGit') as jest.Mock;
+    runGit
+      .mockResolvedValueOnce({ exitCode: 0, stdout: 'true', stderr: '' })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: '## feature', stderr: '' })
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout:
+          'origin https://github.com/example/repo.git (fetch)\norigin https://github.com/example/repo.git (push)',
+        stderr: '',
+      })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: '2', stderr: '' });
+
+    const result = await service.gitStatus(owner.id, project.id);
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        branch: 'feature',
+        tracking: null,
+        ahead: 0,
+        pushableCommits: 2,
+        hasRemote: true,
+      }),
+    );
+    expect(runGit).toHaveBeenNthCalledWith(
+      4,
+      project.workspacePath,
+      ['rev-list', '--count', 'HEAD', '--not', '--remotes'],
+      true,
+    );
+  });
+
+  it('reports zero pushable commits when an untracked branch has no readable HEAD', async () => {
+    const project = projectFixture(paths.getProjectRoot('project-1'));
+    projects.findOne.mockResolvedValue(project);
+    const runGit = jest.spyOn(service as any, 'runGit') as jest.Mock;
+    runGit
+      .mockResolvedValueOnce({ exitCode: 0, stdout: 'true', stderr: '' })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: '## main', stderr: '' })
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout:
+          'origin https://github.com/example/repo.git (fetch)\norigin https://github.com/example/repo.git (push)',
+        stderr: '',
+      })
+      .mockResolvedValueOnce({ exitCode: 128, stdout: '', stderr: 'fatal: ambiguous argument HEAD' });
+
+    const result = await service.gitStatus(owner.id, project.id);
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        branch: 'main',
+        tracking: null,
+        pushableCommits: 0,
+        hasRemote: true,
+      }),
+    );
+  });
+
   it('reports non-git projects without throwing on status', async () => {
     const project = projectFixture(paths.getProjectRoot('project-1'));
     projects.findOne.mockResolvedValue(project);
@@ -174,6 +236,7 @@ describe('ProjectsService', () => {
       tracking: null,
       ahead: 0,
       behind: 0,
+      pushableCommits: 0,
       hasRemote: false,
       remotes: [],
       files: [],
@@ -280,6 +343,7 @@ describe('ProjectsService', () => {
       tracking: 'origin/main',
       ahead: 0,
       behind: 0,
+      pushableCommits: 0,
       hasRemote: true,
       remotes: [{ name: 'origin', fetchUrl: 'https://github.com/example/repo.git' }],
       files: [{ path: 'demo_sarsa.py', indexStatus: 'A', workTreeStatus: ' ', state: 'staged' }],
@@ -315,6 +379,7 @@ describe('ProjectsService', () => {
       tracking: 'origin/main',
       ahead: 0,
       behind: 0,
+      pushableCommits: 0,
       hasRemote: true,
       remotes: [{ name: 'origin', fetchUrl: 'https://github.com/example/repo.git' }],
       files: [{ path: 'demo_sarsa.py', indexStatus: ' ', workTreeStatus: 'M', state: 'modified' }],
@@ -343,6 +408,7 @@ describe('ProjectsService', () => {
       tracking: null,
       ahead: 0,
       behind: 0,
+      pushableCommits: 0,
       hasRemote: false,
       remotes: [],
       files: [],
@@ -354,7 +420,7 @@ describe('ProjectsService', () => {
     await expect(service.pushGit(owner, project.id)).rejects.toThrow('This repository has no remote configured.');
   });
 
-  it('surfaces git push authentication failures', async () => {
+  it('rejects push when there are no local commits to push', async () => {
     const project = projectFixture(paths.getProjectRoot('project-1'));
     projects.findOne.mockResolvedValue(project);
     jest.spyOn(service, 'gitStatus').mockResolvedValue({
@@ -363,6 +429,60 @@ describe('ProjectsService', () => {
       tracking: 'origin/main',
       ahead: 0,
       behind: 0,
+      pushableCommits: 0,
+      hasRemote: true,
+      remotes: [{ name: 'origin', fetchUrl: 'https://github.com/example/repo.git' }],
+      files: [],
+      counts: { staged: 0, unstaged: 0, untracked: 0 },
+    });
+    const runGit = jest.spyOn(service as any, 'runGit') as jest.Mock;
+    runGit.mockResolvedValueOnce({ exitCode: 0, stdout: 'true', stderr: '' });
+
+    await expect(service.pushGit(owner, project.id)).rejects.toThrow('There are no local commits to push.');
+    expect(runGit).toHaveBeenCalledTimes(1);
+  });
+
+  it('pushes a branch without upstream by setting the remote tracking branch', async () => {
+    const project = projectFixture(paths.getProjectRoot('project-1'));
+    projects.findOne.mockResolvedValue(project);
+    jest.spyOn(service, 'gitStatus').mockResolvedValue({
+      isGitRepo: true,
+      branch: 'feature',
+      tracking: null,
+      ahead: 0,
+      behind: 0,
+      pushableCommits: 2,
+      hasRemote: true,
+      remotes: [{ name: 'origin', fetchUrl: 'https://github.com/example/repo.git' }],
+      files: [],
+      counts: { staged: 0, unstaged: 0, untracked: 0 },
+    });
+    const runGit = jest.spyOn(service as any, 'runGit') as jest.Mock;
+    runGit
+      .mockResolvedValueOnce({ exitCode: 0, stdout: 'true', stderr: '' })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: 'Branch feature set up to track origin/feature.', stderr: '' });
+
+    const result = await service.pushGit(owner, project.id);
+
+    expect(runGit).toHaveBeenNthCalledWith(1, project.workspacePath, ['rev-parse', '--is-inside-work-tree'], true);
+    expect(runGit).toHaveBeenNthCalledWith(2, project.workspacePath, ['push', '-u', 'origin', 'HEAD']);
+    expect(result).toEqual({
+      summary: 'Branch feature set up to track origin/feature.',
+      branch: 'feature',
+      remote: 'origin',
+    });
+  });
+
+  it('surfaces git push authentication failures', async () => {
+    const project = projectFixture(paths.getProjectRoot('project-1'));
+    projects.findOne.mockResolvedValue(project);
+    jest.spyOn(service, 'gitStatus').mockResolvedValue({
+      isGitRepo: true,
+      branch: 'main',
+      tracking: 'origin/main',
+      ahead: 1,
+      behind: 0,
+      pushableCommits: 1,
       hasRemote: true,
       remotes: [{ name: 'origin', fetchUrl: 'https://github.com/example/repo.git' }],
       files: [],
