@@ -10,7 +10,7 @@ import { CommandRun } from './command-run.entity';
 import { FilePatch } from './file-patch.entity';
 import { ToolApproval } from './tool-approval.entity';
 import { ToolCall } from './tool-call.entity';
-import { ToolsController } from './tools.controller';
+import { ToolsController, ToolsReadController } from './tools.controller';
 import { ToolsService } from './tools.service';
 
 @Module({
@@ -23,7 +23,7 @@ import { ToolsService } from './tools.service';
     SessionsModule,
     UsersModule,
   ],
-  controllers: [ToolsController],
+  controllers: [ToolsController, ToolsReadController],
   providers: [ToolsService],
   exports: [ToolsService],
 })

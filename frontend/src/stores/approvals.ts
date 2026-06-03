@@ -27,7 +27,12 @@ export const useApprovalStore = defineStore('approvals', {
       await request(`/approvals/${id}/approve`, { method: 'POST' });
       await this.loadPending();
       if (workspace.currentSession) {
-        await workspace.selectSession(workspace.currentSession);
+        await Promise.all([
+          workspace.loadMessages(),
+          workspace.refreshReviewData(),
+          workspace.loadTree(),
+          workspace.loadGitStatus(),
+        ]);
       }
     },
     async reject(id: string) {
@@ -35,7 +40,7 @@ export const useApprovalStore = defineStore('approvals', {
       await request(`/approvals/${id}/reject`, { method: 'POST' });
       await this.loadPending();
       if (workspace.currentSession) {
-        await workspace.selectSession(workspace.currentSession);
+        await Promise.all([workspace.loadMessages(), workspace.refreshReviewData()]);
       }
     },
   },

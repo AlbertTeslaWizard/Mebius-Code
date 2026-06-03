@@ -30,3 +30,13 @@ export class ToolsController {
   }
 }
 
+@Controller()
+@UseGuards(JwtAuthGuard)
+export class ToolsReadController {
+  constructor(private readonly tools: ToolsService) {}
+
+  @Get('sessions/:sessionId/patches')
+  patches(@Req() request: RequestWithUser, @Param('sessionId') sessionId: string) {
+    return this.tools.listSessionPatches(request.user.sub, sessionId);
+  }
+}

@@ -1,4 +1,4 @@
-import { Body, Controller, Param, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Req, UseGuards } from '@nestjs/common';
 import { RequestWithUser } from '../../common/types/request-with-user';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { UsersService } from '../users/users.service';
@@ -24,6 +24,11 @@ export class AgentController {
     return this.agent.createPlan(owner, id, dto);
   }
 
+  @Get('sessions/:id/plans/latest')
+  latestPlan(@Req() request: RequestWithUser, @Param('id') id: string) {
+    return this.agent.latestPlan(request.user.sub, id);
+  }
+
   @Post('plans/:id/approve')
   async approvePlan(@Req() request: RequestWithUser, @Param('id') id: string) {
     const owner = await this.users.findById(request.user.sub);
@@ -36,4 +41,3 @@ export class AgentController {
     return this.agent.run(owner, id, dto);
   }
 }
-

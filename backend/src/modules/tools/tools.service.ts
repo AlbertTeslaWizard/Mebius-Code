@@ -26,6 +26,25 @@ import { ToolApproval } from './tool-approval.entity';
 import { ToolCall } from './tool-call.entity';
 
 const APPROVAL_REQUIRED_TOOLS = new Set(['create_patch', 'run_command']);
+const DIFF_PREVIEW_LIMIT = 20_000;
+
+type ApprovalPreview =
+  | {
+      kind: 'patch';
+      path: string;
+      diffText: string;
+      truncated: boolean;
+    }
+  | {
+      kind: 'command';
+      command: string;
+      cwd?: string;
+      truncated: false;
+    };
+
+type PendingApprovalResponse = ToolApproval & {
+  preview?: ApprovalPreview;
+};
 
 @Injectable()
 export class ToolsService {
@@ -97,8 +116,8 @@ export class ToolsService {
     return saved;
   }
 
-  async pending(ownerId: string): Promise<ToolApproval[]> {
-    return this.approvals.find({
+  async pending(ownerId: string): Promise<PendingApprovalResponse[]> {
+    const approvals = await this.approvals.find({
       where: {
         status: ApprovalStatus.Pending,
         requester: { id: ownerId },
@@ -106,6 +125,36 @@ export class ToolsService {
       relations: { toolCall: { session: { project: true } }, requester: true },
       order: { createdAt: 'DESC' },
     });
+    return Promise.all(
+      approvals.map(async (approval) => ({
+        ...approval,
+        preview: await this.buildApprovalPreview(approval),
+      })),
+    );
+  }
+
+  async listSessionPatches(ownerId: string, sessionId: string) {
+    const session = await this.sessions.findOwned(ownerId, sessionId);
+    const patches = await this.patches.find({
+      where: { session: { id: session.id } },
+      relations: { toolCall: true },
+      order: { createdAt: 'DESC' },
+      take: 50,
+    });
+    return patches.map((patch) => ({
+      id: patch.id,
+      relativePath: patch.relativePath,
+      diffText: patch.diffText,
+      status: patch.status,
+      createdAt: patch.createdAt,
+      toolCall: patch.toolCall
+        ? {
+            id: patch.toolCall.id,
+            name: patch.toolCall.name,
+            status: patch.toolCall.status,
+          }
+        : undefined,
+    }));
   }
 
   async approve(owner: User, approvalId: string): Promise<ToolCall> {
@@ -291,7 +340,7 @@ export class ToolsService {
         relativePath: args.path,
         originalContent,
         patchedContent: args.content,
-        diffText: this.makeSimpleDiff(args.path, originalContent, args.content),
+        diffText: this.makeDiff(args.path, originalContent, args.content).diffText,
         status: FilePatchStatus.Applied,
       }),
     );
@@ -413,8 +462,94 @@ export class ToolsService {
     return ['.git', '.env', 'node_modules', 'dist', 'coverage'].includes(name);
   }
 
-  private makeSimpleDiff(path: string, before: string, after: string): string {
-    return [`--- ${path}`, `+++ ${path}`, '@@', `-${before}`, `+${after}`].join('\n');
+  private async buildApprovalPreview(approval: ToolApproval): Promise<ApprovalPreview | undefined> {
+    const toolCall = approval.toolCall;
+    if (toolCall.name === 'run_command' && typeof toolCall.arguments.command === 'string') {
+      return {
+        kind: 'command',
+        command: toolCall.arguments.command,
+        cwd: typeof toolCall.arguments.cwd === 'string' ? toolCall.arguments.cwd : undefined,
+        truncated: false,
+      };
+    }
+    if (
+      toolCall.name !== 'create_patch' ||
+      typeof toolCall.arguments.path !== 'string' ||
+      typeof toolCall.arguments.content !== 'string'
+    ) {
+      return undefined;
+    }
+
+    const project = toolCall.session.project as Project;
+    const target = this.paths.resolveProjectPath(project.workspacePath, toolCall.arguments.path);
+    const originalContent = existsSync(target) ? await readFile(target, 'utf8') : '';
+    const diff = this.makeDiff(toolCall.arguments.path, originalContent, toolCall.arguments.content);
+    return {
+      kind: 'patch',
+      path: toolCall.arguments.path,
+      diffText: diff.diffText,
+      truncated: diff.truncated,
+    };
+  }
+
+  private makeDiff(path: string, before: string, after: string): { diffText: string; truncated: boolean } {
+    const beforePreview = this.truncateForDiff(before);
+    const afterPreview = this.truncateForDiff(after);
+    const beforeLines = beforePreview.value.split(/\r?\n/);
+    const afterLines = afterPreview.value.split(/\r?\n/);
+    const rows = this.diffLines(beforeLines, afterLines);
+    return {
+      diffText: [`--- ${path}`, `+++ ${path}`, '@@', ...rows].join('\n'),
+      truncated: beforePreview.truncated || afterPreview.truncated,
+    };
+  }
+
+  private truncateForDiff(value: string): { value: string; truncated: boolean } {
+    if (value.length <= DIFF_PREVIEW_LIMIT) {
+      return { value, truncated: false };
+    }
+    return {
+      value: `${value.slice(0, DIFF_PREVIEW_LIMIT)}\n[diff preview truncated]`,
+      truncated: true,
+    };
+  }
+
+  private diffLines(before: string[], after: string[]): string[] {
+    const table = Array.from({ length: before.length + 1 }, () =>
+      Array.from({ length: after.length + 1 }, () => 0),
+    );
+    for (let i = before.length - 1; i >= 0; i -= 1) {
+      for (let j = after.length - 1; j >= 0; j -= 1) {
+        table[i][j] =
+          before[i] === after[j] ? table[i + 1][j + 1] + 1 : Math.max(table[i + 1][j], table[i][j + 1]);
+      }
+    }
+
+    const rows: string[] = [];
+    let i = 0;
+    let j = 0;
+    while (i < before.length && j < after.length) {
+      if (before[i] === after[j]) {
+        rows.push(` ${before[i]}`);
+        i += 1;
+        j += 1;
+      } else if (table[i + 1][j] >= table[i][j + 1]) {
+        rows.push(`-${before[i]}`);
+        i += 1;
+      } else {
+        rows.push(`+${after[j]}`);
+        j += 1;
+      }
+    }
+    while (i < before.length) {
+      rows.push(`-${before[i]}`);
+      i += 1;
+    }
+    while (j < after.length) {
+      rows.push(`+${after[j]}`);
+      j += 1;
+    }
+    return rows;
   }
 
   private spawnCommand(

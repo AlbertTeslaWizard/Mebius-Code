@@ -120,6 +120,25 @@ export class AgentService {
     return saved;
   }
 
+  async latestPlan(ownerId: string, sessionId: string): Promise<{
+    plan: Plan;
+    steps: PlanStep[];
+  } | null> {
+    const session = await this.sessions.findOwned(ownerId, sessionId);
+    const plan = await this.plans.findOne({
+      where: { session: { id: session.id } },
+      order: { createdAt: 'DESC' },
+    });
+    if (!plan) {
+      return null;
+    }
+    const steps = await this.planSteps.find({
+      where: { plan: { id: plan.id } },
+      order: { order: 'ASC' },
+    });
+    return { plan, steps };
+  }
+
   async run(owner: User, sessionId: string, dto: RunAgentDto): Promise<{
     assistant?: Message;
     toolCalls: unknown[];

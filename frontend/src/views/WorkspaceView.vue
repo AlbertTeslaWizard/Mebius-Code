@@ -37,6 +37,7 @@ import type {
   TreeNode,
 } from '../api/types';
 import CodePreview from '../components/CodePreview.vue';
+import DiffPreview from '../components/DiffPreview.vue';
 import MessageContent from '../components/MessageContent.vue';
 import WorkspaceFileTree from '../components/WorkspaceFileTree.vue';
 import { useApprovalStore } from '../stores/approvals';
@@ -111,6 +112,7 @@ const canSubmitComposer = computed(
     !busy.value &&
     workspace.agentActivity?.status !== 'waiting_for_approval',
 );
+const canExecutePlan = computed(() => workspace.activePlan?.plan.status === 'approved' && canChat.value && !busy.value);
 const composerModeOptions = computed<Array<{ label: string; value: ComposerMode }>>(() => [
   { label: locale.t('build'), value: 'build' },
   { label: locale.t('plan'), value: 'plan' },
@@ -665,6 +667,29 @@ async function submitComposer() {
   );
 }
 
+async function approveActivePlan() {
+  await runTask(() => workspace.approvePlan());
+}
+
+async function executeActivePlan() {
+  const bundle = workspace.activePlan;
+  if (!bundle || bundle.plan.status !== 'approved') return;
+  const steps = bundle.steps.map((step) => `${step.order}. ${step.title}${step.detail ? ` - ${step.detail}` : ''}`);
+  const request = [
+    'Execute the approved plan for this session.',
+    '',
+    `Plan summary: ${bundle.plan.summary}`,
+    '',
+    'Steps:',
+    ...steps,
+  ].join('\n');
+  await runTask(() => workspace.submitText(request));
+}
+
+async function refreshReviewPanel() {
+  await Promise.all([approvals.loadPending(), workspace.refreshReviewData()]);
+}
+
 async function openConnect(initialQuery = '') {
   connectModal.value = true;
   connectQuery.value = initialQuery;
@@ -838,6 +863,12 @@ function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
 
 function approvalArguments(approval: Approval) {
   return JSON.stringify(approval.toolCall.arguments, null, 2);
+}
+
+function approvalPreviewTitle(approval: Approval) {
+  if (approval.preview?.kind === 'patch') return approval.preview.path;
+  if (approval.preview?.kind === 'command') return approval.preview.command;
+  return approval.toolCall.name;
 }
 
 function approvalContext(approval: Approval) {
@@ -1306,21 +1337,6 @@ function truncate(value: string, maxLength: number) {
                 <span>{{ agentActivityText }}</span>
               </div>
 
-              <section v-if="workspace.activePlan" class="rounded border border-mebius-border bg-white p-3">
-                <div class="mb-2 flex items-center justify-between">
-                  <strong>{{ locale.t('planStatus', { status: workspace.activePlan.plan.status }) }}</strong>
-                  <n-button size="small" type="primary" @click="workspace.approvePlan">
-                    <template #icon><n-icon><Check /></n-icon></template>
-                    {{ locale.t('approve') }}
-                  </n-button>
-                </div>
-                <p class="text-sm">{{ workspace.activePlan.plan.summary }}</p>
-                <ol class="pl-5 text-sm">
-                  <li v-for="step in workspace.activePlan.steps" :key="step.id">
-                    {{ step.title }}
-                  </li>
-                </ol>
-              </section>
             </div>
 
             <footer class="border-t border-mebius-border bg-white p-3">
@@ -1458,17 +1474,17 @@ function truncate(value: string, maxLength: number) {
             </div>
           </n-tab-pane>
 
-          <n-tab-pane name="approvals" :tab="locale.t('approvals')">
+          <n-tab-pane name="review" :tab="locale.t('review')">
             <div class="workbench-pane">
-              <section class="workbench-section">
+              <section class="workbench-section review-section">
                 <header class="workbench-section__header">
                   <div class="min-w-0">
                     <div class="workbench-section__title">
                       <n-icon><ShieldCheck /></n-icon>
-                      <span>{{ locale.t('pendingApprovals') }}</span>
+                      <span>{{ locale.t('review') }}</span>
                     </div>
                     <p class="workbench-section__subtitle">
-                      {{ locale.t('approvalSummary', { count: approvals.pending.length }) }}
+                      {{ locale.t('reviewSummary', { approvals: approvals.pending.length, patches: workspace.filePatches.length }) }}
                     </p>
                   </div>
                   <n-button
@@ -1477,13 +1493,61 @@ function truncate(value: string, maxLength: number) {
                     size="small"
                     :loading="approvals.loading"
                     :title="locale.t('refresh')"
-                    @click="approvals.loadPending"
+                    @click="refreshReviewPanel"
                   >
                     <template #icon><n-icon><RefreshCw /></n-icon></template>
                   </n-button>
                 </header>
 
-                <div class="workbench-list scrollbar-thin">
+                <div class="workbench-list review-list scrollbar-thin">
+                  <article class="review-card">
+                    <header class="review-card__header">
+                      <div>
+                        <div class="review-card__title">{{ locale.t('planWorkbench') }}</div>
+                        <div v-if="workspace.activePlan" class="review-card__meta">
+                          {{ locale.t('planStatus', { status: workspace.activePlan.plan.status }) }}
+                        </div>
+                      </div>
+                      <div v-if="workspace.activePlan" class="flex shrink-0 gap-2">
+                        <n-button
+                          size="small"
+                          type="primary"
+                          :disabled="workspace.activePlan.plan.status !== 'pending_approval' || busy"
+                          :loading="busy"
+                          @click="approveActivePlan"
+                        >
+                          <template #icon><n-icon><Check /></n-icon></template>
+                          {{ locale.t('approve') }}
+                        </n-button>
+                        <n-button
+                          size="small"
+                          secondary
+                          :disabled="!canExecutePlan"
+                          :loading="busy"
+                          @click="executeActivePlan"
+                        >
+                          <template #icon><n-icon><Play /></n-icon></template>
+                          {{ locale.t('executePlan') }}
+                        </n-button>
+                      </div>
+                    </header>
+                    <div v-if="workspace.activePlan" class="review-card__body">
+                      <p class="review-plan-summary">{{ workspace.activePlan.plan.summary }}</p>
+                      <ol class="review-plan-steps">
+                        <li v-for="step in workspace.activePlan.steps" :key="step.id">
+                          <span class="review-plan-steps__title">{{ step.title }}</span>
+                          <span v-if="step.detail" class="review-plan-steps__detail">{{ step.detail }}</span>
+                          <span class="review-plan-steps__status">{{ step.status }}</span>
+                        </li>
+                      </ol>
+                    </div>
+                    <div v-else class="workbench-empty-state">
+                      <n-icon><Clock3 /></n-icon>
+                      <span>{{ locale.t('noActivePlan') }}</span>
+                    </div>
+                  </article>
+
+                  <div class="review-block-title">{{ locale.t('pendingApprovals') }}</div>
                   <div v-if="approvals.pending.length === 0" class="workbench-empty-state">
                     <n-icon><CheckCircle2 /></n-icon>
                     <span>{{ locale.t('noPendingApprovals') }}</span>
@@ -1498,12 +1562,29 @@ function truncate(value: string, maxLength: number) {
                       <div class="min-w-0">
                         <div class="approval-card__title">{{ approval.toolCall.name }}</div>
                         <div class="approval-card__meta">
-                          {{ approvalContext(approval) }} · {{ formatEventTime(approval.createdAt) }}
+                          {{ approvalPreviewTitle(approval) }} · {{ approvalContext(approval) }} · {{ formatEventTime(approval.createdAt) }}
                         </div>
                       </div>
                       <span class="approval-card__status">{{ approval.status }}</span>
                     </header>
-                    <pre class="approval-card__payload scrollbar-thin">{{ approvalArguments(approval) }}</pre>
+                    <div v-if="approval.preview?.kind === 'patch'" class="approval-card__preview">
+                      <DiffPreview
+                        :path="approval.preview.path"
+                        :diff-text="approval.preview.diffText"
+                        :empty-label="locale.t('eventPayload')"
+                      />
+                      <p v-if="approval.preview.truncated" class="approval-card__hint">
+                        {{ locale.t('diffPreviewTruncated') }}
+                      </p>
+                    </div>
+                    <div v-else-if="approval.preview?.kind === 'command'" class="approval-card__preview">
+                      <div class="command-preview">
+                        <div class="command-preview__label">{{ locale.t('commandPreview') }}</div>
+                        <code>{{ approval.preview.command }}</code>
+                        <span v-if="approval.preview.cwd">{{ approval.preview.cwd }}</span>
+                      </div>
+                    </div>
+                    <pre v-else class="approval-card__payload scrollbar-thin">{{ approvalArguments(approval) }}</pre>
                     <div class="approval-card__actions">
                       <n-button size="small" type="primary" @click="approvals.approve(approval.id)">
                         <template #icon><n-icon><Check /></n-icon></template>
@@ -1513,6 +1594,31 @@ function truncate(value: string, maxLength: number) {
                         <template #icon><n-icon><X /></n-icon></template>
                         {{ locale.t('reject') }}
                       </n-button>
+                    </div>
+                  </article>
+
+                  <div class="review-block-title">{{ locale.t('patchHistory') }}</div>
+                  <div v-if="workspace.filePatches.length === 0" class="workbench-empty-state">
+                    <n-icon><FileText /></n-icon>
+                    <span>{{ locale.t('noPatchHistory') }}</span>
+                  </div>
+                  <article
+                    v-for="patch in workspace.filePatches"
+                    v-else
+                    :key="patch.id"
+                    class="approval-card"
+                  >
+                    <header class="approval-card__header">
+                      <div class="min-w-0">
+                        <div class="approval-card__title">{{ patch.relativePath }}</div>
+                        <div class="approval-card__meta">
+                          {{ patch.toolCall?.status ?? patch.status }} · {{ formatEventTime(patch.createdAt) }}
+                        </div>
+                      </div>
+                      <span class="approval-card__status">{{ patch.status }}</span>
+                    </header>
+                    <div class="approval-card__preview">
+                      <DiffPreview :path="patch.relativePath" :diff-text="patch.diffText" />
                     </div>
                   </article>
                 </div>
@@ -1813,6 +1919,103 @@ function truncate(value: string, maxLength: number) {
   padding: 0.75rem;
 }
 
+.review-section {
+  min-height: 0;
+}
+
+.review-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.review-card {
+  background: #ffffff;
+  border: 1px solid #d9dee7;
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 4%);
+  overflow: hidden;
+}
+
+.review-card__header {
+  align-items: flex-start;
+  border-bottom: 1px solid #e2e8f0;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: space-between;
+  padding: 0.75rem;
+}
+
+.review-card__title {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.review-card__meta {
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.4;
+  margin-top: 0.15rem;
+}
+
+.review-card__body {
+  padding: 0.75rem;
+}
+
+.review-plan-summary {
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.55;
+  margin: 0 0 0.75rem;
+}
+
+.review-plan-steps {
+  display: grid;
+  gap: 0.5rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.review-plan-steps li {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.55rem 0.65rem;
+}
+
+.review-plan-steps__title {
+  color: #0f172a;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.review-plan-steps__detail,
+.review-plan-steps__status {
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.review-plan-steps__status {
+  text-transform: uppercase;
+}
+
+.review-block-title {
+  color: #475569;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+  line-height: 1;
+  padding: 0.25rem 0.1rem 0;
+  text-transform: uppercase;
+}
+
 .workbench-empty-state {
   align-items: center;
   background: #f8fafc;
@@ -1894,6 +2097,44 @@ function truncate(value: string, maxLength: number) {
   max-height: 150px;
   overflow: auto;
   padding: 0.65rem 0.75rem;
+}
+
+.approval-card__preview {
+  padding: 0 0.75rem 0.75rem;
+}
+
+.approval-card__hint {
+  color: #b45309;
+  font-size: 11px;
+  line-height: 1.4;
+  margin: 0.45rem 0 0;
+}
+
+.command-preview {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.65rem;
+}
+
+.command-preview__label {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.command-preview code {
+  color: #0f172a;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.command-preview span {
+  color: #64748b;
+  font-size: 11px;
 }
 
 .approval-card__actions {

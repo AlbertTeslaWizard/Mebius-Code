@@ -161,11 +161,44 @@ export interface Plan {
   updatedAt: string;
 }
 
+export interface PlanBundle {
+  plan: Plan;
+  steps: PlanStep[];
+}
+
+export interface FilePatch {
+  id: string;
+  relativePath: string;
+  diffText: string;
+  status: string;
+  createdAt: string;
+  toolCall?: {
+    id: string;
+    name: string;
+    status: string;
+  };
+}
+
+export type ApprovalPreview =
+  | {
+      kind: 'patch';
+      path: string;
+      diffText: string;
+      truncated: boolean;
+    }
+  | {
+      kind: 'command';
+      command: string;
+      cwd?: string;
+      truncated: false;
+    };
+
 export interface Approval {
   id: string;
   status: string;
   reason?: string;
   createdAt: string;
+  preview?: ApprovalPreview;
   toolCall: {
     id: string;
     name: string;

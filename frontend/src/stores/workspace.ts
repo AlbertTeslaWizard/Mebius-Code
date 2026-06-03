@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { apiUrl, getAccessToken, jsonBody, request } from '../api/http';
 import type {
   ConnectResult,
+  FilePatch,
   GitActionResult,
   GitCommitResult,
   GitPushResult,
@@ -10,6 +11,7 @@ import type {
   Message,
   ModelConfig,
   Plan,
+  PlanBundle,
   PlanStep,
   Project,
   ProjectFile,
@@ -40,6 +42,7 @@ interface WorkspaceState {
   currentSession: Session | null;
   eventLog: Array<{ type: string; data: SsePayload; time: string }>;
   activePlan: { plan: Plan; steps: PlanStep[] } | null;
+  filePatches: FilePatch[];
   loading: boolean;
   eventStatus: 'idle' | 'connecting' | 'open' | 'closed';
   eventSource: EventSource | null;
@@ -66,6 +69,7 @@ export const useWorkspaceStore = defineStore('workspace', {
     currentSession: null,
     eventLog: [],
     activePlan: null,
+    filePatches: [],
     loading: false,
     eventStatus: 'idle',
     eventSource: null,
@@ -115,6 +119,7 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.messages = [];
       this.fileTree = [];
       this.activePlan = null;
+      this.filePatches = [];
       this.streamingAssistantId = null;
       this.agentActivity = null;
       this.gitStatus = null;
@@ -163,6 +168,8 @@ export const useWorkspaceStore = defineStore('workspace', {
       } else {
         this.currentSession = null;
         this.messages = [];
+        this.activePlan = null;
+        this.filePatches = [];
         this.streamingAssistantId = null;
         this.agentActivity = null;
         this.disconnectEvents();
@@ -336,6 +343,7 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.currentSession = null;
       this.messages = [];
       this.activePlan = null;
+      this.filePatches = [];
       this.streamingAssistantId = null;
       this.agentActivity = null;
 
@@ -349,6 +357,7 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.currentSession = await request<Session>(`/sessions/${session.id}`);
       this.agentActivity = this.currentSession.agentActivity ?? null;
       await this.loadMessages();
+      await this.refreshReviewData();
       this.connectEvents();
     },
     async switchSessionModel(modelConfigId: string) {
@@ -401,7 +410,7 @@ export const useWorkspaceStore = defineStore('workspace', {
     },
     async createPlan(goal: string) {
       if (!this.currentSession || !goal.trim()) return;
-      this.activePlan = await request<{ plan: Plan; steps: PlanStep[] }>(
+      this.activePlan = await request<PlanBundle>(
         `/sessions/${this.currentSession.id}/plan`,
         {
           method: 'POST',
@@ -415,6 +424,27 @@ export const useWorkspaceStore = defineStore('workspace', {
         method: 'POST',
       });
       this.activePlan = { ...this.activePlan, plan };
+    },
+    async loadLatestPlan() {
+      if (!this.currentSession) {
+        this.activePlan = null;
+        return null;
+      }
+      this.activePlan = await request<PlanBundle | null>(
+        `/sessions/${this.currentSession.id}/plans/latest`,
+      );
+      return this.activePlan;
+    },
+    async loadPatches() {
+      if (!this.currentSession) {
+        this.filePatches = [];
+        return [];
+      }
+      this.filePatches = await request<FilePatch[]>(`/sessions/${this.currentSession.id}/patches`);
+      return this.filePatches;
+    },
+    async refreshReviewData() {
+      await Promise.all([this.loadLatestPlan(), this.loadPatches()]);
     },
     async loadTree(path = '.', depth = 3) {
       if (!this.currentProject) return;
@@ -495,11 +525,16 @@ export const useWorkspaceStore = defineStore('workspace', {
             this.handleAgentStatus(data);
             return;
           }
+          if (type === 'plan_updated') {
+            void this.loadLatestPlan();
+            return;
+          }
           if (type === 'message_created') {
             this.handleMessageCreated(data);
             return;
           }
           if (type === 'tool_call_requested') {
+            void this.refreshReviewData();
             if (this.agentActivity?.status !== 'waiting_for_approval') {
               this.agentActivity = {
                 status: 'waiting_for_approval',
@@ -520,6 +555,9 @@ export const useWorkspaceStore = defineStore('workspace', {
                 status: 'using_tools',
                 toolName,
               };
+            }
+            if (type === 'patch_created') {
+              void Promise.all([this.loadPatches(), this.loadTree(), this.loadGitStatus()]);
             }
             return;
           }
