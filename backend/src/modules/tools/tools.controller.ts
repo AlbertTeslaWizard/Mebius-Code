@@ -39,4 +39,9 @@ export class ToolsReadController {
   patches(@Req() request: RequestWithUser, @Param('sessionId') sessionId: string) {
     return this.tools.listSessionPatches(request.user.sub, sessionId);
   }
+
+  @Get('sessions/:sessionId/command-runs')
+  commandRuns(@Req() request: RequestWithUser, @Param('sessionId') sessionId: string) {
+    return this.tools.listSessionCommandRuns(request.user.sub, sessionId);
+  }
 }

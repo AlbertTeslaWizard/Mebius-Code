@@ -71,16 +71,18 @@ describe('OpenAiCompatibleService', () => {
     });
   });
 
-  it('falls back to non-streaming chat when a provider rejects streaming', async () => {
+  it('falls back to non-streaming chat and emits one token event when a provider rejects streaming', async () => {
     const fetchMock = jest
       .fn()
       .mockResolvedValueOnce({ ok: false, status: 400 })
       .mockResolvedValueOnce({
         ok: true,
-        json: () =>
-          Promise.resolve({
-            choices: [{ message: { content: 'fallback response' } }],
-          }),
+        text: () =>
+          Promise.resolve(
+            JSON.stringify({
+              choices: [{ message: { content: 'fallback response' } }],
+            }),
+          ),
       });
     global.fetch = fetchMock as unknown as typeof fetch;
     const onToken = jest.fn();
@@ -88,8 +90,37 @@ describe('OpenAiCompatibleService', () => {
     const result = await service.streamChat(baseInput(), onToken);
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(onToken).not.toHaveBeenCalled();
+    expect(onToken).toHaveBeenCalledWith({
+      delta: 'fallback response',
+      content: 'fallback response',
+    });
     expect(result).toEqual({ content: 'fallback response' });
+  });
+
+  it('falls back to non-streaming chat and emits one token event when stream body is missing', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({ ok: true, body: null })
+      .mockResolvedValueOnce({
+        ok: true,
+        text: () =>
+          Promise.resolve(
+            JSON.stringify({
+              choices: [{ message: { content: 'body fallback' } }],
+            }),
+          ),
+      });
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const onToken = jest.fn();
+
+    const result = await service.streamChat(baseInput(), onToken);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(onToken).toHaveBeenCalledWith({
+      delta: 'body fallback',
+      content: 'body fallback',
+    });
+    expect(result).toEqual({ content: 'body fallback' });
   });
 
   it('includes provider error details in non-streaming failures', async () => {
@@ -110,6 +141,28 @@ describe('OpenAiCompatibleService', () => {
 
     await expect(service.chat(baseInput())).rejects.toThrow(
       'Model provider returned HTTP 400. reasoning_content is required for tool continuation type=invalid_request_error code=missing_reasoning_content',
+    );
+  });
+
+  it('reports an empty non-streaming response without leaking a JSON syntax error', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve(''),
+    }) as unknown as typeof fetch;
+
+    await expect(service.chat(baseInput())).rejects.toThrow(
+      'Model provider returned an empty response.',
+    );
+  });
+
+  it('reports invalid non-streaming JSON without leaking a JSON syntax error', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve('not json'),
+    }) as unknown as typeof fetch;
+
+    await expect(service.chat(baseInput())).rejects.toThrow(
+      'Model provider returned invalid JSON. not json',
     );
   });
 });

@@ -6,9 +6,12 @@ import {
   AlertCircle,
   Cable,
   Check,
+  ChevronDown,
+  ChevronRight,
   CheckCircle2,
   CircleDot,
   Clock3,
+  Clipboard,
   FileText,
   Folder,
   FolderTree,
@@ -24,6 +27,7 @@ import {
   Send,
   Settings,
   ShieldCheck,
+  Terminal,
   Trash2,
   X,
 } from 'lucide-vue-next';
@@ -84,6 +88,8 @@ const rightOverlayOpen = ref(false);
 const busy = ref(false);
 const error = ref('');
 const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth);
+const expandedCommandRunIds = ref<string[]>([]);
+const copiedCommandRunId = ref('');
 const liveLeftSidebarWidth = ref<number>(sidebarWidthLimits.left.defaultValue);
 const liveRightSidebarWidth = ref<number>(sidebarWidthLimits.right.defaultValue);
 const activeResizeSide = ref<SidebarSide | null>(null);
@@ -113,6 +119,15 @@ const canSubmitComposer = computed(
     workspace.agentActivity?.status !== 'waiting_for_approval',
 );
 const canExecutePlan = computed(() => workspace.activePlan?.plan.status === 'approved' && canChat.value && !busy.value);
+const commandRunStats = computed(() => {
+  const stats = { total: workspace.commandRuns.length, succeeded: 0, failed: 0, running: 0 };
+  workspace.commandRuns.forEach((run) => {
+    if (run.status === 'succeeded') stats.succeeded += 1;
+    if (run.status === 'failed') stats.failed += 1;
+    if (run.status === 'running' || run.status === 'pending') stats.running += 1;
+  });
+  return stats;
+});
 const composerModeOptions = computed<Array<{ label: string; value: ComposerMode }>>(() => [
   { label: locale.t('build'), value: 'build' },
   { label: locale.t('plan'), value: 'plan' },
@@ -336,6 +351,15 @@ watch(
     expandedFilePaths.value = Array.from(next);
   },
   { deep: true },
+);
+
+watch(
+  () => workspace.commandRuns[0]?.id,
+  (id) => {
+    if (id && !expandedCommandRunIds.value.includes(id)) {
+      expandedCommandRunIds.value = [id, ...expandedCommandRunIds.value];
+    }
+  },
 );
 
 async function runTask(action: () => Promise<unknown>) {
@@ -869,6 +893,39 @@ function approvalPreviewTitle(approval: Approval) {
   if (approval.preview?.kind === 'patch') return approval.preview.path;
   if (approval.preview?.kind === 'command') return approval.preview.command;
   return approval.toolCall.name;
+}
+
+function isCommandRunExpanded(id: string) {
+  return expandedCommandRunIds.value.includes(id);
+}
+
+function toggleCommandRun(id: string) {
+  if (isCommandRunExpanded(id)) {
+    expandedCommandRunIds.value = expandedCommandRunIds.value.filter((item) => item !== id);
+    return;
+  }
+  expandedCommandRunIds.value = [id, ...expandedCommandRunIds.value];
+}
+
+async function copyCommandRunOutput(runId: string, stdout: string, stderr: string) {
+  await navigator.clipboard.writeText([stdout, stderr].filter(Boolean).join('\n'));
+  copiedCommandRunId.value = runId;
+  window.setTimeout(() => {
+    if (copiedCommandRunId.value === runId) {
+      copiedCommandRunId.value = '';
+    }
+  }, 1400);
+}
+
+function commandRunToneClass(status: string) {
+  if (status === 'succeeded') return 'is-success';
+  if (status === 'failed') return 'is-danger';
+  if (status === 'running' || status === 'pending') return 'is-warning';
+  return '';
+}
+
+function commandRunExitLabel(exitCode?: number) {
+  return typeof exitCode === 'number' ? `exit ${exitCode}` : 'running';
 }
 
 function approvalContext(approval: Approval) {
@@ -1626,8 +1683,98 @@ function truncate(value: string, maxLength: number) {
             </div>
           </n-tab-pane>
 
-          <n-tab-pane name="events" :tab="locale.t('events')">
+          <n-tab-pane name="runs" :tab="locale.t('runs')">
             <div class="workbench-pane">
+              <section class="workbench-section">
+                <header class="workbench-section__header">
+                  <div class="min-w-0">
+                    <div class="workbench-section__title">
+                      <n-icon><Terminal /></n-icon>
+                      <span>{{ locale.t('runs') }}</span>
+                    </div>
+                    <p class="workbench-section__subtitle">
+                      {{ locale.t('runsSummary', commandRunStats) }}
+                    </p>
+                  </div>
+                  <n-button
+                    circle
+                    secondary
+                    size="small"
+                    :title="locale.t('refresh')"
+                    @click="workspace.loadCommandRuns"
+                  >
+                    <template #icon><n-icon><RefreshCw /></n-icon></template>
+                  </n-button>
+                </header>
+
+                <div class="workbench-list runs-list scrollbar-thin">
+                  <div v-if="workspace.commandRuns.length === 0" class="workbench-empty-state">
+                    <n-icon><Terminal /></n-icon>
+                    <span>{{ locale.t('noCommandRuns') }}</span>
+                  </div>
+                  <article
+                    v-for="run in workspace.commandRuns"
+                    v-else
+                    :key="run.id"
+                    class="run-card"
+                    :class="commandRunToneClass(run.status)"
+                  >
+                    <button class="run-card__header" type="button" @click="toggleCommandRun(run.id)">
+                      <span class="run-card__toggle">
+                        <n-icon>
+                          <ChevronDown v-if="isCommandRunExpanded(run.id)" />
+                          <ChevronRight v-else />
+                        </n-icon>
+                      </span>
+                      <span class="run-card__main">
+                        <span class="run-card__command">{{ run.command }}</span>
+                        <span class="run-card__meta">
+                          {{ run.status }} · {{ commandRunExitLabel(run.exitCode) }} · {{ formatEventTime(run.createdAt) }}
+                        </span>
+                      </span>
+                      <span class="run-card__status">{{ run.status }}</span>
+                    </button>
+
+                    <div v-if="isCommandRunExpanded(run.id)" class="run-card__body">
+                      <div v-if="run.cwd" class="run-card__cwd">{{ run.cwd }}</div>
+                      <div class="run-output-grid">
+                        <section class="run-output">
+                          <header>
+                            <span>{{ locale.t('stdout') }}</span>
+                            <n-button
+                              circle
+                              quaternary
+                              size="tiny"
+                              :disabled="!run.stdout && !run.stderr"
+                              :title="locale.t('copyOutput')"
+                              @click="copyCommandRunOutput(run.id, run.stdout, run.stderr)"
+                            >
+                              <template #icon>
+                                <n-icon>
+                                  <Check v-if="copiedCommandRunId === run.id" />
+                                  <Clipboard v-else />
+                                </n-icon>
+                              </template>
+                            </n-button>
+                          </header>
+                          <pre class="scrollbar-thin">{{ run.stdout || locale.t('noOutput') }}</pre>
+                        </section>
+                        <section class="run-output run-output--stderr">
+                          <header>
+                            <span>{{ locale.t('stderr') }}</span>
+                          </header>
+                          <pre class="scrollbar-thin">{{ run.stderr || locale.t('noOutput') }}</pre>
+                        </section>
+                      </div>
+                    </div>
+                  </article>
+                </div>
+              </section>
+            </div>
+          </n-tab-pane>
+
+          <n-tab-pane name="events" :tab="locale.t('events')">
+            <div class="workbench-pane workbench-pane--events">
               <section class="workbench-section">
                 <header class="workbench-section__header">
                   <div class="min-w-0">
@@ -1847,6 +1994,14 @@ function truncate(value: string, maxLength: number) {
   display: grid;
   gap: 0.75rem;
   grid-template-rows: minmax(190px, 30vh) minmax(0, 1fr);
+}
+
+.workbench-pane--events {
+  display: flex;
+}
+
+.workbench-pane--events > .workbench-section {
+  flex: 1;
 }
 
 .workbench-section {
@@ -2137,6 +2292,147 @@ function truncate(value: string, maxLength: number) {
   font-size: 11px;
 }
 
+.runs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.run-card {
+  background: #ffffff;
+  border: 1px solid #d9dee7;
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 4%);
+  overflow: hidden;
+}
+
+.run-card__header {
+  align-items: center;
+  background: #ffffff;
+  border: 0;
+  cursor: pointer;
+  display: grid;
+  gap: 0.55rem;
+  grid-template-columns: 1.25rem minmax(0, 1fr) auto;
+  padding: 0.72rem 0.75rem;
+  text-align: left;
+  width: 100%;
+}
+
+.run-card__header:hover {
+  background: #f8fafc;
+}
+
+.run-card__toggle {
+  color: #64748b;
+  display: inline-flex;
+}
+
+.run-card__main {
+  display: grid;
+  min-width: 0;
+}
+
+.run-card__command {
+  color: #0f172a;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-card__meta,
+.run-card__cwd {
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.run-card__status {
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  color: #64748b;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  padding: 0.32rem 0.5rem;
+  text-transform: uppercase;
+}
+
+.run-card.is-success .run-card__status {
+  background: #ecfdf3;
+  border-color: #bbf7d0;
+  color: #15803d;
+}
+
+.run-card.is-danger .run-card__status {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #b42318;
+}
+
+.run-card.is-warning .run-card__status {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #b45309;
+}
+
+.run-card__body {
+  border-top: 1px solid #e2e8f0;
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.75rem;
+}
+
+.run-output-grid {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.run-output {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.run-output header {
+  align-items: center;
+  background: #f8fafc;
+  border-bottom: 1px solid #e2e8f0;
+  color: #475569;
+  display: flex;
+  font-size: 11px;
+  font-weight: 800;
+  justify-content: space-between;
+  min-height: 32px;
+  padding: 0.35rem 0.55rem;
+  text-transform: uppercase;
+}
+
+.run-output pre {
+  background: #ffffff;
+  color: #334155;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  margin: 0;
+  max-height: 240px;
+  min-height: 56px;
+  overflow: auto;
+  padding: 0.65rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.run-output--stderr pre {
+  color: #7f1d1d;
+}
+
 .approval-card__actions {
   display: flex;
   flex-wrap: wrap;
@@ -2176,6 +2472,8 @@ function truncate(value: string, maxLength: number) {
 }
 
 .event-timeline {
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 0.75rem 0.75rem 0.75rem 0;
 }
 

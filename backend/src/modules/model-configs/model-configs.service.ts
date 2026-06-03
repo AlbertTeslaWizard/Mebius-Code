@@ -312,7 +312,7 @@ export class ModelConfigsService {
       if (!response.ok) {
         throw new BadRequestException(`Model provider returned HTTP ${response.status}.`);
       }
-      const payload = (await response.json()) as { data?: Array<{ id?: unknown }> };
+      const payload = await this.readProviderJson<{ data?: Array<{ id?: unknown }> }>(response);
       return (payload.data ?? [])
         .map((model) => model.id)
         .filter((id): id is string => typeof id === 'string' && id.length > 0);
@@ -325,6 +325,24 @@ export class ModelConfigsService {
       );
     } finally {
       clearTimeout(timeout);
+    }
+  }
+
+  private async readProviderJson<T>(response: Response): Promise<T> {
+    const text = await response.text().catch(() => '');
+    if (!text) {
+      throw new BadRequestException('Model provider returned an empty response.');
+    }
+
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      const preview = text.slice(0, 200).trim();
+      throw new BadRequestException(
+        preview
+          ? `Model provider returned invalid JSON. ${preview}`
+          : 'Model provider returned invalid JSON.',
+      );
     }
   }
 }

@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
 import { apiUrl, getAccessToken, jsonBody, request } from '../api/http';
 import type {
+  CommandRunView,
   ConnectResult,
   FilePatch,
   GitActionResult,
@@ -43,6 +44,7 @@ interface WorkspaceState {
   eventLog: Array<{ type: string; data: SsePayload; time: string }>;
   activePlan: { plan: Plan; steps: PlanStep[] } | null;
   filePatches: FilePatch[];
+  commandRuns: CommandRunView[];
   loading: boolean;
   eventStatus: 'idle' | 'connecting' | 'open' | 'closed';
   eventSource: EventSource | null;
@@ -70,6 +72,7 @@ export const useWorkspaceStore = defineStore('workspace', {
     eventLog: [],
     activePlan: null,
     filePatches: [],
+    commandRuns: [],
     loading: false,
     eventStatus: 'idle',
     eventSource: null,
@@ -120,6 +123,7 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.fileTree = [];
       this.activePlan = null;
       this.filePatches = [];
+      this.commandRuns = [];
       this.streamingAssistantId = null;
       this.agentActivity = null;
       this.gitStatus = null;
@@ -170,6 +174,7 @@ export const useWorkspaceStore = defineStore('workspace', {
         this.messages = [];
         this.activePlan = null;
         this.filePatches = [];
+        this.commandRuns = [];
         this.streamingAssistantId = null;
         this.agentActivity = null;
         this.disconnectEvents();
@@ -344,6 +349,7 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.messages = [];
       this.activePlan = null;
       this.filePatches = [];
+      this.commandRuns = [];
       this.streamingAssistantId = null;
       this.agentActivity = null;
 
@@ -374,6 +380,14 @@ export const useWorkspaceStore = defineStore('workspace', {
       if (!this.currentSession) return;
       this.messages = await request<Message[]>(`/sessions/${this.currentSession.id}/messages`);
     },
+    async refreshCurrentSession() {
+      if (!this.currentSession) return null;
+      const session = await request<Session>(`/sessions/${this.currentSession.id}`);
+      this.currentSession = session;
+      this.sessions = this.sessions.map((item) => (item.id === session.id ? session : item));
+      this.agentActivity = session.agentActivity ?? null;
+      return session;
+    },
     async submitText(content: string) {
       if (!this.currentSession || !content.trim()) return;
       const trimmed = content.trim();
@@ -393,13 +407,19 @@ export const useWorkspaceStore = defineStore('workspace', {
         });
         return result;
       }
+      await this.ensureEventStream();
       this.agentActivity = { status: 'thinking' };
       try {
         await request(`/sessions/${this.currentSession.id}/run`, {
           method: 'POST',
           body: jsonBody({ message: trimmed }),
         });
-        await this.loadMessages();
+        await Promise.all([
+          this.loadMessages(),
+          this.refreshCurrentSession(),
+          this.refreshReviewData(),
+          this.loadCommandRuns(),
+        ]);
       } catch (error) {
         this.agentActivity = {
           status: 'failed',
@@ -443,8 +463,18 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.filePatches = await request<FilePatch[]>(`/sessions/${this.currentSession.id}/patches`);
       return this.filePatches;
     },
+    async loadCommandRuns() {
+      if (!this.currentSession) {
+        this.commandRuns = [];
+        return [];
+      }
+      this.commandRuns = await request<CommandRunView[]>(
+        `/sessions/${this.currentSession.id}/command-runs`,
+      );
+      return this.commandRuns;
+    },
     async refreshReviewData() {
-      await Promise.all([this.loadLatestPlan(), this.loadPatches()]);
+      await Promise.all([this.loadLatestPlan(), this.loadPatches(), this.loadCommandRuns()]);
     },
     async loadTree(path = '.', depth = 3) {
       if (!this.currentProject) return;
@@ -509,6 +539,7 @@ export const useWorkspaceStore = defineStore('workspace', {
         'tool_call_requested',
         'tool_call_result',
         'patch_created',
+        'command_started',
         'command_output',
         'done',
       ].forEach((type) => {
@@ -543,7 +574,7 @@ export const useWorkspaceStore = defineStore('workspace', {
             }
             return;
           }
-          if (type === 'tool_call_result' || type === 'command_output' || type === 'patch_created') {
+          if (type === 'tool_call_result' || type === 'command_output' || type === 'patch_created' || type === 'command_started') {
             const toolName =
               typeof data.name === 'string'
                 ? data.name
@@ -558,6 +589,9 @@ export const useWorkspaceStore = defineStore('workspace', {
             }
             if (type === 'patch_created') {
               void Promise.all([this.loadPatches(), this.loadTree(), this.loadGitStatus()]);
+            }
+            if (type === 'command_started' || type === 'command_output') {
+              void this.loadCommandRuns();
             }
             return;
           }
@@ -585,9 +619,28 @@ export const useWorkspaceStore = defineStore('workspace', {
                 ) {
                   this.messages.push(streamingMessage);
                 }
+                this.streamingAssistantId = null;
+                this.agentActivity = null;
               });
           }
         });
+      });
+    },
+    async ensureEventStream() {
+      if (!this.currentSession || this.eventStatus === 'open') return;
+      this.connectEvents();
+      await this.waitForEventStreamOpen();
+    },
+    waitForEventStreamOpen(timeoutMs = 900): Promise<void> {
+      if (this.eventStatus === 'open') return Promise.resolve();
+      return new Promise((resolve) => {
+        const startedAt = Date.now();
+        const timer = window.setInterval(() => {
+          if (this.eventStatus === 'open' || Date.now() - startedAt >= timeoutMs) {
+            window.clearInterval(timer);
+            resolve();
+          }
+        }, 50);
       });
     },
     handleAgentStatus(data: SsePayload) {

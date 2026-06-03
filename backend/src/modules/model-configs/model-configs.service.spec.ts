@@ -38,10 +38,12 @@ describe('ModelConfigsService', () => {
     jest.clearAllMocks();
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
-      json: () =>
-        Promise.resolve({
-          data: [{ id: 'qwen-plus' }, { id: 'qwen-turbo' }],
-        }),
+      text: () =>
+        Promise.resolve(
+          JSON.stringify({
+            data: [{ id: 'qwen-plus' }, { id: 'qwen-turbo' }],
+          }),
+        ),
     }) as jest.Mock;
   });
 
@@ -107,6 +109,38 @@ describe('ModelConfigsService', () => {
         apiKey: 'bad-key',
       }),
     ).rejects.toThrow(BadRequestException);
+
+    expect(configs.save).not.toHaveBeenCalled();
+  });
+
+  it('rejects an empty provider models response without saving', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve(''),
+    }) as jest.Mock;
+
+    await expect(
+      service.connect({ id: 'owner-1' } as User, {
+        providerId: 'dashscope',
+        apiKey: 'sk-test',
+      }),
+    ).rejects.toThrow('Model provider returned an empty response.');
+
+    expect(configs.save).not.toHaveBeenCalled();
+  });
+
+  it('rejects an invalid provider models JSON response without saving', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve('not json'),
+    }) as jest.Mock;
+
+    await expect(
+      service.connect({ id: 'owner-1' } as User, {
+        providerId: 'dashscope',
+        apiKey: 'sk-test',
+      }),
+    ).rejects.toThrow('Model provider returned invalid JSON. not json');
 
     expect(configs.save).not.toHaveBeenCalled();
   });

@@ -179,6 +179,22 @@ export interface FilePatch {
   };
 }
 
+export interface CommandRunView {
+  id: string;
+  command: string;
+  cwd?: string;
+  status: string;
+  exitCode?: number;
+  stdout: string;
+  stderr: string;
+  createdAt: string;
+  toolCall?: {
+    id: string;
+    name: string;
+    status: string;
+  };
+}
+
 export type ApprovalPreview =
   | {
       kind: 'patch';

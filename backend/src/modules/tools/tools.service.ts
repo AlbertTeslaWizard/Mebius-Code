@@ -157,6 +157,17 @@ export class ToolsService {
     }));
   }
 
+  async listSessionCommandRuns(ownerId: string, sessionId: string) {
+    const session = await this.sessions.findOwned(ownerId, sessionId);
+    const runs = await this.commandRuns.find({
+      where: { session: { id: session.id } },
+      relations: { toolCall: true },
+      order: { createdAt: 'DESC' },
+      take: 50,
+    });
+    return runs.map((run) => this.serializeCommandRun(run));
+  }
+
   async approve(owner: User, approvalId: string): Promise<ToolCall> {
     const approval = await this.findPendingApproval(owner.id, approvalId);
     approval.status = ApprovalStatus.Approved;
@@ -385,6 +396,7 @@ export class ToolsService {
         status: CommandRunStatus.Running,
       }),
     );
+    this.events.publish(toolCall.session.id, 'command_started', this.serializeCommandRun(run));
 
     const result = await this.spawnCommand(parsed.command, parsed.args, cwd);
     run.exitCode = result.exitCode;
@@ -422,6 +434,26 @@ export class ToolsService {
       throw new NotFoundException('Pending approval not found.');
     }
     return approval;
+  }
+
+  private serializeCommandRun(run: CommandRun) {
+    return {
+      id: run.id,
+      command: run.command,
+      cwd: run.cwd,
+      status: run.status,
+      exitCode: run.exitCode,
+      stdout: run.stdout,
+      stderr: run.stderr,
+      createdAt: run.createdAt,
+      toolCall: run.toolCall
+        ? {
+            id: run.toolCall.id,
+            name: run.toolCall.name,
+            status: run.toolCall.status,
+          }
+        : undefined,
+    };
   }
 
   private async scanFiles(projectRoot: string, currentPath: string, depth: number): Promise<unknown[]> {

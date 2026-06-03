@@ -1,5 +1,5 @@
 import { Repository } from 'typeorm';
-import { ApprovalStatus, ToolCallStatus } from '../../common/enums/tool-status.enum';
+import { ApprovalStatus, CommandRunStatus, ToolCallStatus } from '../../common/enums/tool-status.enum';
 import { CommandPolicyService } from '../../common/security/command-policy.service';
 import { PathSandboxService } from '../../common/security/path-sandbox.service';
 import { AgentService } from '../agent/agent.service';
@@ -57,11 +57,23 @@ describe('ToolsService', () => {
     save: jest.fn(async (value) => value),
   } as unknown as jest.Mocked<Repository<ToolApproval>>;
   const patches = {} as jest.Mocked<Repository<FilePatch>>;
-  const commandRuns = {} as jest.Mocked<Repository<CommandRun>>;
-  const sessions = {} as jest.Mocked<SessionsService>;
-  const paths = {} as jest.Mocked<PathSandboxService>;
-  const commandPolicy = {} as jest.Mocked<CommandPolicyService>;
-  const audit = {} as jest.Mocked<AuditService>;
+  const commandRuns = {
+    create: jest.fn((value) => value),
+    find: jest.fn(),
+    save: jest.fn(async (value) => value),
+  } as unknown as jest.Mocked<Repository<CommandRun>>;
+  const sessions = {
+    findOwned: jest.fn(),
+  } as unknown as jest.Mocked<SessionsService>;
+  const paths = {
+    resolveProjectPath: jest.fn(),
+  } as unknown as jest.Mocked<PathSandboxService>;
+  const commandPolicy = {
+    parse: jest.fn(),
+  } as unknown as jest.Mocked<CommandPolicyService>;
+  const audit = {
+    record: jest.fn(),
+  } as unknown as jest.Mocked<AuditService>;
   const events = {
     publish: jest.fn(),
     complete: jest.fn(),
@@ -88,6 +100,17 @@ describe('ToolsService', () => {
     pendingToolCall.status = ToolCallStatus.PendingApproval;
     pendingToolCall.resultText = JSON.stringify({ kind: 'pending_tool_resume', payload: resumeContext });
     approvals.findOne.mockResolvedValue(approval);
+    sessions.findOwned.mockResolvedValue(session);
+    paths.resolveProjectPath.mockImplementation((_root, path) => `D:/workspace/${path}`);
+    commandPolicy.parse.mockReturnValue({ command: 'npm', args: ['test'] });
+    commandRuns.save.mockImplementation(async (value: any) => ({
+      id: 'run-1',
+      stdout: '',
+      stderr: '',
+      createdAt: new Date('2026-06-03T00:00:00.000Z'),
+      ...value,
+    }) as CommandRun);
+    audit.record.mockResolvedValue({} as any);
   });
 
   it('continues the agent after approving a pending tool call with resume context', async () => {
@@ -154,5 +177,75 @@ describe('ToolsService', () => {
       status: 'completed',
     });
     expect(events.complete).toHaveBeenCalledWith(session.id);
+  });
+
+  it('lists command runs for an owned session', async () => {
+    commandRuns.find.mockResolvedValue([
+      {
+        id: 'run-1',
+        session,
+        command: 'npm test',
+        cwd: 'D:/workspace',
+        exitCode: 0,
+        stdout: 'ok',
+        stderr: '',
+        status: CommandRunStatus.Succeeded,
+        createdAt: new Date('2026-06-03T00:00:00.000Z'),
+        toolCall: { id: 'tool-1', name: 'run_command', status: ToolCallStatus.Succeeded } as ToolCall,
+      } as CommandRun,
+    ]);
+
+    const result = await service.listSessionCommandRuns(owner.id, session.id);
+
+    expect(sessions.findOwned).toHaveBeenCalledWith(owner.id, session.id);
+    expect(commandRuns.find).toHaveBeenCalledWith({
+      where: { session: { id: session.id } },
+      relations: { toolCall: true },
+      order: { createdAt: 'DESC' },
+      take: 50,
+    });
+    expect(result[0]).toMatchObject({
+      id: 'run-1',
+      command: 'npm test',
+      exitCode: 0,
+      stdout: 'ok',
+      status: CommandRunStatus.Succeeded,
+      toolCall: { id: 'tool-1', name: 'run_command', status: ToolCallStatus.Succeeded },
+    });
+  });
+
+  it('publishes command_started before command output', async () => {
+    jest
+      .spyOn(service as any, 'spawnCommand')
+      .mockResolvedValue({ exitCode: 0, stdout: 'passed', stderr: '' });
+    const toolCall = {
+      id: 'tool-command',
+      session,
+      name: 'run_command',
+      arguments: { command: 'npm test' },
+    } as unknown as ToolCall;
+
+    const result = await (service as any).runCommand(toolCall, owner, session.project, toolCall.arguments);
+
+    expect(result).toContain('Command exited with 0');
+    expect(events.publish).toHaveBeenCalledWith(
+      session.id,
+      'command_started',
+      expect.objectContaining({
+        id: 'run-1',
+        command: 'npm test',
+        status: CommandRunStatus.Running,
+      }),
+    );
+    expect(events.publish).toHaveBeenCalledWith(
+      session.id,
+      'command_output',
+      expect.objectContaining({
+        commandRunId: 'run-1',
+        command: 'npm test',
+        exitCode: 0,
+        stdout: 'passed',
+      }),
+    );
   });
 });

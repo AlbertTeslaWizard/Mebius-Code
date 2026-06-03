@@ -64,9 +64,9 @@ export class OpenAiCompatibleService {
       throw new BadGatewayException(await this.readErrorResponse(response));
     }
 
-    const payload = (await response.json()) as {
+    const payload = await this.readJsonResponse<{
       choices?: Array<{ message?: LlmAssistantMessage }>;
-    };
+    }>(response);
     const message = payload.choices?.[0]?.message;
     if (!message) {
       throw new BadGatewayException('Model provider returned an empty response.');
@@ -91,16 +91,27 @@ export class OpenAiCompatibleService {
 
     if (!response.ok) {
       if ([400, 404, 422].includes(response.status)) {
-        return this.chat(input);
+        return this.chatWithTokenFallback(input, onToken);
       }
       throw new BadGatewayException(await this.readErrorResponse(response));
     }
 
     if (!response.body) {
-      return this.chat(input);
+      return this.chatWithTokenFallback(input, onToken);
     }
 
     return this.parseStream(response.body, onToken);
+  }
+
+  private async chatWithTokenFallback(
+    input: ChatInput,
+    onToken: (event: LlmTokenEvent) => void,
+  ): Promise<LlmAssistantMessage> {
+    const message = await this.chat(input);
+    if (message.content) {
+      onToken({ delta: message.content, content: message.content });
+    }
+    return message;
   }
 
   private createRequestBody(input: ChatInput, stream: boolean): Record<string, unknown> {
@@ -316,6 +327,24 @@ export class OpenAiCompatibleService {
         .join(' ');
     } catch {
       return `${fallback} ${text}`.trim();
+    }
+  }
+
+  private async readJsonResponse<T>(response: Response): Promise<T> {
+    const text = await response.text().catch(() => '');
+    if (!text) {
+      throw new BadGatewayException('Model provider returned an empty response.');
+    }
+
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      const preview = text.slice(0, 200).trim();
+      throw new BadGatewayException(
+        preview
+          ? `Model provider returned invalid JSON. ${preview}`
+          : 'Model provider returned invalid JSON.',
+      );
     }
   }
 
