@@ -17,7 +17,9 @@ export enum ApprovalStatus {
 export enum FilePatchStatus {
   Proposed = 'proposed',
   Applied = 'applied',
+  Conflicted = 'conflicted',
   Rejected = 'rejected',
+  Reverted = 'reverted',
 }
 
 export enum CommandRunStatus {
@@ -27,4 +29,3 @@ export enum CommandRunStatus {
   Failed = 'failed',
   Blocked = 'blocked',
 }
-

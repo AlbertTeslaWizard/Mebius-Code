@@ -2,8 +2,8 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { InjectRepository } from '@nestjs/typeorm';
 import { spawn } from 'child_process';
 import { Dirent } from 'fs';
-import { readdir, readFile, rm, stat } from 'fs/promises';
-import { basename, join, relative, resolve } from 'path';
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'fs/promises';
+import { basename, dirname, join, relative, resolve } from 'path';
 import { Repository } from 'typeorm';
 import { PathSandboxService } from '../../common/security/path-sandbox.service';
 import { AuditService } from '../audit/audit.service';
@@ -62,6 +62,12 @@ export interface GitPushResult {
   summary: string;
   branch: string | null;
   remote: string | null;
+}
+
+export interface ProjectFileView {
+  path: string;
+  content: string;
+  size: number;
 }
 
 @Injectable()
@@ -157,25 +163,154 @@ export class ProjectsService {
     return { deleted: true };
   }
 
-  async readProjectFile(ownerId: string, projectId: string, relativePath: string): Promise<{
-    path: string;
-    content: string;
-    size: number;
-  }> {
+  async readProjectFile(ownerId: string, projectId: string, relativePath: string): Promise<ProjectFileView> {
     const project = await this.findOwned(ownerId, projectId);
     const projectRoot = await this.ensureCurrentWorkspacePath(project);
     const absolutePath = this.paths.resolveProjectPath(projectRoot, relativePath);
-    const info = await stat(absolutePath);
-    if (!info.isFile()) {
-      throw new BadRequestException('Path is not a file.');
-    }
-    if (info.size > 512 * 1024) {
-      throw new BadRequestException('File is too large to read through the API.');
-    }
+    const info = await this.assertReadableTextFile(absolutePath);
     return {
       path: this.toRelative(projectRoot, absolutePath),
       content: await readFile(absolutePath, 'utf8'),
       size: info.size,
+    };
+  }
+
+  async saveProjectFile(
+    owner: User,
+    projectId: string,
+    relativePath: string,
+    content: string,
+  ): Promise<ProjectFileView> {
+    const project = await this.findOwned(owner.id, projectId);
+    const projectRoot = await this.ensureCurrentWorkspacePath(project);
+    const absolutePath = this.paths.resolveProjectPath(projectRoot, relativePath);
+    await this.assertReadableTextFile(absolutePath);
+
+    const byteLength = Buffer.byteLength(content, 'utf8');
+    if (byteLength > 512 * 1024) {
+      throw new BadRequestException('File content is too large to save through the API.');
+    }
+
+    await writeFile(absolutePath, content, 'utf8');
+    const savedInfo = await stat(absolutePath);
+    const safePath = this.toRelative(projectRoot, absolutePath);
+    await this.audit.record({
+      actor: owner,
+      action: 'project.file_saved',
+      resourceType: 'project',
+      resourceId: project.id,
+      metadata: { path: safePath, size: savedInfo.size },
+    });
+
+    return {
+      path: safePath,
+      content: await readFile(absolutePath, 'utf8'),
+      size: savedInfo.size,
+    };
+  }
+
+  async createProjectFile(
+    owner: User,
+    projectId: string,
+    relativePath: string,
+    content: string,
+  ): Promise<ProjectFileView> {
+    const project = await this.findOwned(owner.id, projectId);
+    const projectRoot = await this.ensureCurrentWorkspacePath(project);
+    const absolutePath = this.paths.resolveProjectPath(projectRoot, relativePath);
+    if (absolutePath === projectRoot) {
+      throw new BadRequestException('Path is not a file.');
+    }
+
+    const byteLength = Buffer.byteLength(content, 'utf8');
+    if (byteLength > 512 * 1024) {
+      throw new BadRequestException('File content is too large to save through the API.');
+    }
+
+    const existing = await stat(absolutePath).catch(() => null);
+    if (existing) {
+      throw new BadRequestException('File already exists.');
+    }
+
+    await mkdir(dirname(absolutePath), { recursive: true });
+    await writeFile(absolutePath, content, 'utf8');
+    const savedInfo = await stat(absolutePath);
+    const safePath = this.toRelative(projectRoot, absolutePath);
+    await this.audit.record({
+      actor: owner,
+      action: 'project.file_created',
+      resourceType: 'project',
+      resourceId: project.id,
+      metadata: { path: safePath, size: savedInfo.size },
+    });
+
+    return {
+      path: safePath,
+      content: await readFile(absolutePath, 'utf8'),
+      size: savedInfo.size,
+    };
+  }
+
+  async deleteProjectFile(
+    owner: User,
+    projectId: string,
+    relativePath: string,
+  ): Promise<{ deleted: true; path: string }> {
+    const project = await this.findOwned(owner.id, projectId);
+    const projectRoot = await this.ensureCurrentWorkspacePath(project);
+    const absolutePath = this.paths.resolveProjectPath(projectRoot, relativePath);
+    await this.assertReadableTextFile(absolutePath);
+    const safePath = this.toRelative(projectRoot, absolutePath);
+
+    await rm(absolutePath);
+    await this.audit.record({
+      actor: owner,
+      action: 'project.file_deleted',
+      resourceType: 'project',
+      resourceId: project.id,
+      metadata: { path: safePath },
+    });
+
+    return { deleted: true, path: safePath };
+  }
+
+  async renameProjectFile(
+    owner: User,
+    projectId: string,
+    relativePath: string,
+    newRelativePath: string,
+  ): Promise<ProjectFileView> {
+    const project = await this.findOwned(owner.id, projectId);
+    const projectRoot = await this.ensureCurrentWorkspacePath(project);
+    const sourcePath = this.paths.resolveProjectPath(projectRoot, relativePath);
+    await this.assertReadableTextFile(sourcePath);
+
+    const targetPath = this.paths.resolveProjectPath(projectRoot, newRelativePath);
+    if (targetPath === projectRoot) {
+      throw new BadRequestException('Path is not a file.');
+    }
+    const existingTarget = await stat(targetPath).catch(() => null);
+    if (existingTarget) {
+      throw new BadRequestException('Target file already exists.');
+    }
+
+    await mkdir(dirname(targetPath), { recursive: true });
+    await rename(sourcePath, targetPath);
+    const savedInfo = await stat(targetPath);
+    const safeSourcePath = this.toRelative(projectRoot, sourcePath);
+    const safeTargetPath = this.toRelative(projectRoot, targetPath);
+    await this.audit.record({
+      actor: owner,
+      action: 'project.file_renamed',
+      resourceType: 'project',
+      resourceId: project.id,
+      metadata: { path: safeSourcePath, newPath: safeTargetPath, size: savedInfo.size },
+    });
+
+    return {
+      path: safeTargetPath,
+      content: await readFile(targetPath, 'utf8'),
+      size: savedInfo.size,
     };
   }
 
@@ -382,6 +517,17 @@ export class ProjectsService {
       nodes.push(node);
     }
     return nodes;
+  }
+
+  private async assertReadableTextFile(absolutePath: string) {
+    const info = await stat(absolutePath);
+    if (!info.isFile()) {
+      throw new BadRequestException('Path is not a file.');
+    }
+    if (info.size > 512 * 1024) {
+      throw new BadRequestException('File is too large to read through the API.');
+    }
+    return info;
   }
 
   private isHiddenOrBlocked(entry: Dirent): boolean {

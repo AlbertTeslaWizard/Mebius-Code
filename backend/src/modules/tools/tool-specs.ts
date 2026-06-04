@@ -47,13 +47,31 @@ export const CODING_TOOL_SPECS = [
     type: 'function',
     function: {
       name: 'create_patch',
-      description: 'Replace or create a file with proposed content. Requires user approval.',
+      description:
+        'Replace or create one or more files with proposed full file content. Requires user approval.',
       parameters: {
         type: 'object',
-        required: ['path', 'content'],
         properties: {
-          path: { type: 'string' },
-          content: { type: 'string' },
+          path: {
+            type: 'string',
+            description: 'Relative file path for a single-file patch. Prefer files for multi-file edits.',
+          },
+          content: {
+            type: 'string',
+            description: 'Full target file content for a single-file patch.',
+          },
+          files: {
+            type: 'array',
+            description: 'Multi-file patch set. Each item is full target file content for one path.',
+            items: {
+              type: 'object',
+              required: ['path', 'content'],
+              properties: {
+                path: { type: 'string' },
+                content: { type: 'string' },
+              },
+            },
+          },
           reason: { type: 'string' },
         },
       },
@@ -76,4 +94,3 @@ export const CODING_TOOL_SPECS = [
     },
   },
 ];
-

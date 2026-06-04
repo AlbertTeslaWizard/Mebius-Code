@@ -62,21 +62,23 @@ export class AgentService {
     const session = await this.sessions.findOwned(owner.id, sessionId);
     const modelConfigId = dto.modelConfigId ?? session.activeModelConfig?.id;
     const config = await this.modelConfigs.findRuntime(owner.id, modelConfigId);
-    const response = await this.llm.chat({
-      config,
-      temperature: 0.1,
-      messages: [
-        {
-          role: 'system',
-          content:
-            'You are Mebius Code Plan Mode. Return strict JSON with keys summary and steps. steps must be an array of {title, detail}. Do not execute tools.',
-        },
-        {
-          role: 'user',
-          content: dto.goal,
-        },
-      ],
-    });
+    const response = await this.withModelDiagnostics(session.id, config, 'plan', 0, () =>
+      this.llm.chat({
+        config,
+        temperature: 0.1,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are Mebius Code Plan Mode. Return strict JSON with keys summary and steps. steps must be an array of {title, detail}. Do not execute tools.',
+          },
+          {
+            role: 'user',
+            content: dto.goal,
+          },
+        ],
+      }),
+    );
     const parsed = this.parsePlan(response.content ?? '', dto.goal);
     const plan = await this.plans.save(
       this.plans.create({
@@ -144,6 +146,15 @@ export class AgentService {
     toolCalls: unknown[];
   }> {
     const session = await this.sessions.findOwned(owner.id, sessionId);
+    const approvedPlan = dto.approvedPlanId
+      ? await this.findOwnedPlan(owner.id, dto.approvedPlanId)
+      : null;
+    if (approvedPlan && approvedPlan.session.id !== session.id) {
+      throw new BadRequestException('Approved plan does not belong to this session.');
+    }
+    if (approvedPlan && approvedPlan.status !== PlanStatus.Approved) {
+      throw new BadRequestException('Only approved plans can be executed.');
+    }
     const pendingApproval = await this.sessions.findPendingApprovalTool(session.id);
     if (pendingApproval?.toolCall) {
       throw new BadRequestException(
@@ -151,6 +162,14 @@ export class AgentService {
       );
     }
     try {
+      if (approvedPlan) {
+        approvedPlan.status = PlanStatus.Running;
+        await this.plans.save(approvedPlan);
+        this.events.publish(session.id, 'plan_updated', {
+          planId: approvedPlan.id,
+          status: approvedPlan.status,
+        });
+      }
       if (dto.message) {
         const userMessage = await this.sessions.addMessage(session, MessageRole.User, dto.message);
         this.events.publish(session.id, 'message_created', {
@@ -169,6 +188,9 @@ export class AgentService {
       const messages = this.buildModelMessages(summary?.content, history);
       return await this.continueRun(owner, session, config, messages, []);
     } catch (error) {
+      if (approvedPlan) {
+        await this.markPlanStatus(approvedPlan, PlanStatus.Failed);
+      }
       this.events.publish(session.id, 'agent_status', {
         status: 'failed',
         message: error instanceof Error ? error.message : 'Agent run failed.',
@@ -237,20 +259,28 @@ export class AgentService {
       this.events.publish(session.id, 'agent_status', {
         status: turn === 0 ? initialStatus : 'using_tools',
       });
-      const response = await this.llm.streamChat(
-        {
-          config,
-          messages,
-          tools: CODING_TOOL_SPECS,
-        },
-        ({ delta, content }) => {
-          this.events.publish(session.id, 'token', { delta, content });
-        },
+      const response = await this.withModelDiagnostics(
+        session.id,
+        config,
+        'chat',
+        turn,
+        () =>
+          this.llm.streamChat(
+            {
+              config,
+              messages,
+              tools: CODING_TOOL_SPECS,
+            },
+            ({ delta, content }) => {
+              this.events.publish(session.id, 'token', { delta, content });
+            },
+          ),
       );
 
       const toolCalls = response.tool_calls ?? [];
       if (toolCalls.length === 0) {
         const assistant = await this.saveAssistantResponse(session, response.content ?? '');
+        await this.markLatestRunningPlan(session.id, PlanStatus.Completed);
         this.events.publish(session.id, 'agent_status', { status: 'completed' });
         this.events.complete(session.id);
         return { assistant, toolCalls: createdToolCalls };
@@ -345,9 +375,14 @@ export class AgentService {
       session,
       'I inspected the project, but the tool workflow did not finish within the configured turn limit. Please narrow the request or ask me to continue from the latest tool results.',
     );
+    await this.markLatestRunningPlan(session.id, PlanStatus.Failed);
     this.events.publish(session.id, 'agent_status', { status: 'completed' });
     this.events.complete(session.id);
     return { assistant, toolCalls: createdToolCalls };
+  }
+
+  async markLatestRunningPlanFailed(sessionId: string): Promise<void> {
+    await this.markLatestRunningPlan(sessionId, PlanStatus.Failed);
   }
 
   private getSessionId(session: Message['session']): string {
@@ -362,6 +397,53 @@ export class AgentService {
 
   private requiresApproval(toolName: string): boolean {
     return toolName === 'create_patch' || toolName === 'run_command';
+  }
+
+  private async withModelDiagnostics<T>(
+    sessionId: string,
+    config: Awaited<ReturnType<ModelConfigsService['findRuntime']>>,
+    mode: 'chat' | 'plan',
+    turn: number,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    const startedAt = Date.now();
+    const metadata = this.modelDiagnosticMetadata(config, mode, turn);
+    this.events.publish(sessionId, 'model_call_started', {
+      ...metadata,
+      startedAt: new Date(startedAt).toISOString(),
+    });
+
+    try {
+      const result = await action();
+      this.events.publish(sessionId, 'model_call_completed', {
+        ...metadata,
+        durationMs: Date.now() - startedAt,
+      });
+      return result;
+    } catch (error) {
+      this.events.publish(sessionId, 'model_call_failed', {
+        ...metadata,
+        durationMs: Date.now() - startedAt,
+        message: error instanceof Error ? error.message : 'Model call failed.',
+      });
+      throw error;
+    }
+  }
+
+  private modelDiagnosticMetadata(
+    config: Awaited<ReturnType<ModelConfigsService['findRuntime']>>,
+    mode: 'chat' | 'plan',
+    turn: number,
+  ): Record<string, unknown> {
+    return {
+      mode,
+      turn,
+      modelConfigId: config.id,
+      displayName: config.displayName,
+      modelName: config.modelName,
+      baseUrl: config.baseUrl,
+      providerId: config.providerId ?? null,
+    };
   }
 
   private buildModelMessages(summary: string | undefined, history: Message[]): LlmMessage[] {
@@ -593,6 +675,27 @@ export class AgentService {
       throw new NotFoundException('Plan not found.');
     }
     return plan;
+  }
+
+  private async markLatestRunningPlan(sessionId: string, status: PlanStatus.Completed | PlanStatus.Failed) {
+    const plan = await this.plans.findOne({
+      where: { session: { id: sessionId }, status: PlanStatus.Running },
+      relations: { session: true },
+      order: { updatedAt: 'DESC' },
+    });
+    if (!plan) {
+      return;
+    }
+    await this.markPlanStatus(plan, status);
+  }
+
+  private async markPlanStatus(plan: Plan, status: PlanStatus): Promise<void> {
+    plan.status = status;
+    const saved = await this.plans.save(plan);
+    this.events.publish(plan.session.id, 'plan_updated', {
+      planId: plan.id,
+      status: saved.status,
+    });
   }
 
   private parsePlan(content: string, goal: string): ParsedPlan {

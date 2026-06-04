@@ -1,5 +1,5 @@
 import { ConfigService } from '@nestjs/config';
-import { access, mkdir, mkdtemp, rm, writeFile } from 'fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { Repository } from 'typeorm';
@@ -75,6 +75,161 @@ describe('ProjectsService', () => {
     expect(project.workspacePath).toBe(expectedRoot);
     expect(projects.save).toHaveBeenCalledWith(expect.objectContaining({ workspacePath: expectedRoot }));
     await expect(access(expectedRoot)).resolves.toBeUndefined();
+  });
+
+  it('saves an owned existing text file and records audit metadata', async () => {
+    const project = projectFixture(paths.getProjectRoot('project-1'));
+    projects.findOne.mockResolvedValue(project);
+    await mkdir(project.workspacePath, { recursive: true });
+    await writeFile(join(project.workspacePath, 'notes.txt'), 'old content');
+
+    const result = await service.saveProjectFile(owner, project.id, 'notes.txt', 'new content');
+
+    await expect(readFile(join(project.workspacePath, 'notes.txt'), 'utf8')).resolves.toBe(
+      'new content',
+    );
+    expect(audit.record).toHaveBeenCalledWith({
+      actor: owner,
+      action: 'project.file_saved',
+      resourceType: 'project',
+      resourceId: project.id,
+      metadata: { path: 'notes.txt', size: 11 },
+    });
+    expect(result).toEqual({
+      path: 'notes.txt',
+      content: 'new content',
+      size: 11,
+    });
+  });
+
+  it('creates a new nested text file and records audit metadata', async () => {
+    const project = projectFixture(paths.getProjectRoot('project-1'));
+    projects.findOne.mockResolvedValue(project);
+    await mkdir(project.workspacePath, { recursive: true });
+
+    const result = await service.createProjectFile(owner, project.id, 'src/demo.ts', '');
+
+    await expect(readFile(join(project.workspacePath, 'src', 'demo.ts'), 'utf8')).resolves.toBe('');
+    expect(audit.record).toHaveBeenCalledWith({
+      actor: owner,
+      action: 'project.file_created',
+      resourceType: 'project',
+      resourceId: project.id,
+      metadata: { path: 'src/demo.ts', size: 0 },
+    });
+    expect(result).toEqual({
+      path: 'src/demo.ts',
+      content: '',
+      size: 0,
+    });
+  });
+
+  it('rejects creating blocked or existing files', async () => {
+    const project = projectFixture(paths.getProjectRoot('project-1'));
+    projects.findOne.mockResolvedValue(project);
+    await mkdir(project.workspacePath, { recursive: true });
+    await writeFile(join(project.workspacePath, 'notes.txt'), 'content');
+
+    await expect(service.createProjectFile(owner, project.id, '.git/config', '')).rejects.toThrow();
+    await expect(service.createProjectFile(owner, project.id, 'notes.txt', '')).rejects.toThrow(
+      'File already exists.',
+    );
+  });
+
+  it('rejects saving blocked workspace paths', async () => {
+    const project = projectFixture(paths.getProjectRoot('project-1'));
+    projects.findOne.mockResolvedValue(project);
+    await mkdir(project.workspacePath, { recursive: true });
+
+    await expect(service.saveProjectFile(owner, project.id, '.env', 'secret')).rejects.toThrow();
+    expect(audit.record).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'project.file_saved' }));
+  });
+
+  it('rejects saving directories and oversized content', async () => {
+    const project = projectFixture(paths.getProjectRoot('project-1'));
+    projects.findOne.mockResolvedValue(project);
+    await mkdir(join(project.workspacePath, 'src'), { recursive: true });
+    await writeFile(join(project.workspacePath, 'src', 'app.ts'), 'old content');
+
+    await expect(service.saveProjectFile(owner, project.id, 'src', 'content')).rejects.toThrow(
+      'Path is not a file.',
+    );
+    await expect(
+      service.saveProjectFile(owner, project.id, 'src/app.ts', 'x'.repeat(512 * 1024 + 1)),
+    ).rejects.toThrow('File content is too large to save through the API.');
+  });
+
+  it('deletes an owned text file and records audit metadata', async () => {
+    const project = projectFixture(paths.getProjectRoot('project-1'));
+    projects.findOne.mockResolvedValue(project);
+    await mkdir(project.workspacePath, { recursive: true });
+    await writeFile(join(project.workspacePath, 'notes.txt'), 'content');
+
+    const result = await service.deleteProjectFile(owner, project.id, 'notes.txt');
+
+    await expect(access(join(project.workspacePath, 'notes.txt'))).rejects.toThrow();
+    expect(audit.record).toHaveBeenCalledWith({
+      actor: owner,
+      action: 'project.file_deleted',
+      resourceType: 'project',
+      resourceId: project.id,
+      metadata: { path: 'notes.txt' },
+    });
+    expect(result).toEqual({ deleted: true, path: 'notes.txt' });
+  });
+
+  it('rejects deleting directories and blocked paths', async () => {
+    const project = projectFixture(paths.getProjectRoot('project-1'));
+    projects.findOne.mockResolvedValue(project);
+    await mkdir(join(project.workspacePath, 'src'), { recursive: true });
+
+    await expect(service.deleteProjectFile(owner, project.id, 'src')).rejects.toThrow(
+      'Path is not a file.',
+    );
+    await expect(service.deleteProjectFile(owner, project.id, '.git/config')).rejects.toThrow();
+    expect(audit.record).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'project.file_deleted' }));
+  });
+
+  it('renames an owned file into a nested path and records audit metadata', async () => {
+    const project = projectFixture(paths.getProjectRoot('project-1'));
+    projects.findOne.mockResolvedValue(project);
+    await mkdir(project.workspacePath, { recursive: true });
+    await writeFile(join(project.workspacePath, 'notes.txt'), 'content');
+
+    const result = await service.renameProjectFile(owner, project.id, 'notes.txt', 'docs/renamed.txt');
+
+    await expect(access(join(project.workspacePath, 'notes.txt'))).rejects.toThrow();
+    await expect(readFile(join(project.workspacePath, 'docs', 'renamed.txt'), 'utf8')).resolves.toBe(
+      'content',
+    );
+    expect(audit.record).toHaveBeenCalledWith({
+      actor: owner,
+      action: 'project.file_renamed',
+      resourceType: 'project',
+      resourceId: project.id,
+      metadata: { path: 'notes.txt', newPath: 'docs/renamed.txt', size: 7 },
+    });
+    expect(result).toEqual({
+      path: 'docs/renamed.txt',
+      content: 'content',
+      size: 7,
+    });
+  });
+
+  it('rejects renaming directories, blocked paths, and existing targets', async () => {
+    const project = projectFixture(paths.getProjectRoot('project-1'));
+    projects.findOne.mockResolvedValue(project);
+    await mkdir(join(project.workspacePath, 'src'), { recursive: true });
+    await writeFile(join(project.workspacePath, 'notes.txt'), 'content');
+    await writeFile(join(project.workspacePath, 'existing.txt'), 'target');
+
+    await expect(service.renameProjectFile(owner, project.id, 'src', 'moved')).rejects.toThrow(
+      'Path is not a file.',
+    );
+    await expect(service.renameProjectFile(owner, project.id, 'notes.txt', '.env')).rejects.toThrow();
+    await expect(
+      service.renameProjectFile(owner, project.id, 'notes.txt', 'existing.txt'),
+    ).rejects.toThrow('Target file already exists.');
   });
 
   it('deletes only the current sandbox project root when persisted workspace path is from another environment', async () => {

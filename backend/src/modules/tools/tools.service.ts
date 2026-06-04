@@ -2,7 +2,7 @@ import { forwardRef, Inject, Injectable, NotFoundException, BadRequestException 
 import { InjectRepository } from '@nestjs/typeorm';
 import { spawn } from 'child_process';
 import { existsSync } from 'fs';
-import { mkdir, readdir, readFile, stat, writeFile } from 'fs/promises';
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
 import { Repository } from 'typeorm';
 import {
@@ -36,6 +36,16 @@ type ApprovalPreview =
       truncated: boolean;
     }
   | {
+      kind: 'patch_set';
+      files: Array<{
+        path: string;
+        diffText: string;
+        truncated: boolean;
+        status: FilePatchStatus;
+      }>;
+      truncated: boolean;
+    }
+  | {
       kind: 'command';
       command: string;
       cwd?: string;
@@ -45,6 +55,11 @@ type ApprovalPreview =
 type PendingApprovalResponse = ToolApproval & {
   preview?: ApprovalPreview;
 };
+
+interface PatchInputFile {
+  path: string;
+  content: string;
+}
 
 @Injectable()
 export class ToolsService {
@@ -87,6 +102,9 @@ export class ToolsService {
     );
 
     if (requiresApproval) {
+      if (input.name === 'create_patch') {
+        await this.createProposedPatches(toolCall, session.project as Project, input.args);
+      }
       const approval = await this.approvals.save(
         this.approvals.create({
           toolCall,
@@ -230,6 +248,7 @@ export class ToolsService {
         status: 'failed',
         message: saved.resultText,
       });
+      await this.agent.markLatestRunningPlanFailed(toolCall.session.id);
       this.events.complete(toolCall.session.id);
       return saved;
     }
@@ -242,6 +261,17 @@ export class ToolsService {
     approval.approver = owner;
     approval.toolCall.status = ToolCallStatus.Rejected;
     await this.toolCalls.save(approval.toolCall);
+    if (approval.toolCall.name === 'create_patch') {
+      const proposed = await this.patches.find({
+        where: { toolCall: { id: approval.toolCall.id }, status: FilePatchStatus.Proposed },
+      });
+      await Promise.all(
+        proposed.map((patch) => {
+          patch.status = FilePatchStatus.Rejected;
+          return this.patches.save(patch);
+        }),
+      );
+    }
     const saved = await this.approvals.save(approval);
     if (resumeContext) {
       await this.agent.recordToolResultMessage(
@@ -255,7 +285,51 @@ export class ToolsService {
     this.events.publish(approval.toolCall.session.id, 'agent_status', {
       status: 'completed',
     });
+    await this.agent.markLatestRunningPlanFailed(approval.toolCall.session.id);
     this.events.complete(approval.toolCall.session.id);
+    return saved;
+  }
+
+  async revertPatch(owner: User, patchId: string): Promise<FilePatch> {
+    const patch = await this.patches.findOne({
+      where: { id: patchId, project: { owner: { id: owner.id } } },
+      relations: { project: { owner: true }, session: true, toolCall: true },
+    });
+    if (!patch) {
+      throw new NotFoundException('Patch not found.');
+    }
+    if (patch.status !== FilePatchStatus.Applied) {
+      throw new BadRequestException('Only applied patches can be reverted.');
+    }
+
+    const project = patch.project as Project;
+    const target = this.paths.resolveProjectPath(project.workspacePath, patch.relativePath);
+    const currentContent = existsSync(target) ? await readFile(target, 'utf8') : null;
+    if (currentContent !== patch.patchedContent) {
+      throw new BadRequestException('Patch cannot be reverted because the file changed after it was applied.');
+    }
+
+    if (patch.originalContent === undefined || patch.originalContent === null) {
+      await rm(target, { force: true });
+    } else {
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, patch.originalContent, 'utf8');
+    }
+
+    patch.status = FilePatchStatus.Reverted;
+    const saved = await this.patches.save(patch);
+    await this.audit.record({
+      actor: owner,
+      action: 'tool.patch_reverted',
+      resourceType: 'file_patch',
+      resourceId: patch.id,
+      metadata: { path: patch.relativePath, toolCallId: patch.toolCall?.id },
+    });
+    this.events.publish((patch.session as { id: string }).id, 'patch_reverted', {
+      patchId: patch.id,
+      path: patch.relativePath,
+      status: saved.status,
+    });
     return saved;
   }
 
@@ -335,40 +409,54 @@ export class ToolsService {
     project: Project,
     args: Record<string, unknown>,
   ): Promise<string> {
-    if (typeof args.path !== 'string' || typeof args.content !== 'string') {
-      throw new BadRequestException('create_patch requires path and content.');
+    const proposed = await this.ensureProposedPatches(toolCall, project, args);
+    if (proposed.length === 0) {
+      throw new BadRequestException('There are no proposed patches to apply.');
     }
-    const target = this.paths.resolveProjectPath(project.workspacePath, args.path);
-    const originalContent = existsSync(target) ? await readFile(target, 'utf8') : '';
-    await mkdir(dirname(target), { recursive: true });
-    await writeFile(target, args.content, 'utf8');
+    const conflicts: FilePatch[] = [];
 
-    const patch = await this.patches.save(
-      this.patches.create({
-        project,
-        session: toolCall.session,
-        toolCall,
-        relativePath: args.path,
-        originalContent,
-        patchedContent: args.content,
-        diffText: this.makeDiff(args.path, originalContent, args.content).diffText,
-        status: FilePatchStatus.Applied,
-      }),
-    );
+    for (const patch of proposed) {
+      const target = this.paths.resolveProjectPath(project.workspacePath, patch.relativePath);
+      const currentContent = existsSync(target) ? await readFile(target, 'utf8') : null;
+      const originalContent = patch.originalContent ?? null;
+      if (currentContent !== originalContent) {
+        conflicts.push(patch);
+      }
+    }
 
-    await this.audit.record({
-      actor: owner,
-      action: 'tool.patch_applied',
-      resourceType: 'file_patch',
-      resourceId: patch.id,
-      metadata: { path: args.path, toolCallId: toolCall.id },
-    });
-    this.events.publish(toolCall.session.id, 'patch_created', {
-      patchId: patch.id,
-      path: patch.relativePath,
-      status: patch.status,
-    });
-    return `Patch applied to ${args.path}.`;
+    if (conflicts.length > 0) {
+      await Promise.all(
+        conflicts.map((patch) => {
+          patch.status = FilePatchStatus.Conflicted;
+          return this.patches.save(patch);
+        }),
+      );
+      throw new BadRequestException(
+        `Patch conflict detected for ${conflicts.map((patch) => patch.relativePath).join(', ')}. Regenerate the patch from the latest file contents.`,
+      );
+    }
+
+    for (const patch of proposed) {
+      const target = this.paths.resolveProjectPath(project.workspacePath, patch.relativePath);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, patch.patchedContent, 'utf8');
+      patch.status = FilePatchStatus.Applied;
+      await this.patches.save(patch);
+      await this.audit.record({
+        actor: owner,
+        action: 'tool.patch_applied',
+        resourceType: 'file_patch',
+        resourceId: patch.id,
+        metadata: { path: patch.relativePath, toolCallId: toolCall.id },
+      });
+      this.events.publish(toolCall.session.id, 'patch_created', {
+        patchId: patch.id,
+        path: patch.relativePath,
+        status: patch.status,
+      });
+    }
+
+    return `Patch applied to ${proposed.map((patch) => patch.relativePath).join(', ')}.`;
   }
 
   private async runCommand(
@@ -456,6 +544,89 @@ export class ToolsService {
     };
   }
 
+  private async ensureProposedPatches(
+    toolCall: ToolCall,
+    project: Project,
+    args: Record<string, unknown>,
+  ): Promise<FilePatch[]> {
+    const existing = await this.patches.find({
+      where: { toolCall: { id: toolCall.id } },
+      order: { createdAt: 'ASC' },
+    });
+    if (existing.length > 0) {
+      return existing.filter((patch) => patch.status === FilePatchStatus.Proposed);
+    }
+    return this.createProposedPatches(toolCall, project, args);
+  }
+
+  private async createProposedPatches(
+    toolCall: ToolCall,
+    project: Project,
+    args: Record<string, unknown>,
+  ): Promise<FilePatch[]> {
+    const files = this.normalizePatchFiles(args);
+    const patches: FilePatch[] = [];
+
+    for (const file of files) {
+      const target = this.paths.resolveProjectPath(project.workspacePath, file.path);
+      const originalContent = existsSync(target) ? await readFile(target, 'utf8') : null;
+      const diff = this.makeDiff(file.path, originalContent ?? '', file.content);
+      patches.push(
+        this.patches.create({
+          project,
+          session: toolCall.session,
+          toolCall,
+          relativePath: file.path,
+          originalContent: originalContent ?? undefined,
+          patchedContent: file.content,
+          diffText: diff.diffText,
+          status: FilePatchStatus.Proposed,
+        }),
+      );
+    }
+
+    return this.patches.save(patches);
+  }
+
+  private normalizePatchFiles(args: Record<string, unknown>): PatchInputFile[] {
+    const rawFiles = Array.isArray(args.files)
+      ? args.files.map((item) => {
+          if (!item || typeof item !== 'object') {
+            throw new BadRequestException('create_patch files must contain objects.');
+          }
+          const file = item as Record<string, unknown>;
+          return { path: file.path, content: file.content };
+        })
+      : [{ path: args.path, content: args.content }];
+
+    const files = rawFiles.map((file) => {
+      if (typeof file.path !== 'string' || typeof file.content !== 'string') {
+        throw new BadRequestException('create_patch requires path and content.');
+      }
+      const path = this.paths.normalizeRelativePath(file.path);
+      if (path === '.') {
+        throw new BadRequestException('create_patch path must be a file.');
+      }
+      if (Buffer.byteLength(file.content, 'utf8') > 512 * 1024) {
+        throw new BadRequestException(`Patch content for ${path} is too large.`);
+      }
+      return { path, content: file.content };
+    });
+
+    if (files.length === 0) {
+      throw new BadRequestException('create_patch requires at least one file.');
+    }
+
+    const seen = new Set<string>();
+    files.forEach((file) => {
+      if (seen.has(file.path)) {
+        throw new BadRequestException(`Duplicate patch path: ${file.path}`);
+      }
+      seen.add(file.path);
+    });
+    return files;
+  }
+
   private async scanFiles(projectRoot: string, currentPath: string, depth: number): Promise<unknown[]> {
     const entries = await readdir(currentPath, { withFileTypes: true });
     const nodes: unknown[] = [];
@@ -504,23 +675,32 @@ export class ToolsService {
         truncated: false,
       };
     }
-    if (
-      toolCall.name !== 'create_patch' ||
-      typeof toolCall.arguments.path !== 'string' ||
-      typeof toolCall.arguments.content !== 'string'
-    ) {
+    if (toolCall.name !== 'create_patch') {
       return undefined;
     }
 
     const project = toolCall.session.project as Project;
-    const target = this.paths.resolveProjectPath(project.workspacePath, toolCall.arguments.path);
-    const originalContent = existsSync(target) ? await readFile(target, 'utf8') : '';
-    const diff = this.makeDiff(toolCall.arguments.path, originalContent, toolCall.arguments.content);
+    const patches = await this.ensureProposedPatches(toolCall, project, toolCall.arguments);
+    if (patches.length === 1) {
+      const [patch] = patches;
+      return {
+        kind: 'patch',
+        path: patch.relativePath,
+        diffText: patch.diffText,
+        truncated: patch.diffText.length > DIFF_PREVIEW_LIMIT,
+      };
+    }
+
+    const files = patches.map((patch) => ({
+      path: patch.relativePath,
+      diffText: patch.diffText,
+      truncated: patch.diffText.length > DIFF_PREVIEW_LIMIT,
+      status: patch.status,
+    }));
     return {
-      kind: 'patch',
-      path: toolCall.arguments.path,
-      diffText: diff.diffText,
-      truncated: diff.truncated,
+      kind: 'patch_set',
+      files,
+      truncated: files.some((file) => file.truncated),
     };
   }
 

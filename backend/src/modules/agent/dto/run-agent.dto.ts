@@ -9,5 +9,8 @@ export class RunAgentDto {
   @IsOptional()
   @IsString()
   modelConfigId?: string;
-}
 
+  @IsOptional()
+  @IsString()
+  approvedPlanId?: string;
+}

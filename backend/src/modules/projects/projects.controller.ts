@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, Req, UseGuards } from '@nestjs/common';
 import { RequestWithUser } from '../../common/types/request-with-user';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { UsersService } from '../users/users.service';
@@ -6,6 +6,8 @@ import { CreateProjectDto } from './dto/create-project.dto';
 import { GitCommitDto } from './dto/git-commit.dto';
 import { GitPathDto } from './dto/git-path.dto';
 import { ImportGitDto } from './dto/import-git.dto';
+import { RenameProjectFileDto } from './dto/rename-project-file.dto';
+import { SaveProjectFileDto } from './dto/save-project-file.dto';
 import { ProjectsService } from './projects.service';
 
 @Controller('projects')
@@ -109,5 +111,41 @@ export class ProjectsController {
   @Get(':id/file')
   file(@Req() request: RequestWithUser, @Param('id') id: string, @Query('path') path: string) {
     return this.projects.readProjectFile(request.user.sub, id, path);
+  }
+
+  @Post(':id/file')
+  async createFile(
+    @Req() request: RequestWithUser,
+    @Param('id') id: string,
+    @Body() dto: SaveProjectFileDto,
+  ) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.projects.createProjectFile(owner, id, dto.path, dto.content);
+  }
+
+  @Put(':id/file')
+  async saveFile(
+    @Req() request: RequestWithUser,
+    @Param('id') id: string,
+    @Body() dto: SaveProjectFileDto,
+  ) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.projects.saveProjectFile(owner, id, dto.path, dto.content);
+  }
+
+  @Patch(':id/file')
+  async renameFile(
+    @Req() request: RequestWithUser,
+    @Param('id') id: string,
+    @Body() dto: RenameProjectFileDto,
+  ) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.projects.renameProjectFile(owner, id, dto.path, dto.newPath);
+  }
+
+  @Delete(':id/file')
+  async deleteFile(@Req() request: RequestWithUser, @Param('id') id: string, @Query('path') path: string) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.projects.deleteProjectFile(owner, id, path);
   }
 }

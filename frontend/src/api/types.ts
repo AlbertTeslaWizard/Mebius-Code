@@ -93,6 +93,11 @@ export interface ProjectFile {
   size: number;
 }
 
+export interface DeleteProjectFileResult {
+  deleted: true;
+  path: string;
+}
+
 export interface GitRemoteInfo {
   name: string;
   fetchUrl?: string;
@@ -170,7 +175,7 @@ export interface FilePatch {
   id: string;
   relativePath: string;
   diffText: string;
-  status: string;
+  status: 'proposed' | 'applied' | 'conflicted' | 'rejected' | 'reverted' | string;
   createdAt: string;
   toolCall?: {
     id: string;
@@ -200,6 +205,16 @@ export type ApprovalPreview =
       kind: 'patch';
       path: string;
       diffText: string;
+      truncated: boolean;
+    }
+  | {
+      kind: 'patch_set';
+      files: Array<{
+        path: string;
+        diffText: string;
+        truncated: boolean;
+        status: string;
+      }>;
       truncated: boolean;
     }
   | {

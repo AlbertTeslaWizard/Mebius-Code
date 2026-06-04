@@ -1,5 +1,13 @@
 import { Repository } from 'typeorm';
-import { ApprovalStatus, CommandRunStatus, ToolCallStatus } from '../../common/enums/tool-status.enum';
+import { mkdtemp, readFile, rm, writeFile } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join, resolve } from 'path';
+import {
+  ApprovalStatus,
+  CommandRunStatus,
+  FilePatchStatus,
+  ToolCallStatus,
+} from '../../common/enums/tool-status.enum';
 import { CommandPolicyService } from '../../common/security/command-policy.service';
 import { PathSandboxService } from '../../common/security/path-sandbox.service';
 import { AgentService } from '../agent/agent.service';
@@ -56,7 +64,12 @@ describe('ToolsService', () => {
     findOne: jest.fn(),
     save: jest.fn(async (value) => value),
   } as unknown as jest.Mocked<Repository<ToolApproval>>;
-  const patches = {} as jest.Mocked<Repository<FilePatch>>;
+  const patches = {
+    create: jest.fn((value) => value),
+    find: jest.fn(),
+    findOne: jest.fn(),
+    save: jest.fn(async (value) => value),
+  } as unknown as jest.Mocked<Repository<FilePatch>>;
   const commandRuns = {
     create: jest.fn((value) => value),
     find: jest.fn(),
@@ -67,6 +80,7 @@ describe('ToolsService', () => {
   } as unknown as jest.Mocked<SessionsService>;
   const paths = {
     resolveProjectPath: jest.fn(),
+    normalizeRelativePath: jest.fn(),
   } as unknown as jest.Mocked<PathSandboxService>;
   const commandPolicy = {
     parse: jest.fn(),
@@ -81,6 +95,7 @@ describe('ToolsService', () => {
   const agent = {
     resumeAfterToolApproval: jest.fn().mockResolvedValue(undefined),
     recordToolResultMessage: jest.fn().mockResolvedValue(undefined),
+    markLatestRunningPlanFailed: jest.fn().mockResolvedValue(undefined),
   } as unknown as jest.Mocked<AgentService>;
   const service = new ToolsService(
     toolCalls,
@@ -102,6 +117,21 @@ describe('ToolsService', () => {
     approvals.findOne.mockResolvedValue(approval);
     sessions.findOwned.mockResolvedValue(session);
     paths.resolveProjectPath.mockImplementation((_root, path) => `D:/workspace/${path}`);
+    paths.normalizeRelativePath.mockImplementation((path = '.') => path);
+    patches.find.mockResolvedValue([
+      {
+        id: 'patch-1',
+        project: session.project,
+        session,
+        toolCall: pendingToolCall,
+        relativePath: 'demo.py',
+        originalContent: '',
+        patchedContent: 'print(1)',
+        diffText: '--- demo.py\n+++ demo.py\n@@\n+print(1)',
+        status: FilePatchStatus.Proposed,
+        createdAt: new Date('2026-06-03T00:00:00.000Z'),
+      } as FilePatch,
+    ]);
     commandPolicy.parse.mockReturnValue({ command: 'npm', args: ['test'] });
     commandRuns.save.mockImplementation(async (value: any) => ({
       id: 'run-1',
@@ -247,5 +277,109 @@ describe('ToolsService', () => {
         stdout: 'passed',
       }),
     );
+  });
+
+  it('applies a multi-file patch set after validating snapshots', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'mebius-patch-'));
+    try {
+      await writeFile(join(workspace, 'existing.ts'), 'old', 'utf8');
+      paths.resolveProjectPath.mockImplementation((root, path = '.') => resolve(root, path));
+      patches.find.mockResolvedValueOnce([]);
+      patches.create.mockImplementation((value) => value as FilePatch);
+      patches.save.mockImplementation(async (value: any) => {
+        if (Array.isArray(value)) {
+          return value.map((patch, index) => ({
+            id: `patch-${index + 1}`,
+            createdAt: new Date('2026-06-03T00:00:00.000Z'),
+            ...patch,
+          }));
+        }
+        return value;
+      });
+      const project = { id: 'project-1', workspacePath: workspace } as any;
+      const toolCall = {
+        id: 'tool-patch',
+        session,
+        name: 'create_patch',
+        arguments: {
+          files: [
+            { path: 'existing.ts', content: 'new' },
+            { path: 'nested/created.ts', content: 'created' },
+          ],
+        },
+      } as unknown as ToolCall;
+
+      const result = await (service as any).applyPatch(toolCall, owner, project, toolCall.arguments);
+
+      expect(result).toBe('Patch applied to existing.ts, nested/created.ts.');
+      await expect(readFile(join(workspace, 'existing.ts'), 'utf8')).resolves.toBe('new');
+      await expect(readFile(join(workspace, 'nested/created.ts'), 'utf8')).resolves.toBe('created');
+      expect(audit.record).toHaveBeenCalledTimes(2);
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('marks proposed patches conflicted without writing when snapshots changed', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'mebius-conflict-'));
+    try {
+      await writeFile(join(workspace, 'demo.ts'), 'changed', 'utf8');
+      paths.resolveProjectPath.mockImplementation((root, path = '.') => resolve(root, path));
+      const proposedPatch = {
+        id: 'patch-conflict',
+        project: { id: 'project-1', workspacePath: workspace },
+        session,
+        toolCall: pendingToolCall,
+        relativePath: 'demo.ts',
+        originalContent: 'old',
+        patchedContent: 'new',
+        diffText: 'diff',
+        status: FilePatchStatus.Proposed,
+        createdAt: new Date('2026-06-03T00:00:00.000Z'),
+      } as FilePatch;
+      patches.find.mockResolvedValueOnce([proposedPatch]);
+
+      await expect(
+        (service as any).applyPatch(pendingToolCall, owner, proposedPatch.project, pendingToolCall.arguments),
+      ).rejects.toThrow('Patch conflict detected');
+
+      expect(proposedPatch.status).toBe(FilePatchStatus.Conflicted);
+      await expect(readFile(join(workspace, 'demo.ts'), 'utf8')).resolves.toBe('changed');
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('reverts an applied patch when the file still matches patched content', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'mebius-revert-'));
+    try {
+      await writeFile(join(workspace, 'demo.ts'), 'new', 'utf8');
+      paths.resolveProjectPath.mockImplementation((root, path = '.') => resolve(root, path));
+      const patch = {
+        id: 'patch-revert',
+        project: { id: 'project-1', workspacePath: workspace },
+        session,
+        toolCall: pendingToolCall,
+        relativePath: 'demo.ts',
+        originalContent: 'old',
+        patchedContent: 'new',
+        diffText: 'diff',
+        status: FilePatchStatus.Applied,
+        createdAt: new Date('2026-06-03T00:00:00.000Z'),
+      } as FilePatch;
+      patches.findOne.mockResolvedValueOnce(patch);
+
+      const result = await service.revertPatch(owner, patch.id);
+
+      expect(result.status).toBe(FilePatchStatus.Reverted);
+      await expect(readFile(join(workspace, 'demo.ts'), 'utf8')).resolves.toBe('old');
+      expect(events.publish).toHaveBeenCalledWith(session.id, 'patch_reverted', {
+        patchId: patch.id,
+        path: patch.relativePath,
+        status: FilePatchStatus.Reverted,
+      });
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
   });
 });

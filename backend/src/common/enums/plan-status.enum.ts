@@ -4,6 +4,6 @@ export enum PlanStatus {
   Rejected = 'rejected',
   Running = 'running',
   Completed = 'completed',
+  Failed = 'failed',
   Cancelled = 'cancelled',
 }
-

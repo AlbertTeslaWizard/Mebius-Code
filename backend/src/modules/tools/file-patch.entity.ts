@@ -4,7 +4,6 @@ import {
   Entity,
   JoinColumn,
   ManyToOne,
-  OneToOne,
   PrimaryGeneratedColumn,
   Relation,
 } from 'typeorm';
@@ -26,7 +25,7 @@ export class FilePatch {
   @JoinColumn({ name: 'session_id' })
   session: Relation<Session>;
 
-  @OneToOne(() => ToolCall, { onDelete: 'CASCADE' })
+  @ManyToOne(() => ToolCall, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'tool_call_id' })
   toolCall: Relation<ToolCall>;
 
@@ -48,4 +47,3 @@ export class FilePatch {
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 }
-

@@ -12,23 +12,29 @@ import {
   CircleDot,
   Clock3,
   Clipboard,
+  Eye,
+  FilePlus,
   FileText,
   Folder,
   FolderTree,
   GitBranch,
   Info,
+  ListFilter,
+  MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
   Play,
   Plus,
+  Pencil,
   RefreshCw,
   Send,
   Settings,
   ShieldCheck,
   Terminal,
   Trash2,
+  Wrench,
   X,
 } from 'lucide-vue-next';
 import type {
@@ -41,6 +47,7 @@ import type {
   TreeNode,
 } from '../api/types';
 import CodePreview from '../components/CodePreview.vue';
+import CodeEditor from '../components/CodeEditor.vue';
 import DiffPreview from '../components/DiffPreview.vue';
 import MessageContent from '../components/MessageContent.vue';
 import WorkspaceFileTree from '../components/WorkspaceFileTree.vue';
@@ -51,6 +58,8 @@ import { useWorkspaceStore } from '../stores/workspace';
 
 type ComposerMode = 'build' | 'plan';
 type SidebarSide = 'left' | 'right';
+type FilePaneMode = 'preview' | 'editor';
+type EventFilter = 'all' | 'model' | 'tools' | 'commands' | 'messages';
 
 const mainWorkspaceMinWidth = 420;
 const sidebarResizeStep = 16;
@@ -71,6 +80,19 @@ const sessionTitle = ref('');
 const composer = ref('');
 const composerMode = ref<ComposerMode>('build');
 const selectedFilePath = ref('');
+const newFileModal = ref(false);
+const newFilePath = ref('');
+const newFileError = ref('');
+const newFileLoading = ref(false);
+const renameFileModal = ref(false);
+const renameFileSourcePath = ref('');
+const renameFilePath = ref('');
+const renameFileError = ref('');
+const renameFileLoading = ref(false);
+const filePaneMode = ref<FilePaneMode>('preview');
+const editorContent = ref('');
+const fileSaveLoading = ref(false);
+const fileSaveError = ref('');
 const expandedFilePaths = ref<string[]>([]);
 const filePreviewLoading = ref(false);
 const fileTreeRefreshing = ref(false);
@@ -90,6 +112,7 @@ const error = ref('');
 const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth);
 const expandedCommandRunIds = ref<string[]>([]);
 const copiedCommandRunId = ref('');
+const eventFilter = ref<EventFilter>('all');
 const liveLeftSidebarWidth = ref<number>(sidebarWidthLimits.left.defaultValue);
 const liveRightSidebarWidth = ref<number>(sidebarWidthLimits.right.defaultValue);
 const activeResizeSide = ref<SidebarSide | null>(null);
@@ -131,6 +154,17 @@ const commandRunStats = computed(() => {
 const composerModeOptions = computed<Array<{ label: string; value: ComposerMode }>>(() => [
   { label: locale.t('build'), value: 'build' },
   { label: locale.t('plan'), value: 'plan' },
+]);
+const filePaneModeOptions = computed<Array<{ label: string; value: FilePaneMode }>>(() => [
+  { label: locale.t('preview'), value: 'preview' },
+  { label: locale.t('editor'), value: 'editor' },
+]);
+const eventFilterOptions = computed<Array<{ label: string; value: EventFilter }>>(() => [
+  { label: locale.t('eventFilterAll'), value: 'all' },
+  { label: locale.t('eventFilterModel'), value: 'model' },
+  { label: locale.t('eventFilterTools'), value: 'tools' },
+  { label: locale.t('eventFilterGit'), value: 'commands' },
+  { label: locale.t('eventFilterMessages'), value: 'messages' },
 ]);
 const settingsOptions = computed(() => [
   { label: locale.t('modelConfigs'), key: 'models' },
@@ -281,10 +315,25 @@ const agentActivityToneClass = computed(() => {
   }
   return 'border-mebius-border bg-white text-mebius-muted';
 });
+const isCurrentFileDirty = computed(
+  () => Boolean(workspace.currentFile) && editorContent.value !== (workspace.currentFile?.content ?? ''),
+);
+const filteredEventLog = computed(() =>
+  workspace.eventLog.filter((event) => eventMatchesFilter(event.type, eventFilter.value)),
+);
+const modelDiagnosticSummary = computed(() => {
+  const diagnostic = workspace.latestModelDiagnostic;
+  if (!diagnostic) return locale.t('modelDiagnosticsIdle');
+  return locale.t('modelDiagnosticsSummary', {
+    status: diagnostic.status,
+    model: diagnostic.modelName || diagnostic.displayName || locale.t('currentModelFallback'),
+  });
+});
 
 onMounted(async () => {
   setupCompactViewportQuery();
   window.addEventListener('resize', handleWindowResize);
+  window.addEventListener('beforeunload', handleBeforeUnload);
   await Promise.all([auth.fetchMe(), approvals.loadPending()]);
   await workspace.bootstrap();
 });
@@ -292,6 +341,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   cancelSidebarResize();
   window.removeEventListener('resize', handleWindowResize);
+  window.removeEventListener('beforeunload', handleBeforeUnload);
   workspace.disconnectEvents();
   compactViewportQuery?.removeEventListener('change', handleCompactViewportChange);
 });
@@ -332,9 +382,19 @@ watch(
   () => workspace.currentProject?.id,
   () => {
     selectedFilePath.value = '';
+    editorContent.value = '';
+    fileSaveError.value = '';
     expandedFilePaths.value = [];
     filePreviewError.value = '';
     filePreviewLoading.value = false;
+  },
+);
+
+watch(
+  () => workspace.currentFile?.path,
+  () => {
+    editorContent.value = workspace.currentFile?.content ?? '';
+    fileSaveError.value = '';
   },
 );
 
@@ -565,6 +625,12 @@ function handleCompactViewportChange(event: MediaQueryListEvent) {
   }
 }
 
+function handleBeforeUnload(event: BeforeUnloadEvent) {
+  if (!isCurrentFileDirty.value) return;
+  event.preventDefault();
+  event.returnValue = '';
+}
+
 function gitStateLabel(state: string) {
   switch (state) {
     case 'untracked':
@@ -707,7 +773,11 @@ async function executeActivePlan() {
     'Steps:',
     ...steps,
   ].join('\n');
-  await runTask(() => workspace.submitText(request));
+  await runTask(() => workspace.submitText(request, { approvedPlanId: bundle.plan.id }));
+}
+
+async function revertPatch(patchId: string) {
+  await runTask(() => workspace.revertPatch(patchId));
 }
 
 async function refreshReviewPanel() {
@@ -821,6 +891,75 @@ async function refreshFileTree() {
   }
 }
 
+function openNewFileModal() {
+  if (!workspace.currentProject) return;
+  if (!confirmDiscardUnsavedChanges()) return;
+  newFilePath.value = '';
+  newFileError.value = '';
+  newFileModal.value = true;
+}
+
+async function submitNewFile() {
+  const path = newFilePath.value.trim();
+  if (!path) return;
+  newFileLoading.value = true;
+  newFileError.value = '';
+  try {
+    const file = await workspace.createFile(path, '');
+    if (!file) return;
+    selectedFilePath.value = file.path;
+    editorContent.value = file.content;
+    filePaneMode.value = 'editor';
+    expandParentDirectories(file.path);
+    newFileModal.value = false;
+  } catch (err) {
+    newFileError.value = err instanceof Error ? err.message : locale.t('fileCreateFailed');
+  } finally {
+    newFileLoading.value = false;
+  }
+}
+
+function openRenameFileModal(node: TreeNode) {
+  if (node.type !== 'file') return;
+  if (!confirmDiscardUnsavedChanges()) return;
+  renameFileSourcePath.value = node.path;
+  renameFilePath.value = node.path;
+  renameFileError.value = '';
+  renameFileModal.value = true;
+}
+
+async function submitRenameFile() {
+  const sourcePath = renameFileSourcePath.value;
+  const nextPath = renameFilePath.value.trim();
+  if (!sourcePath || !nextPath || sourcePath === nextPath) return;
+  renameFileLoading.value = true;
+  renameFileError.value = '';
+  try {
+    const file = await workspace.renameFile(sourcePath, nextPath);
+    if (!file) return;
+    if (selectedFilePath.value === sourcePath) {
+      selectedFilePath.value = file.path;
+      editorContent.value = file.content;
+    }
+    expandParentDirectories(file.path);
+    renameFileModal.value = false;
+  } catch (err) {
+    renameFileError.value = err instanceof Error ? err.message : locale.t('fileRenameFailed');
+  } finally {
+    renameFileLoading.value = false;
+  }
+}
+
+function expandParentDirectories(path: string) {
+  const parts = path.split('/').filter(Boolean);
+  if (parts.length <= 1) return;
+  const expanded = new Set(expandedFilePaths.value);
+  for (let index = 1; index < parts.length; index += 1) {
+    expanded.add(parts.slice(0, index).join('/'));
+  }
+  expandedFilePaths.value = Array.from(expanded);
+}
+
 function toggleFileDirectory(path: string) {
   const expanded = new Set(expandedFilePaths.value);
   if (expanded.has(path)) {
@@ -833,8 +972,10 @@ function toggleFileDirectory(path: string) {
 
 async function onFileSelect(node: TreeNode) {
   if (node.type !== 'file') return;
+  if (!confirmDiscardUnsavedChanges()) return;
   selectedFilePath.value = node.path;
   filePreviewError.value = '';
+  fileSaveError.value = '';
   filePreviewLoading.value = true;
   const requestId = ++filePreviewRequest;
 
@@ -849,6 +990,51 @@ async function onFileSelect(node: TreeNode) {
       filePreviewLoading.value = false;
     }
   }
+}
+
+async function onFileRename(node: TreeNode) {
+  openRenameFileModal(node);
+}
+
+async function onFileDelete(node: TreeNode) {
+  if (node.type !== 'file') return;
+  if (!confirmDiscardUnsavedChanges()) return;
+  if (!window.confirm(locale.t('confirmDeleteFile', { path: node.path }))) return;
+  await runTask(async () => {
+    await workspace.deleteFile(node.path);
+    if (selectedFilePath.value === node.path) {
+      selectedFilePath.value = '';
+      editorContent.value = '';
+      fileSaveError.value = '';
+      filePreviewError.value = '';
+      filePreviewLoading.value = false;
+    }
+  });
+}
+
+function confirmDiscardUnsavedChanges() {
+  if (!isCurrentFileDirty.value) return true;
+  return window.confirm(
+    locale.t('discardUnsavedChanges', { path: workspace.currentFile?.path ?? selectedFilePath.value }),
+  );
+}
+
+async function saveCurrentFile() {
+  if (!workspace.currentFile || !isCurrentFileDirty.value) return;
+  fileSaveLoading.value = true;
+  fileSaveError.value = '';
+  try {
+    await workspace.saveFile(workspace.currentFile.path, editorContent.value);
+  } catch (err) {
+    fileSaveError.value = err instanceof Error ? err.message : locale.t('fileSaveFailed');
+  } finally {
+    fileSaveLoading.value = false;
+  }
+}
+
+function revertCurrentFile() {
+  editorContent.value = workspace.currentFile?.content ?? '';
+  fileSaveError.value = '';
 }
 
 function countTree(nodes: TreeNode[]) {
@@ -891,6 +1077,9 @@ function approvalArguments(approval: Approval) {
 
 function approvalPreviewTitle(approval: Approval) {
   if (approval.preview?.kind === 'patch') return approval.preview.path;
+  if (approval.preview?.kind === 'patch_set') {
+    return locale.t('multiFilePatch', { count: approval.preview.files.length });
+  }
   if (approval.preview?.kind === 'command') return approval.preview.command;
   return approval.toolCall.name;
 }
@@ -934,6 +1123,9 @@ function approvalContext(approval: Approval) {
 
 function eventToneClass(type: string) {
   const normalized = type.toLowerCase();
+  if (normalized.includes('model_call_completed')) return 'is-success';
+  if (normalized.includes('model_call_failed')) return 'is-danger';
+  if (normalized.includes('model_call')) return 'is-warning';
   if (normalized.includes('error') || normalized.includes('failed')) return 'is-danger';
   if (normalized.includes('approval') || normalized.includes('requested')) return 'is-warning';
   if (normalized.includes('done') || normalized.includes('created') || normalized.includes('result')) {
@@ -944,6 +1136,7 @@ function eventToneClass(type: string) {
 
 function eventToneIcon(type: string) {
   const normalized = type.toLowerCase();
+  if (normalized.includes('model_call')) return Cable;
   if (normalized.includes('error') || normalized.includes('failed')) return AlertCircle;
   if (normalized.includes('done') || normalized.includes('created') || normalized.includes('result')) {
     return CheckCircle2;
@@ -961,6 +1154,10 @@ function eventTitle(type: string) {
 }
 
 function eventSummary(data: SsePayload) {
+  if (typeof data.modelName === 'string') {
+    const duration = typeof data.durationMs === 'number' ? ` · ${data.durationMs} ms` : '';
+    return `${data.modelName}${duration}`;
+  }
   const keys = ['message', 'summary', 'name', 'toolName', 'status', 'command', 'path', 'content'];
   for (const key of keys) {
     const value = data[key];
@@ -969,6 +1166,29 @@ function eventSummary(data: SsePayload) {
     }
   }
   return locale.t('eventPayload');
+}
+
+function eventMatchesFilter(type: string, filter: EventFilter) {
+  if (filter === 'all') return true;
+  if (filter === 'model') return type.startsWith('model_call');
+  if (filter === 'commands') return type.startsWith('command_');
+  if (filter === 'messages') return type === 'message_created' || type === 'token' || type === 'done';
+  return [
+    'tool_call_requested',
+    'tool_call_result',
+    'patch_created',
+    'patch_reverted',
+    'plan_updated',
+    'agent_status',
+  ].includes(type);
+}
+
+function eventFilterIcon(filter: EventFilter) {
+  if (filter === 'model') return Cable;
+  if (filter === 'tools') return Wrench;
+  if (filter === 'commands') return Terminal;
+  if (filter === 'messages') return MessageSquare;
+  return ListFilter;
 }
 
 function formatEventTime(value: string) {
@@ -1486,16 +1706,28 @@ function truncate(value: string, maxLength: number) {
                       {{ locale.t('fileTreeSummary', { files: fileTreeStats.files, directories: fileTreeStats.directories }) }}
                     </p>
                   </div>
-                  <n-button
-                    circle
-                    secondary
-                    size="small"
-                    :loading="fileTreeRefreshing"
-                    :title="locale.t('refresh')"
-                    @click="refreshFileTree"
-                  >
-                    <template #icon><n-icon><RefreshCw /></n-icon></template>
-                  </n-button>
+                  <div class="flex shrink-0 items-center gap-2">
+                    <n-button
+                      circle
+                      secondary
+                      size="small"
+                      :disabled="!workspace.currentProject"
+                      :title="locale.t('newFile')"
+                      @click="openNewFileModal"
+                    >
+                      <template #icon><n-icon><FilePlus /></n-icon></template>
+                    </n-button>
+                    <n-button
+                      circle
+                      secondary
+                      size="small"
+                      :loading="fileTreeRefreshing"
+                      :title="locale.t('refresh')"
+                      @click="refreshFileTree"
+                    >
+                      <template #icon><n-icon><RefreshCw /></n-icon></template>
+                    </n-button>
+                  </div>
                 </header>
                 <div class="workbench-tree-shell scrollbar-thin">
                   <WorkspaceFileTree
@@ -1503,26 +1735,65 @@ function truncate(value: string, maxLength: number) {
                     :selected-path="selectedFilePath"
                     :expanded-paths="expandedFilePaths"
                     :empty-label="locale.t('emptyFileTree')"
+                    :rename-label="locale.t('renameFile')"
+                    :delete-label="locale.t('deleteFile')"
                     @select="onFileSelect"
                     @toggle="toggleFileDirectory"
+                    @rename="onFileRename"
+                    @delete="onFileDelete"
                   />
                 </div>
               </section>
 
               <section class="workbench-section workbench-section--preview">
-                <CodePreview
-                  v-if="workspace.currentFile || filePreviewLoading || filePreviewError"
-                  :path="workspace.currentFile?.path ?? selectedFilePath"
-                  :content="workspace.currentFile?.content ?? ''"
-                  :size="workspace.currentFile?.size ?? 0"
-                  :loading="filePreviewLoading"
-                  :error="filePreviewError"
-                  :copy-label="locale.t('copyFileContent')"
-                  :copied-label="locale.t('copied')"
-                  :loading-label="locale.t('loadingFilePreview')"
-                  :line-label="locale.t('lines')"
-                  :bytes-label="locale.t('bytes')"
-                />
+                <div v-if="workspace.currentFile || filePreviewLoading || filePreviewError" class="file-workbench">
+                  <div class="file-workbench__toolbar">
+                    <n-radio-group v-model:value="filePaneMode" size="small">
+                      <n-radio-button
+                        v-for="option in filePaneModeOptions"
+                        :key="option.value"
+                        :value="option.value"
+                      >
+                        <span class="inline-flex items-center gap-1">
+                          <n-icon>
+                            <Eye v-if="option.value === 'preview'" />
+                            <Pencil v-else />
+                          </n-icon>
+                          {{ option.label }}
+                        </span>
+                      </n-radio-button>
+                    </n-radio-group>
+                  </div>
+                  <CodePreview
+                    v-if="filePaneMode === 'preview'"
+                    :path="workspace.currentFile?.path ?? selectedFilePath"
+                    :content="workspace.currentFile?.content ?? ''"
+                    :size="workspace.currentFile?.size ?? 0"
+                    :loading="filePreviewLoading"
+                    :error="filePreviewError"
+                    :copy-label="locale.t('copyFileContent')"
+                    :copied-label="locale.t('copied')"
+                    :loading-label="locale.t('loadingFilePreview')"
+                    :line-label="locale.t('lines')"
+                    :bytes-label="locale.t('bytes')"
+                  />
+                  <CodeEditor
+                    v-else-if="workspace.currentFile && !filePreviewLoading && !filePreviewError"
+                    v-model:content="editorContent"
+                    :path="workspace.currentFile.path"
+                    :dirty="isCurrentFileDirty"
+                    :saving="fileSaveLoading"
+                    :error="fileSaveError"
+                    :save-label="locale.t('saveFile')"
+                    :revert-label="locale.t('revertFile')"
+                    :unsaved-label="locale.t('fileUnsaved')"
+                    :saved-label="locale.t('fileSaved')"
+                    :line-label="locale.t('lines')"
+                    :bytes-label="locale.t('bytes')"
+                    @save="saveCurrentFile"
+                    @revert="revertCurrentFile"
+                  />
+                </div>
                 <div v-else class="workbench-empty-state">
                   <n-icon><FileText /></n-icon>
                   <span>{{ locale.t('selectFilePreview') }}</span>
@@ -1634,6 +1905,20 @@ function truncate(value: string, maxLength: number) {
                         {{ locale.t('diffPreviewTruncated') }}
                       </p>
                     </div>
+                    <div v-else-if="approval.preview?.kind === 'patch_set'" class="approval-card__preview">
+                      <div class="patch-set-preview">
+                        <DiffPreview
+                          v-for="file in approval.preview.files"
+                          :key="file.path"
+                          :path="file.path"
+                          :diff-text="file.diffText"
+                          :empty-label="locale.t('eventPayload')"
+                        />
+                      </div>
+                      <p v-if="approval.preview.truncated" class="approval-card__hint">
+                        {{ locale.t('diffPreviewTruncated') }}
+                      </p>
+                    </div>
                     <div v-else-if="approval.preview?.kind === 'command'" class="approval-card__preview">
                       <div class="command-preview">
                         <div class="command-preview__label">{{ locale.t('commandPreview') }}</div>
@@ -1676,6 +1961,11 @@ function truncate(value: string, maxLength: number) {
                     </header>
                     <div class="approval-card__preview">
                       <DiffPreview :path="patch.relativePath" :diff-text="patch.diffText" />
+                    </div>
+                    <div v-if="patch.status === 'applied'" class="approval-card__actions">
+                      <n-button size="small" secondary @click="revertPatch(patch.id)">
+                        {{ locale.t('revertPatch') }}
+                      </n-button>
                     </div>
                   </article>
                 </div>
@@ -1792,13 +2082,46 @@ function truncate(value: string, maxLength: number) {
                   </span>
                 </header>
 
+                <div class="diagnostics-strip">
+                  <section class="diagnostics-card">
+                    <div class="diagnostics-card__icon">
+                      <n-icon><Cable /></n-icon>
+                    </div>
+                    <div class="min-w-0">
+                      <div class="diagnostics-card__title">{{ locale.t('modelDiagnostics') }}</div>
+                      <div class="diagnostics-card__summary">{{ modelDiagnosticSummary }}</div>
+                      <div v-if="workspace.latestModelDiagnostic?.baseUrl" class="diagnostics-card__meta">
+                        {{ workspace.latestModelDiagnostic.baseUrl }}
+                      </div>
+                      <div v-if="workspace.latestModelDiagnostic?.durationMs !== undefined" class="diagnostics-card__meta">
+                        {{ locale.t('modelDiagnosticsDuration', { duration: workspace.latestModelDiagnostic.durationMs }) }}
+                      </div>
+                      <div v-if="workspace.latestModelDiagnostic?.message" class="diagnostics-card__error">
+                        {{ workspace.latestModelDiagnostic.message }}
+                      </div>
+                    </div>
+                  </section>
+                  <n-radio-group v-model:value="eventFilter" size="small">
+                    <n-radio-button
+                      v-for="option in eventFilterOptions"
+                      :key="option.value"
+                      :value="option.value"
+                    >
+                      <span class="inline-flex items-center gap-1">
+                        <n-icon><component :is="eventFilterIcon(option.value)" /></n-icon>
+                        {{ option.label }}
+                      </span>
+                    </n-radio-button>
+                  </n-radio-group>
+                </div>
+
                 <div class="event-timeline scrollbar-thin">
-                  <div v-if="workspace.eventLog.length === 0" class="workbench-empty-state">
+                  <div v-if="filteredEventLog.length === 0" class="workbench-empty-state">
                     <n-icon><Clock3 /></n-icon>
                     <span>{{ locale.t('noEvents') }}</span>
                   </div>
                   <article
-                    v-for="event in workspace.eventLog"
+                    v-for="event in filteredEventLog"
                     v-else
                     :key="`${event.time}-${event.type}`"
                     class="event-item"
@@ -1825,6 +2148,69 @@ function truncate(value: string, maxLength: number) {
         </n-tabs>
       </aside>
     </div>
+
+    <n-modal v-model:show="newFileModal" preset="card" :title="locale.t('newFile')" class="max-w-[520px]">
+      <n-form label-placement="top" @submit.prevent="submitNewFile">
+        <n-form-item :label="locale.t('newFilePath')">
+          <n-input
+            v-model:value="newFilePath"
+            :placeholder="locale.t('newFilePlaceholder')"
+            :input-props="{
+              autocomplete: 'off',
+              autocapitalize: 'off',
+              spellcheck: 'false',
+            }"
+            @keyup.enter="submitNewFile"
+          />
+        </n-form-item>
+        <p v-if="newFileError" class="m-0 mb-3 text-xs leading-5 text-red-600">{{ newFileError }}</p>
+        <div class="flex justify-end gap-2">
+          <n-button secondary :disabled="newFileLoading" @click="newFileModal = false">
+            {{ locale.t('cancel') }}
+          </n-button>
+          <n-button
+            type="primary"
+            :disabled="!newFilePath.trim()"
+            :loading="newFileLoading"
+            @click="submitNewFile"
+          >
+            <template #icon><n-icon><FilePlus /></n-icon></template>
+            {{ locale.t('createFile') }}
+          </n-button>
+        </div>
+      </n-form>
+    </n-modal>
+
+    <n-modal v-model:show="renameFileModal" preset="card" :title="locale.t('renameFile')" class="max-w-[520px]">
+      <n-form label-placement="top" @submit.prevent="submitRenameFile">
+        <n-form-item :label="locale.t('filePath')">
+          <n-input
+            v-model:value="renameFilePath"
+            :placeholder="locale.t('newFilePlaceholder')"
+            :input-props="{
+              autocomplete: 'off',
+              autocapitalize: 'off',
+              spellcheck: 'false',
+            }"
+            @keyup.enter="submitRenameFile"
+          />
+        </n-form-item>
+        <p v-if="renameFileError" class="m-0 mb-3 text-xs leading-5 text-red-600">{{ renameFileError }}</p>
+        <div class="flex justify-end gap-2">
+          <n-button secondary :disabled="renameFileLoading" @click="renameFileModal = false">
+            {{ locale.t('cancel') }}
+          </n-button>
+          <n-button
+            type="primary"
+            :disabled="!renameFilePath.trim() || renameFilePath.trim() === renameFileSourcePath"
+            :loading="renameFileLoading"
+            @click="submitRenameFile"
+          >
+            {{ locale.t('renameFile') }}
+          </n-button>
+        </div>
+      </n-form>
+    </n-modal>
 
     <n-modal v-model:show="connectModal" preset="card" :title="locale.t('connectModelProvider')" class="max-w-[720px]">
       <div class="grid gap-4 md:grid-cols-[260px_1fr]">
@@ -2021,6 +2407,20 @@ function truncate(value: string, maxLength: number) {
   background: transparent;
   border: 0;
   box-shadow: none;
+}
+
+.file-workbench {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+}
+
+.file-workbench__toolbar {
+  align-items: center;
+  display: flex;
+  justify-content: flex-end;
+  min-height: 32px;
 }
 
 .workbench-section__header {
@@ -2258,6 +2658,11 @@ function truncate(value: string, maxLength: number) {
   padding: 0 0.75rem 0.75rem;
 }
 
+.patch-set-preview {
+  display: grid;
+  gap: 0.75rem;
+}
+
 .approval-card__hint {
   color: #b45309;
   font-size: 11px;
@@ -2475,6 +2880,65 @@ function truncate(value: string, maxLength: number) {
   overflow-x: hidden;
   overflow-y: auto;
   padding: 0.75rem 0.75rem 0.75rem 0;
+}
+
+.diagnostics-strip {
+  border-bottom: 1px solid #e2e8f0;
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: minmax(0, 1fr);
+  padding: 0.75rem;
+}
+
+.diagnostics-card {
+  align-items: flex-start;
+  background: #ffffff;
+  border: 1px solid #d9dee7;
+  border-radius: 8px;
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: 30px minmax(0, 1fr);
+  padding: 0.7rem;
+}
+
+.diagnostics-card__icon {
+  align-items: center;
+  background: #e6f6f2;
+  border: 1px solid #b8e6dc;
+  border-radius: 6px;
+  color: #0f766e;
+  display: inline-flex;
+  height: 30px;
+  justify-content: center;
+  width: 30px;
+}
+
+.diagnostics-card__title {
+  color: #0f172a;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.25;
+}
+
+.diagnostics-card__summary,
+.diagnostics-card__meta,
+.diagnostics-card__error {
+  font-size: 11px;
+  line-height: 1.4;
+  margin-top: 0.18rem;
+  overflow-wrap: anywhere;
+}
+
+.diagnostics-card__summary {
+  color: #334155;
+}
+
+.diagnostics-card__meta {
+  color: #64748b;
+}
+
+.diagnostics-card__error {
+  color: #b42318;
 }
 
 .event-item {

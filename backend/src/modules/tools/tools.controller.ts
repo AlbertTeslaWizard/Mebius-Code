@@ -33,7 +33,10 @@ export class ToolsController {
 @Controller()
 @UseGuards(JwtAuthGuard)
 export class ToolsReadController {
-  constructor(private readonly tools: ToolsService) {}
+  constructor(
+    private readonly tools: ToolsService,
+    private readonly users: UsersService,
+  ) {}
 
   @Get('sessions/:sessionId/patches')
   patches(@Req() request: RequestWithUser, @Param('sessionId') sessionId: string) {
@@ -43,5 +46,11 @@ export class ToolsReadController {
   @Get('sessions/:sessionId/command-runs')
   commandRuns(@Req() request: RequestWithUser, @Param('sessionId') sessionId: string) {
     return this.tools.listSessionCommandRuns(request.user.sub, sessionId);
+  }
+
+  @Post('patches/:id/revert')
+  async revertPatch(@Req() request: RequestWithUser, @Param('id') id: string) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.tools.revertPatch(owner, id);
   }
 }

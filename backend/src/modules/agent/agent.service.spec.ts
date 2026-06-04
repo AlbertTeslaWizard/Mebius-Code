@@ -25,7 +25,10 @@ describe('AgentService', () => {
     'Final project summary',
   );
 
-  const plans = {} as jest.Mocked<Repository<Plan>>;
+  const plans = {
+    findOne: jest.fn(),
+    save: jest.fn(async (value) => value),
+  } as unknown as jest.Mocked<Repository<Plan>>;
   const planSteps = {} as jest.Mocked<Repository<PlanStep>>;
   const sessions = {
     findOwned: jest.fn(),
@@ -66,6 +69,8 @@ describe('AgentService', () => {
     sessions.latestSummary.mockResolvedValue(null);
     sessions.listMessages.mockResolvedValue([userMessage]);
     sessions.findPendingApprovalTool.mockResolvedValue(null);
+    plans.findOne.mockResolvedValue(null);
+    plans.save.mockImplementation(async (value) => value as Plan);
     modelConfigs.findRuntime.mockResolvedValue({
       id: 'config-1',
       displayName: 'Test config',
@@ -145,6 +150,39 @@ describe('AgentService', () => {
         content: 'Final project summary',
       }),
     );
+  });
+
+  it('publishes model diagnostic events without exposing credentials', async () => {
+    llm.streamChat.mockResolvedValueOnce({ content: 'Final project summary' });
+
+    await service.run(owner, session.id, { message: 'Explain this project' });
+
+    expect(events.publish).toHaveBeenCalledWith(
+      session.id,
+      'model_call_started',
+      expect.objectContaining({
+        mode: 'chat',
+        turn: 0,
+        modelConfigId: 'config-1',
+        displayName: 'Test config',
+        modelName: 'gpt-test',
+        baseUrl: 'https://api.example.com/v1',
+      }),
+    );
+    expect(events.publish).toHaveBeenCalledWith(
+      session.id,
+      'model_call_completed',
+      expect.objectContaining({
+        mode: 'chat',
+        turn: 0,
+        modelConfigId: 'config-1',
+        durationMs: expect.any(Number),
+      }),
+    );
+    const diagnosticEvents = events.publish.mock.calls.filter(([, type]) =>
+      String(type).startsWith('model_call_'),
+    );
+    expect(JSON.stringify(diagnosticEvents)).not.toContain('sk-test');
   });
 
   it('stops visibly when a tool call requires approval', async () => {

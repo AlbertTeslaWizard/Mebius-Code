@@ -3,6 +3,7 @@ import { apiUrl, getAccessToken, jsonBody, request } from '../api/http';
 import type {
   CommandRunView,
   ConnectResult,
+  DeleteProjectFileResult,
   FilePatch,
   GitActionResult,
   GitCommitResult,
@@ -25,6 +26,21 @@ import { useLocaleStore } from './locale';
 type AgentActivityStatus = 'thinking' | 'using_tools' | 'waiting_for_approval' | 'failed';
 type GitImportStatus = 'idle' | 'running' | 'success' | 'error';
 type GitPublishStatus = 'idle' | 'running' | 'success' | 'error';
+
+export interface ModelDiagnostic {
+  status: 'started' | 'completed' | 'failed';
+  mode?: string;
+  turn?: number;
+  modelConfigId?: string;
+  displayName?: string;
+  modelName?: string;
+  baseUrl?: string;
+  providerId?: string | null;
+  durationMs?: number;
+  message?: string;
+  startedAt?: string;
+  updatedAt: string;
+}
 
 export interface AgentActivity {
   status: AgentActivityStatus;
@@ -50,6 +66,7 @@ interface WorkspaceState {
   eventSource: EventSource | null;
   streamingAssistantId: string | null;
   agentActivity: AgentActivity | null;
+  latestModelDiagnostic: ModelDiagnostic | null;
   gitImportStatus: GitImportStatus;
   gitImportError: string;
   gitStatus: GitStatus | null;
@@ -78,6 +95,7 @@ export const useWorkspaceStore = defineStore('workspace', {
     eventSource: null,
     streamingAssistantId: null,
     agentActivity: null,
+    latestModelDiagnostic: null,
     gitImportStatus: 'idle',
     gitImportError: '',
     gitStatus: null,
@@ -360,6 +378,7 @@ export const useWorkspaceStore = defineStore('workspace', {
     async selectSession(session: Session) {
       this.streamingAssistantId = null;
       this.agentActivity = null;
+      this.latestModelDiagnostic = null;
       this.currentSession = await request<Session>(`/sessions/${session.id}`);
       this.agentActivity = this.currentSession.agentActivity ?? null;
       await this.loadMessages();
@@ -388,7 +407,7 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.agentActivity = session.agentActivity ?? null;
       return session;
     },
-    async submitText(content: string) {
+    async submitText(content: string, options: { approvedPlanId?: string } = {}) {
       if (!this.currentSession || !content.trim()) return;
       const trimmed = content.trim();
       if (this.agentActivity?.status === 'waiting_for_approval') {
@@ -412,7 +431,7 @@ export const useWorkspaceStore = defineStore('workspace', {
       try {
         await request(`/sessions/${this.currentSession.id}/run`, {
           method: 'POST',
-          body: jsonBody({ message: trimmed }),
+          body: jsonBody({ message: trimmed, approvedPlanId: options.approvedPlanId }),
         });
         await Promise.all([
           this.loadMessages(),
@@ -473,6 +492,10 @@ export const useWorkspaceStore = defineStore('workspace', {
       );
       return this.commandRuns;
     },
+    async revertPatch(patchId: string) {
+      await request<FilePatch>(`/patches/${patchId}/revert`, { method: 'POST' });
+      await Promise.all([this.loadPatches(), this.loadTree(), this.loadGitStatus()]);
+    },
     async refreshReviewData() {
       await Promise.all([this.loadLatestPlan(), this.loadPatches(), this.loadCommandRuns()]);
     },
@@ -487,6 +510,50 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.currentFile = await request<ProjectFile>(
         `/projects/${this.currentProject.id}/file?path=${encodeURIComponent(path)}`,
       );
+    },
+    async createFile(path: string, content = '') {
+      if (!this.currentProject) return null;
+      const file = await request<ProjectFile>(`/projects/${this.currentProject.id}/file`, {
+        method: 'POST',
+        body: jsonBody({ path, content }),
+      });
+      this.currentFile = file;
+      await Promise.all([this.loadTree(), this.loadGitStatus()]);
+      return file;
+    },
+    async saveFile(path: string, content: string) {
+      if (!this.currentProject) return null;
+      const file = await request<ProjectFile>(`/projects/${this.currentProject.id}/file`, {
+        method: 'PUT',
+        body: jsonBody({ path, content }),
+      });
+      this.currentFile = file;
+      await Promise.all([this.loadTree(), this.loadGitStatus()]);
+      return file;
+    },
+    async deleteFile(path: string) {
+      if (!this.currentProject) return null;
+      const result = await request<DeleteProjectFileResult>(
+        `/projects/${this.currentProject.id}/file?path=${encodeURIComponent(path)}`,
+        { method: 'DELETE' },
+      );
+      if (this.currentFile?.path === result.path) {
+        this.currentFile = null;
+      }
+      await Promise.all([this.loadTree(), this.loadGitStatus()]);
+      return result;
+    },
+    async renameFile(path: string, newPath: string) {
+      if (!this.currentProject) return null;
+      const file = await request<ProjectFile>(`/projects/${this.currentProject.id}/file`, {
+        method: 'PATCH',
+        body: jsonBody({ path, newPath }),
+      });
+      if (this.currentFile?.path === path) {
+        this.currentFile = file;
+      }
+      await Promise.all([this.loadTree(), this.loadGitStatus()]);
+      return file;
     },
     async searchConnectProviders(query: string) {
       if (!this.currentSession) return null;
@@ -541,6 +608,10 @@ export const useWorkspaceStore = defineStore('workspace', {
         'patch_created',
         'command_started',
         'command_output',
+        'patch_reverted',
+        'model_call_started',
+        'model_call_completed',
+        'model_call_failed',
         'done',
       ].forEach((type) => {
         source.addEventListener(type, (event) => {
@@ -564,6 +635,10 @@ export const useWorkspaceStore = defineStore('workspace', {
             this.handleMessageCreated(data);
             return;
           }
+          if (type === 'model_call_started' || type === 'model_call_completed' || type === 'model_call_failed') {
+            this.handleModelDiagnostic(type, data);
+            return;
+          }
           if (type === 'tool_call_requested') {
             void this.refreshReviewData();
             if (this.agentActivity?.status !== 'waiting_for_approval') {
@@ -574,7 +649,13 @@ export const useWorkspaceStore = defineStore('workspace', {
             }
             return;
           }
-          if (type === 'tool_call_result' || type === 'command_output' || type === 'patch_created' || type === 'command_started') {
+          if (
+            type === 'tool_call_result' ||
+            type === 'command_output' ||
+            type === 'patch_created' ||
+            type === 'patch_reverted' ||
+            type === 'command_started'
+          ) {
             const toolName =
               typeof data.name === 'string'
                 ? data.name
@@ -587,7 +668,7 @@ export const useWorkspaceStore = defineStore('workspace', {
                 toolName,
               };
             }
-            if (type === 'patch_created') {
+            if (type === 'patch_created' || type === 'patch_reverted') {
               void Promise.all([this.loadPatches(), this.loadTree(), this.loadGitStatus()]);
             }
             if (type === 'command_started' || type === 'command_output') {
@@ -718,6 +799,28 @@ export const useWorkspaceStore = defineStore('workspace', {
         }
       });
     },
+    handleModelDiagnostic(type: string, data: SsePayload) {
+      this.latestModelDiagnostic = {
+        status:
+          type === 'model_call_failed'
+            ? 'failed'
+            : type === 'model_call_completed'
+              ? 'completed'
+              : 'started',
+        mode: typeof data.mode === 'string' ? data.mode : undefined,
+        turn: typeof data.turn === 'number' ? data.turn : undefined,
+        modelConfigId: typeof data.modelConfigId === 'string' ? data.modelConfigId : undefined,
+        displayName: typeof data.displayName === 'string' ? data.displayName : undefined,
+        modelName: typeof data.modelName === 'string' ? data.modelName : undefined,
+        baseUrl: typeof data.baseUrl === 'string' ? data.baseUrl : undefined,
+        providerId:
+          typeof data.providerId === 'string' || data.providerId === null ? data.providerId : undefined,
+        durationMs: typeof data.durationMs === 'number' ? data.durationMs : undefined,
+        message: typeof data.message === 'string' ? data.message : undefined,
+        startedAt: typeof data.startedAt === 'string' ? data.startedAt : undefined,
+        updatedAt: new Date().toISOString(),
+      };
+    },
     upsertEventMessage(data: SsePayload) {
       const id = typeof data.id === 'string' ? data.id : '';
       const role = toMessageRole(data.role);
@@ -767,6 +870,7 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.eventStatus = 'idle';
       this.streamingAssistantId = null;
       this.agentActivity = null;
+      this.latestModelDiagnostic = null;
     },
   },
 });

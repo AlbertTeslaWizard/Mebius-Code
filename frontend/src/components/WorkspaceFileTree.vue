@@ -9,7 +9,9 @@ import {
   FileText,
   Folder,
   FolderOpen,
+  Pencil,
   TerminalSquare,
+  Trash2,
 } from 'lucide-vue-next';
 import type { TreeNode } from '../api/types';
 
@@ -21,6 +23,8 @@ const props = withDefaults(
     selectedPath: string;
     expandedPaths: string[];
     emptyLabel: string;
+    renameLabel: string;
+    deleteLabel: string;
     depth?: number;
   }>(),
   {
@@ -31,6 +35,8 @@ const props = withDefaults(
 const emit = defineEmits<{
   select: [node: TreeNode];
   toggle: [path: string];
+  rename: [node: TreeNode];
+  delete: [node: TreeNode];
 }>();
 
 const expandedSet = computed(() => new Set(props.expandedPaths));
@@ -53,6 +59,14 @@ function handleNodeClick(node: TreeNode) {
     return;
   }
   emit('select', node);
+}
+
+function handleRename(node: TreeNode) {
+  emit('rename', node);
+}
+
+function handleDelete(node: TreeNode) {
+  emit('delete', node);
 }
 
 function nodeIcon(node: TreeNode) {
@@ -117,6 +131,30 @@ function nodeIcon(node: TreeNode) {
           <component :is="nodeIcon(node)" />
         </n-icon>
         <span class="workspace-file-tree__name">{{ node.name }}</span>
+        <span v-if="node.type === 'file'" class="workspace-file-tree__actions">
+          <span
+            role="button"
+            tabindex="0"
+            class="workspace-file-tree__action"
+            :title="renameLabel"
+            @click.stop="handleRename(node)"
+            @keydown.enter.stop.prevent="handleRename(node)"
+            @keydown.space.stop.prevent="handleRename(node)"
+          >
+            <n-icon><Pencil /></n-icon>
+          </span>
+          <span
+            role="button"
+            tabindex="0"
+            class="workspace-file-tree__action is-danger"
+            :title="deleteLabel"
+            @click.stop="handleDelete(node)"
+            @keydown.enter.stop.prevent="handleDelete(node)"
+            @keydown.space.stop.prevent="handleDelete(node)"
+          >
+            <n-icon><Trash2 /></n-icon>
+          </span>
+        </span>
       </button>
 
       <WorkspaceFileTree
@@ -125,9 +163,13 @@ function nodeIcon(node: TreeNode) {
         :selected-path="selectedPath"
         :expanded-paths="expandedPaths"
         :empty-label="emptyLabel"
+        :rename-label="renameLabel"
+        :delete-label="deleteLabel"
         :depth="depth + 1"
         @select="emit('select', $event)"
         @toggle="emit('toggle', $event)"
+        @rename="emit('rename', $event)"
+        @delete="emit('delete', $event)"
       />
     </li>
   </ul>
@@ -157,7 +199,7 @@ function nodeIcon(node: TreeNode) {
   display: grid;
   font-size: 12px;
   gap: 0.35rem;
-  grid-template-columns: 14px 18px minmax(0, 1fr);
+  grid-template-columns: 14px 18px minmax(0, 1fr) auto;
   height: 29px;
   letter-spacing: 0;
   line-height: 1;
@@ -217,6 +259,43 @@ function nodeIcon(node: TreeNode) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.workspace-file-tree__actions {
+  align-items: center;
+  display: inline-flex;
+  gap: 0.15rem;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.workspace-file-tree__row:hover .workspace-file-tree__actions,
+.workspace-file-tree__row:focus-within .workspace-file-tree__actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.workspace-file-tree__action {
+  align-items: center;
+  border-radius: 5px;
+  color: #64748b;
+  display: inline-flex;
+  height: 22px;
+  justify-content: center;
+  outline: none;
+  width: 22px;
+}
+
+.workspace-file-tree__action:hover,
+.workspace-file-tree__action:focus-visible {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.workspace-file-tree__action.is-danger:hover,
+.workspace-file-tree__action.is-danger:focus-visible {
+  background: #fee2e2;
+  color: #b91c1c;
 }
 
 .workspace-file-tree__empty {
