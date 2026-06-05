@@ -3,7 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { spawn } from 'child_process';
 import { Dirent } from 'fs';
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'fs/promises';
-import { basename, dirname, join, relative, resolve } from 'path';
+import { basename, delimiter, dirname, join, relative, resolve } from 'path';
 import { Repository } from 'typeorm';
 import { inflateRawSync } from 'zlib';
 import { PathSandboxService } from '../../common/security/path-sandbox.service';
@@ -851,8 +851,14 @@ export class ProjectsService {
 
   private async isGitRepository(projectRoot: string): Promise<boolean> {
     try {
-      const result = await this.runGit(projectRoot, ['rev-parse', '--is-inside-work-tree'], true);
-      return result.exitCode === 0 && result.stdout.trim() === 'true';
+      const resolvedProjectRoot = this.normalizeAbsoluteGitPath(projectRoot);
+      const result = await this.runGit(projectRoot, ['rev-parse', '--show-toplevel'], true);
+      const gitTopLevel = result.stdout.trim();
+      return (
+        result.exitCode === 0 &&
+        Boolean(gitTopLevel) &&
+        this.normalizeAbsoluteGitPath(gitTopLevel) === resolvedProjectRoot
+      );
     } catch {
       return false;
     }
@@ -975,13 +981,29 @@ export class ProjectsService {
     return [stdout.trim(), stderr.trim()].filter(Boolean).join('\n').trim();
   }
 
+  private normalizeAbsoluteGitPath(path: string): string {
+    const normalized = resolve(path);
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+  }
+
+  private buildProjectGitEnv(cwd: string): NodeJS.ProcessEnv {
+    const projectCeiling = dirname(resolve(cwd));
+    const existingCeilings = process.env.GIT_CEILING_DIRECTORIES;
+    return {
+      ...process.env,
+      GIT_CEILING_DIRECTORIES: existingCeilings
+        ? `${existingCeilings}${delimiter}${projectCeiling}`
+        : projectCeiling,
+    };
+  }
+
   private runGit(
     cwd: string,
     args: string[],
     allowFailure = false,
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     return new Promise((resolvePromise, reject) => {
-      const child = spawn('git', args, { cwd, shell: false });
+      const child = spawn('git', args, { cwd, env: this.buildProjectGitEnv(cwd), shell: false });
       let stdout = '';
       let stderr = '';
       child.stdout.on('data', (chunk: Buffer) => {

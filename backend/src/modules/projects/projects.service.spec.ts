@@ -266,7 +266,7 @@ describe('ProjectsService', () => {
     projects.findOne.mockResolvedValue(project);
     const runGit = jest.spyOn(service as any, 'runGit') as jest.Mock;
     runGit
-      .mockResolvedValueOnce({ exitCode: 0, stdout: 'true', stderr: '' })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: project.workspacePath, stderr: '' })
       .mockResolvedValueOnce({
         exitCode: 0,
         stdout: '## main...origin/main [ahead 1]\n?? demo_sarsa.py\n M README.md',
@@ -323,7 +323,7 @@ describe('ProjectsService', () => {
     projects.findOne.mockResolvedValue(project);
     const runGit = jest.spyOn(service as any, 'runGit') as jest.Mock;
     runGit
-      .mockResolvedValueOnce({ exitCode: 0, stdout: 'true', stderr: '' })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: project.workspacePath, stderr: '' })
       .mockResolvedValueOnce({ exitCode: 0, stdout: '## feature', stderr: '' })
       .mockResolvedValueOnce({
         exitCode: 0,
@@ -357,7 +357,7 @@ describe('ProjectsService', () => {
     projects.findOne.mockResolvedValue(project);
     const runGit = jest.spyOn(service as any, 'runGit') as jest.Mock;
     runGit
-      .mockResolvedValueOnce({ exitCode: 0, stdout: 'true', stderr: '' })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: project.workspacePath, stderr: '' })
       .mockResolvedValueOnce({ exitCode: 0, stdout: '## main', stderr: '' })
       .mockResolvedValueOnce({
         exitCode: 0,
@@ -399,18 +399,59 @@ describe('ProjectsService', () => {
     });
   });
 
+  it('does not treat a parent repository as the project repository', async () => {
+    const project = projectFixture(paths.getProjectRoot('project-1'));
+    projects.findOne.mockResolvedValue(project);
+    const runGit = jest.spyOn(service as any, 'runGit') as jest.Mock;
+    runGit.mockResolvedValueOnce({ exitCode: 0, stdout: workspaceRoot, stderr: '' });
+
+    await expect(service.gitStatus(owner.id, project.id)).resolves.toEqual({
+      isGitRepo: false,
+      branch: null,
+      tracking: null,
+      ahead: 0,
+      behind: 0,
+      pushableCommits: 0,
+      hasRemote: false,
+      remotes: [],
+      files: [],
+      counts: { staged: 0, unstaged: 0, untracked: 0 },
+    });
+    expect(runGit).toHaveBeenCalledTimes(1);
+    expect(runGit).toHaveBeenCalledWith(project.workspacePath, ['rev-parse', '--show-toplevel'], true);
+  });
+
+  it('rejects git write actions when only a parent directory is a repository', async () => {
+    const project = projectFixture(paths.getProjectRoot('project-1'));
+    projects.findOne.mockResolvedValue(project);
+    const runGit = jest.spyOn(service as any, 'runGit') as jest.Mock;
+    runGit.mockResolvedValue({ exitCode: 0, stdout: workspaceRoot, stderr: '' });
+
+    await expect(service.stageGitPath(owner, project.id, 'demo_sarsa.py')).rejects.toThrow(
+      'This project is not a Git repository.',
+    );
+    await expect(service.commitGit(owner, project.id, { message: 'add demo' })).rejects.toThrow(
+      'This project is not a Git repository.',
+    );
+    await expect(service.pushGit(owner, project.id)).rejects.toThrow(
+      'This project is not a Git repository.',
+    );
+    expect(runGit).toHaveBeenCalledTimes(3);
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+
   it('stages a single file', async () => {
     const project = projectFixture(paths.getProjectRoot('project-1'));
     projects.findOne.mockResolvedValue(project);
     const runGit = jest.spyOn(service as any, 'runGit') as jest.Mock;
     runGit
-      .mockResolvedValueOnce({ exitCode: 0, stdout: 'true', stderr: '' })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: project.workspacePath, stderr: '' })
       .mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
 
     const result = await service.stageGitPath(owner, project.id, 'demo_sarsa.py');
 
     expect(result).toEqual({ summary: 'Staged demo_sarsa.py.' });
-    expect(runGit).toHaveBeenNthCalledWith(1, project.workspacePath, ['rev-parse', '--is-inside-work-tree'], true);
+    expect(runGit).toHaveBeenNthCalledWith(1, project.workspacePath, ['rev-parse', '--show-toplevel'], true);
     expect(runGit).toHaveBeenNthCalledWith(2, project.workspacePath, ['add', '--', 'demo_sarsa.py']);
     expect(audit.record).toHaveBeenCalledWith({
       actor: owner,
@@ -426,13 +467,13 @@ describe('ProjectsService', () => {
     projects.findOne.mockResolvedValue(project);
     const runGit = jest.spyOn(service as any, 'runGit') as jest.Mock;
     runGit
-      .mockResolvedValueOnce({ exitCode: 0, stdout: 'true', stderr: '' })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: project.workspacePath, stderr: '' })
       .mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
 
     const result = await service.unstageGitPath(owner, project.id, 'demo_sarsa.py');
 
     expect(result).toEqual({ summary: 'Unstaged demo_sarsa.py.' });
-    expect(runGit).toHaveBeenNthCalledWith(1, project.workspacePath, ['rev-parse', '--is-inside-work-tree'], true);
+    expect(runGit).toHaveBeenNthCalledWith(1, project.workspacePath, ['rev-parse', '--show-toplevel'], true);
     expect(runGit).toHaveBeenNthCalledWith(
       2,
       project.workspacePath,
@@ -452,13 +493,13 @@ describe('ProjectsService', () => {
     projects.findOne.mockResolvedValue(project);
     const runGit = jest.spyOn(service as any, 'runGit') as jest.Mock;
     runGit
-      .mockResolvedValueOnce({ exitCode: 0, stdout: 'true', stderr: '' })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: project.workspacePath, stderr: '' })
       .mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
 
     const result = await service.stageAllGit(owner, project.id);
 
     expect(result).toEqual({ summary: 'Staged all changes.' });
-    expect(runGit).toHaveBeenNthCalledWith(1, project.workspacePath, ['rev-parse', '--is-inside-work-tree'], true);
+    expect(runGit).toHaveBeenNthCalledWith(1, project.workspacePath, ['rev-parse', '--show-toplevel'], true);
     expect(runGit).toHaveBeenNthCalledWith(2, project.workspacePath, ['add', '-A']);
     expect(audit.record).toHaveBeenCalledWith({
       actor: owner,
@@ -473,13 +514,13 @@ describe('ProjectsService', () => {
     projects.findOne.mockResolvedValue(project);
     const runGit = jest.spyOn(service as any, 'runGit') as jest.Mock;
     runGit
-      .mockResolvedValueOnce({ exitCode: 0, stdout: 'true', stderr: '' })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: project.workspacePath, stderr: '' })
       .mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
 
     const result = await service.unstageAllGit(owner, project.id);
 
     expect(result).toEqual({ summary: 'Unstaged all changes.' });
-    expect(runGit).toHaveBeenNthCalledWith(1, project.workspacePath, ['rev-parse', '--is-inside-work-tree'], true);
+    expect(runGit).toHaveBeenNthCalledWith(1, project.workspacePath, ['rev-parse', '--show-toplevel'], true);
     expect(runGit).toHaveBeenNthCalledWith(2, project.workspacePath, ['restore', '--staged', '.']);
     expect(audit.record).toHaveBeenCalledWith({
       actor: owner,
@@ -506,7 +547,7 @@ describe('ProjectsService', () => {
     });
     const runGit = jest.spyOn(service as any, 'runGit') as jest.Mock;
     runGit
-      .mockResolvedValueOnce({ exitCode: 0, stdout: 'true', stderr: '' })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: project.workspacePath, stderr: '' })
       .mockResolvedValueOnce({ exitCode: 0, stdout: '[main abc1234] add demo', stderr: '' })
       .mockResolvedValueOnce({ exitCode: 0, stdout: 'abc1234', stderr: '' });
 
@@ -541,7 +582,7 @@ describe('ProjectsService', () => {
       counts: { staged: 0, unstaged: 1, untracked: 0 },
     });
     const runGit = jest.spyOn(service as any, 'runGit') as jest.Mock;
-    runGit.mockResolvedValueOnce({ exitCode: 0, stdout: 'true', stderr: '' });
+    runGit.mockResolvedValueOnce({ exitCode: 0, stdout: project.workspacePath, stderr: '' });
 
     await expect(service.commitGit(owner, project.id, { message: 'add demo' })).rejects.toThrow(
       'There are no staged changes to commit.',
@@ -664,7 +705,7 @@ describe('ProjectsService', () => {
       counts: { staged: 0, unstaged: 0, untracked: 0 },
     });
     const runGit = jest.spyOn(service as any, 'runGit') as jest.Mock;
-    runGit.mockResolvedValueOnce({ exitCode: 0, stdout: 'true', stderr: '' });
+    runGit.mockResolvedValueOnce({ exitCode: 0, stdout: project.workspacePath, stderr: '' });
 
     await expect(service.pushGit(owner, project.id)).rejects.toThrow('This repository has no remote configured.');
   });
@@ -685,7 +726,7 @@ describe('ProjectsService', () => {
       counts: { staged: 0, unstaged: 0, untracked: 0 },
     });
     const runGit = jest.spyOn(service as any, 'runGit') as jest.Mock;
-    runGit.mockResolvedValueOnce({ exitCode: 0, stdout: 'true', stderr: '' });
+    runGit.mockResolvedValueOnce({ exitCode: 0, stdout: project.workspacePath, stderr: '' });
 
     await expect(service.pushGit(owner, project.id)).rejects.toThrow('There are no local commits to push.');
     expect(runGit).toHaveBeenCalledTimes(1);
@@ -708,12 +749,12 @@ describe('ProjectsService', () => {
     });
     const runGit = jest.spyOn(service as any, 'runGit') as jest.Mock;
     runGit
-      .mockResolvedValueOnce({ exitCode: 0, stdout: 'true', stderr: '' })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: project.workspacePath, stderr: '' })
       .mockResolvedValueOnce({ exitCode: 0, stdout: 'Branch feature set up to track origin/feature.', stderr: '' });
 
     const result = await service.pushGit(owner, project.id);
 
-    expect(runGit).toHaveBeenNthCalledWith(1, project.workspacePath, ['rev-parse', '--is-inside-work-tree'], true);
+    expect(runGit).toHaveBeenNthCalledWith(1, project.workspacePath, ['rev-parse', '--show-toplevel'], true);
     expect(runGit).toHaveBeenNthCalledWith(2, project.workspacePath, ['push', '-u', 'origin', 'HEAD']);
     expect(result).toEqual({
       summary: 'Branch feature set up to track origin/feature.',
@@ -739,7 +780,7 @@ describe('ProjectsService', () => {
     });
     const runGit = jest.spyOn(service as any, 'runGit') as jest.Mock;
     runGit
-      .mockResolvedValueOnce({ exitCode: 0, stdout: 'true', stderr: '' })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: project.workspacePath, stderr: '' })
       .mockRejectedValueOnce(new Error('Permission denied (publickey).'));
 
     await expect(service.pushGit(owner, project.id)).rejects.toThrow('Permission denied (publickey).');
