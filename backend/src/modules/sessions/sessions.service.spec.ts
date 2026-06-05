@@ -162,14 +162,19 @@ describe('SessionsService', () => {
 
   it('returns waiting approval activity when the session has a pending approval', async () => {
     approvals.findOne.mockResolvedValue({
-      toolCall: { name: 'run_command' },
+      toolCall: {
+        name: 'create_patch',
+        arguments: { path: 'demo.py', content: 'print(1)' },
+      },
     } as ToolApproval);
 
     const result = await service.get('owner-1', 'session-1');
 
     expect(result.agentActivity).toEqual({
       status: 'waiting_for_approval',
-      toolName: 'run_command',
+      toolName: 'create_patch',
+      activity: 'waiting_for_approval',
+      targetPaths: ['demo.py'],
     });
     expect(approvals.findOne).toHaveBeenCalledWith({
       where: {
@@ -184,6 +189,7 @@ describe('SessionsService', () => {
   it('returns using tools activity when the session has a running tool call', async () => {
     toolCalls.findOne.mockResolvedValue({
       name: 'run_command',
+      arguments: { command: 'npm test' },
     } as ToolCall);
 
     const result = await service.get('owner-1', 'session-1');
@@ -191,6 +197,8 @@ describe('SessionsService', () => {
     expect(result.agentActivity).toEqual({
       status: 'using_tools',
       toolName: 'run_command',
+      activity: 'running_tool',
+      command: 'npm test',
     });
   });
 

@@ -61,6 +61,8 @@ interface PatchInputFile {
   content: string;
 }
 
+type ToolActivityStatus = 'using_tools' | 'waiting_for_approval';
+
 @Injectable()
 export class ToolsService {
   constructor(
@@ -103,6 +105,11 @@ export class ToolsService {
 
     if (requiresApproval) {
       if (input.name === 'create_patch') {
+        this.events.publish(
+          session.id,
+          'agent_status',
+          this.buildToolActivityPayload(input.name, input.args, 'using_tools', 'preparing_patch'),
+        );
         await this.createProposedPatches(toolCall, session.project as Project, input.args);
       }
       const approval = await this.approvals.save(
@@ -118,6 +125,7 @@ export class ToolsService {
         approvalId: approval.id,
         name: toolCall.name,
         arguments: toolCall.arguments,
+        ...this.buildToolMetadata(toolCall.name, toolCall.arguments, 'waiting_for_approval'),
       });
       return toolCall;
     }
@@ -130,6 +138,8 @@ export class ToolsService {
       toolCallId: saved.id,
       name: saved.name,
       result,
+      status: saved.status,
+      ...this.buildToolMetadata(saved.name, saved.arguments, 'tool_completed'),
     });
     return saved;
   }
@@ -196,11 +206,16 @@ export class ToolsService {
     const resumeContext = this.decodeResumeContext(toolCall.resultText);
     toolCall.status = ToolCallStatus.Running;
     await this.toolCalls.save(toolCall);
-    this.events.publish(toolCall.session.id, 'agent_status', {
-      status: 'using_tools',
-      toolName: toolCall.name,
-      tools: [toolCall.name],
-    });
+    this.events.publish(
+      toolCall.session.id,
+      'agent_status',
+      this.buildToolActivityPayload(
+        toolCall.name,
+        toolCall.arguments,
+        'using_tools',
+        toolCall.name === 'create_patch' ? 'applying_patch' : 'running_tool',
+      ),
+    );
 
     try {
       const result = await this.executeTool(toolCall, owner);
@@ -211,6 +226,12 @@ export class ToolsService {
         toolCallId: saved.id,
         name: saved.name,
         result,
+        status: saved.status,
+        ...this.buildToolMetadata(
+          saved.name,
+          saved.arguments,
+          saved.name === 'create_patch' ? 'patch_applied' : 'tool_completed',
+        ),
       });
       if (resumeContext) {
         await this.agent.recordToolResultMessage(
@@ -234,6 +255,7 @@ export class ToolsService {
         name: saved.name,
         result: saved.resultText,
         status: saved.status,
+        ...this.buildToolMetadata(saved.name, saved.arguments, 'tool_failed'),
       });
       if (resumeContext) {
         await this.agent.recordToolResultMessage(
@@ -453,6 +475,8 @@ export class ToolsService {
         patchId: patch.id,
         path: patch.relativePath,
         status: patch.status,
+        targetPaths: [patch.relativePath],
+        activity: 'patch_applied',
       });
     }
 
@@ -542,6 +566,54 @@ export class ToolsService {
           }
         : undefined,
     };
+  }
+
+  private buildToolActivityPayload(
+    toolName: string,
+    args: Record<string, unknown>,
+    status: ToolActivityStatus,
+    activity: string,
+  ): Record<string, unknown> {
+    const payload: Record<string, unknown> = {
+      status,
+      ...this.buildToolMetadata(toolName, args, activity),
+    };
+    if (status === 'using_tools') {
+      payload.tools = [toolName];
+    }
+    return payload;
+  }
+
+  private buildToolMetadata(
+    toolName: string,
+    args: Record<string, unknown>,
+    activity: string,
+  ): Record<string, unknown> {
+    const metadata: Record<string, unknown> = {
+      toolName,
+      activity,
+    };
+    const targetPaths = this.extractToolTargetPaths(toolName, args);
+    if (targetPaths.length > 0) {
+      metadata.targetPaths = targetPaths;
+    }
+    if (toolName === 'run_command' && typeof args.command === 'string') {
+      metadata.command = args.command;
+    }
+    return metadata;
+  }
+
+  private extractToolTargetPaths(toolName: string, args: Record<string, unknown>): string[] {
+    if (toolName !== 'create_patch') {
+      return [];
+    }
+
+    const rawPaths = Array.isArray(args.files)
+      ? args.files.map((item) => (item && typeof item === 'object' ? (item as Record<string, unknown>).path : undefined))
+      : [args.path];
+    return rawPaths
+      .filter((path): path is string => typeof path === 'string' && path.trim().length > 0)
+      .map((path) => path.trim().replaceAll('\\', '/'));
   }
 
   private async ensureProposedPatches(

@@ -27,6 +27,9 @@ export interface SessionView {
   agentActivity?: {
     status: 'using_tools' | 'waiting_for_approval';
     toolName?: string;
+    activity?: string;
+    targetPaths?: string[];
+    command?: string;
   } | null;
   createdAt: Date;
   updatedAt: Date;
@@ -279,10 +282,7 @@ export class SessionsService {
   private async getAgentActivity(sessionId: string): Promise<SessionView['agentActivity']> {
     const pendingApproval = await this.findPendingApprovalTool(sessionId);
     if (pendingApproval?.toolCall) {
-      return {
-        status: 'waiting_for_approval',
-        toolName: pendingApproval.toolCall.name,
-      };
+      return this.buildAgentActivity(pendingApproval.toolCall, 'waiting_for_approval');
     }
 
     const runningTool = await this.toolCalls.findOne({
@@ -293,13 +293,48 @@ export class SessionsService {
       order: { updatedAt: 'DESC' },
     });
     if (runningTool) {
-      return {
-        status: 'using_tools',
-        toolName: runningTool.name,
-      };
+      return this.buildAgentActivity(runningTool, 'using_tools');
     }
 
     return null;
+  }
+
+  private buildAgentActivity(
+    toolCall: ToolCall,
+    status: NonNullable<SessionView['agentActivity']>['status'],
+  ): NonNullable<SessionView['agentActivity']> {
+    const args = toolCall.arguments ?? {};
+    const activity: NonNullable<SessionView['agentActivity']> = {
+      status,
+      toolName: toolCall.name,
+      activity:
+        toolCall.name === 'create_patch'
+          ? status === 'waiting_for_approval'
+            ? 'waiting_for_approval'
+            : 'applying_patch'
+          : 'running_tool',
+    };
+    const targetPaths = this.extractToolTargetPaths(toolCall.name, args);
+    if (targetPaths.length > 0) {
+      activity.targetPaths = targetPaths;
+    }
+    if (toolCall.name === 'run_command' && typeof args.command === 'string') {
+      activity.command = args.command;
+    }
+    return activity;
+  }
+
+  private extractToolTargetPaths(toolName: string, args: Record<string, unknown>): string[] {
+    if (toolName !== 'create_patch') {
+      return [];
+    }
+
+    const rawPaths = Array.isArray(args.files)
+      ? args.files.map((item) => (item && typeof item === 'object' ? (item as Record<string, unknown>).path : undefined))
+      : [args.path];
+    return rawPaths
+      .filter((path): path is string => typeof path === 'string' && path.trim().length > 0)
+      .map((path) => path.trim().replaceAll('\\', '/'));
   }
 
   private async connectModel(

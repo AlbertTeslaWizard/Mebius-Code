@@ -345,6 +345,7 @@ export class AgentService {
             status: 'waiting_for_approval',
             toolCallId: created.id,
             toolName: created.name,
+            ...this.buildToolActivityMetadata(created.name, created.arguments, 'waiting_for_approval'),
           });
           this.events.complete(session.id);
           return { toolCalls: createdToolCalls };
@@ -444,6 +445,37 @@ export class AgentService {
       baseUrl: config.baseUrl,
       providerId: config.providerId ?? null,
     };
+  }
+
+  private buildToolActivityMetadata(
+    toolName: string,
+    args: Record<string, unknown>,
+    activity: string,
+  ): Record<string, unknown> {
+    const metadata: Record<string, unknown> = {
+      activity,
+    };
+    const targetPaths = this.extractToolTargetPaths(toolName, args);
+    if (targetPaths.length > 0) {
+      metadata.targetPaths = targetPaths;
+    }
+    if (toolName === 'run_command' && typeof args.command === 'string') {
+      metadata.command = args.command;
+    }
+    return metadata;
+  }
+
+  private extractToolTargetPaths(toolName: string, args: Record<string, unknown>): string[] {
+    if (toolName !== 'create_patch') {
+      return [];
+    }
+
+    const rawPaths = Array.isArray(args.files)
+      ? args.files.map((item) => (item && typeof item === 'object' ? (item as Record<string, unknown>).path : undefined))
+      : [args.path];
+    return rawPaths
+      .filter((path): path is string => typeof path === 'string' && path.trim().length > 0)
+      .map((path) => path.trim().replaceAll('\\', '/'));
   }
 
   private buildModelMessages(summary: string | undefined, history: Message[]): LlmMessage[] {

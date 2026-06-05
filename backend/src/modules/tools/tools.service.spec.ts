@@ -58,9 +58,11 @@ describe('ToolsService', () => {
   } as ToolApproval;
 
   const toolCalls = {
+    create: jest.fn((value) => value),
     save: jest.fn(async (value) => value),
   } as unknown as jest.Mocked<Repository<ToolCall>>;
   const approvals = {
+    create: jest.fn((value) => value),
     findOne: jest.fn(),
     save: jest.fn(async (value) => value),
   } as unknown as jest.Mocked<Repository<ToolApproval>>;
@@ -143,6 +145,38 @@ describe('ToolsService', () => {
     audit.record.mockResolvedValue({} as any);
   });
 
+  it('publishes user-facing patch metadata while preparing an approval request', async () => {
+    const result = await service.requestOrExecute({
+      owner,
+      sessionId: session.id,
+      name: 'create_patch',
+      args: { path: 'demo.py', content: 'print(1)' },
+      resumeContext,
+    });
+
+    expect(result.status).toBe(ToolCallStatus.PendingApproval);
+    expect(events.publish).toHaveBeenCalledWith(
+      session.id,
+      'agent_status',
+      expect.objectContaining({
+        status: 'using_tools',
+        toolName: 'create_patch',
+        activity: 'preparing_patch',
+        targetPaths: ['demo.py'],
+      }),
+    );
+    expect(events.publish).toHaveBeenCalledWith(
+      session.id,
+      'tool_call_requested',
+      expect.objectContaining({
+        name: 'create_patch',
+        toolName: 'create_patch',
+        activity: 'waiting_for_approval',
+        targetPaths: ['demo.py'],
+      }),
+    );
+  });
+
   it('continues the agent after approving a pending tool call with resume context', async () => {
     jest
       .spyOn(service as any, 'executeTool')
@@ -152,16 +186,29 @@ describe('ToolsService', () => {
 
     expect(result.status).toBe(ToolCallStatus.Succeeded);
     expect(result.resultText).toBe('Patch applied to demo.py.');
-    expect(events.publish).toHaveBeenCalledWith(session.id, 'agent_status', {
-      status: 'using_tools',
-      toolName: pendingToolCall.name,
-      tools: [pendingToolCall.name],
-    });
-    expect(events.publish).toHaveBeenCalledWith(session.id, 'tool_call_result', {
-      toolCallId: pendingToolCall.id,
-      name: pendingToolCall.name,
-      result: 'Patch applied to demo.py.',
-    });
+    expect(events.publish).toHaveBeenCalledWith(
+      session.id,
+      'agent_status',
+      expect.objectContaining({
+        status: 'using_tools',
+        toolName: pendingToolCall.name,
+        tools: [pendingToolCall.name],
+        activity: 'applying_patch',
+        targetPaths: ['demo.py'],
+      }),
+    );
+    expect(events.publish).toHaveBeenCalledWith(
+      session.id,
+      'tool_call_result',
+      expect.objectContaining({
+        toolCallId: pendingToolCall.id,
+        name: pendingToolCall.name,
+        result: 'Patch applied to demo.py.',
+        status: ToolCallStatus.Succeeded,
+        activity: 'patch_applied',
+        targetPaths: ['demo.py'],
+      }),
+    );
     expect(agent.recordToolResultMessage).toHaveBeenCalledWith(
       session,
       'provider-call',

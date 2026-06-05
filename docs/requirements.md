@@ -44,6 +44,7 @@ Mebius Code
 ├── 项目工作区
 │   ├── 创建项目
 │   ├── Git 导入
+│   ├── 本地压缩包导入
 │   ├── 文件树浏览
 │   └── 文件读取
 ├── Agent 会话
@@ -71,4 +72,3 @@ Mebius Code
 ## 7. UML 图
 
 UML 源文件维护在 `docs/diagrams/` 下，最终 DOCX 中渲染为图片。
-

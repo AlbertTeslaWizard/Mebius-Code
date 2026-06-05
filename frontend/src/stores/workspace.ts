@@ -45,6 +45,9 @@ export interface ModelDiagnostic {
 export interface AgentActivity {
   status: AgentActivityStatus;
   toolName?: string;
+  activity?: string;
+  targetPaths?: string[];
+  command?: string;
   message?: string;
 }
 
@@ -162,6 +165,7 @@ export const useWorkspaceStore = defineStore('workspace', {
           body: jsonBody(input),
         });
         this.currentProject = project;
+        this.projects = this.projects.map((item) => (item.id === project.id ? project : item));
         await Promise.all([this.loadTree(), this.loadGitStatus()]);
         this.gitImportStatus = 'success';
         window.setTimeout(() => {
@@ -172,6 +176,32 @@ export const useWorkspaceStore = defineStore('workspace', {
       } catch (error) {
         this.gitImportStatus = 'error';
         this.gitImportError = error instanceof Error ? error.message : 'Git import failed.';
+        throw error;
+      }
+    },
+    async importArchive(file: File) {
+      if (!this.currentProject) return;
+      this.gitImportStatus = 'running';
+      this.gitImportError = '';
+      const formData = new FormData();
+      formData.append('file', file);
+      try {
+        const project = await request<Project>(`/projects/${this.currentProject.id}/import/archive`, {
+          method: 'POST',
+          body: formData,
+        });
+        this.currentProject = project;
+        this.projects = this.projects.map((item) => (item.id === project.id ? project : item));
+        await Promise.all([this.loadTree(), this.loadGitStatus()]);
+        this.gitImportStatus = 'success';
+        window.setTimeout(() => {
+          if (this.gitImportStatus === 'success') {
+            this.resetGitImportStatus();
+          }
+        }, 4000);
+      } catch (error) {
+        this.gitImportStatus = 'error';
+        this.gitImportError = error instanceof Error ? error.message : 'Archive import failed.';
         throw error;
       }
     },
@@ -380,7 +410,7 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.agentActivity = null;
       this.latestModelDiagnostic = null;
       this.currentSession = await request<Session>(`/sessions/${session.id}`);
-      this.agentActivity = this.currentSession.agentActivity ?? null;
+      this.agentActivity = normalizeAgentActivity(this.currentSession.agentActivity ?? null, null);
       await this.loadMessages();
       await this.refreshReviewData();
       this.connectEvents();
@@ -404,7 +434,7 @@ export const useWorkspaceStore = defineStore('workspace', {
       const session = await request<Session>(`/sessions/${this.currentSession.id}`);
       this.currentSession = session;
       this.sessions = this.sessions.map((item) => (item.id === session.id ? session : item));
-      this.agentActivity = session.agentActivity ?? null;
+      this.agentActivity = normalizeAgentActivity(session.agentActivity ?? null, this.agentActivity);
       return session;
     },
     async submitText(content: string, options: { approvedPlanId?: string } = {}) {
@@ -641,12 +671,15 @@ export const useWorkspaceStore = defineStore('workspace', {
           }
           if (type === 'tool_call_requested') {
             void this.refreshReviewData();
-            if (this.agentActivity?.status !== 'waiting_for_approval') {
-              this.agentActivity = {
+            this.agentActivity = normalizeAgentActivity(
+              {
+                ...data,
                 status: 'waiting_for_approval',
-                toolName: typeof data.name === 'string' ? data.name : undefined,
-              };
-            }
+                toolName: typeof data.toolName === 'string' ? data.toolName : data.name,
+                activity: typeof data.activity === 'string' ? data.activity : 'waiting_for_approval',
+              },
+              this.agentActivity,
+            );
             return;
           }
           if (
@@ -656,19 +689,23 @@ export const useWorkspaceStore = defineStore('workspace', {
             type === 'patch_reverted' ||
             type === 'command_started'
           ) {
-            const toolName =
-              typeof data.name === 'string'
-                ? data.name
-                : this.agentActivity?.status === 'using_tools'
-                  ? this.agentActivity.toolName
-                  : undefined;
-            if (toolName && this.agentActivity?.status !== 'failed') {
-              this.agentActivity = {
+            if (type === 'patch_reverted') {
+              void Promise.all([this.loadPatches(), this.loadTree(), this.loadGitStatus()]);
+              return;
+            }
+            const toolName = inferEventToolName(type, data, this.agentActivity);
+            const activity =
+              typeof data.activity === 'string' ? data.activity : defaultEventActivity(type, toolName);
+            this.agentActivity = normalizeAgentActivity(
+              {
+                ...data,
                 status: 'using_tools',
                 toolName,
-              };
-            }
-            if (type === 'patch_created' || type === 'patch_reverted') {
+                activity,
+              },
+              this.agentActivity,
+            );
+            if (type === 'patch_created') {
               void Promise.all([this.loadPatches(), this.loadTree(), this.loadGitStatus()]);
             }
             if (type === 'command_started' || type === 'command_output') {
@@ -727,31 +764,19 @@ export const useWorkspaceStore = defineStore('workspace', {
     handleAgentStatus(data: SsePayload) {
       const status = typeof data.status === 'string' ? data.status : '';
       if (status === 'thinking') {
-        this.agentActivity = { status: 'thinking' };
+        this.agentActivity = normalizeAgentActivity(data, this.agentActivity);
         return;
       }
       if (status === 'using_tools') {
-        const tools = Array.isArray(data.tools)
-          ? data.tools.filter((item): item is string => typeof item === 'string')
-          : [];
-        this.agentActivity = {
-          status: 'using_tools',
-          toolName: typeof data.toolName === 'string' ? data.toolName : tools[0],
-        };
+        this.agentActivity = normalizeAgentActivity(data, this.agentActivity);
         return;
       }
       if (status === 'waiting_for_approval') {
-        this.agentActivity = {
-          status: 'waiting_for_approval',
-          toolName: typeof data.toolName === 'string' ? data.toolName : undefined,
-        };
+        this.agentActivity = normalizeAgentActivity(data, this.agentActivity);
         return;
       }
       if (status === 'failed') {
-        this.agentActivity = {
-          status: 'failed',
-          message: typeof data.message === 'string' ? data.message : undefined,
-        };
+        this.agentActivity = normalizeAgentActivity(data, this.agentActivity);
         return;
       }
       if (status === 'completed') {
@@ -881,6 +906,100 @@ function safeJson(value: string): SsePayload {
   } catch {
     return { value };
   }
+}
+
+function normalizeAgentActivity(value: unknown, previous: AgentActivity | null): AgentActivity | null {
+  if (!isRecord(value)) return null;
+
+  const status = typeof value.status === 'string' ? value.status : '';
+  if (!isAgentActivityStatus(status)) return null;
+
+  const tools = Array.isArray(value.tools)
+    ? value.tools.filter((item): item is string => typeof item === 'string')
+    : [];
+  const explicitToolName =
+    typeof value.toolName === 'string'
+      ? value.toolName
+      : typeof value.name === 'string'
+        ? value.name
+        : tools[0];
+  const previousMatches =
+    Boolean(previous?.toolName) && (!explicitToolName || previous?.toolName === explicitToolName);
+  const activity: AgentActivity = {
+    status,
+  };
+
+  if (explicitToolName || previousMatches) {
+    activity.toolName = explicitToolName || previous?.toolName;
+  }
+  if (typeof value.activity === 'string') {
+    activity.activity = value.activity;
+  } else if (previousMatches) {
+    activity.activity = previous?.activity;
+  }
+
+  const targetPaths = extractTargetPaths(value);
+  if (targetPaths.length > 0) {
+    activity.targetPaths = targetPaths;
+  } else if (previousMatches && previous?.targetPaths?.length) {
+    activity.targetPaths = previous.targetPaths;
+  }
+
+  if (typeof value.command === 'string') {
+    activity.command = value.command;
+  } else if (previousMatches && previous?.command) {
+    activity.command = previous.command;
+  }
+  if (typeof value.message === 'string') {
+    activity.message = value.message;
+  }
+
+  return activity;
+}
+
+function isAgentActivityStatus(value: string): value is AgentActivityStatus {
+  return value === 'thinking' || value === 'using_tools' || value === 'waiting_for_approval' || value === 'failed';
+}
+
+function inferEventToolName(type: string, data: SsePayload, previous: AgentActivity | null): string | undefined {
+  if (typeof data.toolName === 'string') return data.toolName;
+  if (typeof data.name === 'string') return data.name;
+  if (type === 'patch_created') return 'create_patch';
+  if (type === 'command_started' || type === 'command_output') return 'run_command';
+  if (previous?.status === 'using_tools') return previous.toolName;
+  return undefined;
+}
+
+function defaultEventActivity(type: string, toolName?: string): string | undefined {
+  if (type === 'patch_created') return 'patch_applied';
+  if (type === 'command_started') return 'running_tool';
+  if (type === 'command_output') return 'tool_completed';
+  if (type === 'tool_call_result') return toolName === 'create_patch' ? 'patch_applied' : 'tool_completed';
+  return undefined;
+}
+
+function extractTargetPaths(data: Record<string, unknown>): string[] {
+  if (Array.isArray(data.targetPaths)) {
+    return data.targetPaths.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+  }
+  if (typeof data.path === 'string' && data.path.trim()) {
+    return [data.path.trim()];
+  }
+  return extractPatchTargetPaths(data.arguments);
+}
+
+function extractPatchTargetPaths(args: unknown): string[] {
+  if (!isRecord(args)) return [];
+  const rawPaths = Array.isArray(args.files)
+    ? args.files.map((item) => (isRecord(item) ? item.path : undefined))
+    : [args.path];
+  return rawPaths
+    .filter((path): path is string => typeof path === 'string' && path.trim().length > 0)
+    .map((path) => path.trim().replaceAll('\\', '/'));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object';
 }
 
 function toMessageRole(value: unknown): Message['role'] | null {

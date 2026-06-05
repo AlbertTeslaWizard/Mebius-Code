@@ -26,10 +26,11 @@ export function apiUrl(path: string): string {
 export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
   const token = getAccessToken();
+  const isFormDataBody = typeof FormData !== 'undefined' && options.body instanceof FormData;
   if (token) {
     headers.set('Authorization', `Bearer ${token}`);
   }
-  if (options.body && !headers.has('Content-Type')) {
+  if (options.body && !isFormDataBody && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
 

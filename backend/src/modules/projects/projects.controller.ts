@@ -1,4 +1,19 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, Req, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Put,
+  Query,
+  Req,
+  UploadedFile,
+  UseGuards,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { RequestWithUser } from '../../common/types/request-with-user';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { UsersService } from '../users/users.service';
@@ -8,7 +23,7 @@ import { GitPathDto } from './dto/git-path.dto';
 import { ImportGitDto } from './dto/import-git.dto';
 import { RenameProjectFileDto } from './dto/rename-project-file.dto';
 import { SaveProjectFileDto } from './dto/save-project-file.dto';
-import { ProjectsService } from './projects.service';
+import { ArchiveUploadFile, PROJECT_ARCHIVE_MAX_UPLOAD_BYTES, ProjectsService } from './projects.service';
 
 @Controller('projects')
 @UseGuards(JwtAuthGuard)
@@ -37,6 +52,17 @@ export class ProjectsController {
   ) {
     const owner = await this.users.findById(request.user.sub);
     return this.projects.importGit(owner, id, dto);
+  }
+
+  @Post(':id/import/archive')
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: PROJECT_ARCHIVE_MAX_UPLOAD_BYTES } }))
+  async importArchive(
+    @Req() request: RequestWithUser,
+    @Param('id') id: string,
+    @UploadedFile() file: ArchiveUploadFile,
+  ) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.projects.importArchive(owner, id, file);
   }
 
   @Get(':id/git/status')

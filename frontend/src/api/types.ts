@@ -51,7 +51,7 @@ export interface Project {
   name: string;
   description?: string;
   sourceType: string;
-  gitUrl?: string;
+  gitUrl?: string | null;
   workspacePath: string;
   createdAt: string;
   updatedAt: string;
@@ -66,6 +66,10 @@ export interface Session {
   agentActivity?: {
     status: 'using_tools' | 'waiting_for_approval';
     toolName?: string;
+    activity?: string;
+    targetPaths?: string[];
+    command?: string;
+    message?: string;
   } | null;
   createdAt: string;
   updatedAt: string;

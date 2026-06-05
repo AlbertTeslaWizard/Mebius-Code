@@ -34,8 +34,8 @@ export class Project {
   @Column({ type: 'enum', enum: ProjectSourceType, name: 'source_type', default: ProjectSourceType.Manual })
   sourceType: ProjectSourceType;
 
-  @Column({ name: 'git_url', nullable: true })
-  gitUrl?: string;
+  @Column({ type: 'varchar', name: 'git_url', nullable: true })
+  gitUrl?: string | null;
 
   @Column({ name: 'workspace_path' })
   workspacePath: string;
@@ -46,4 +46,3 @@ export class Project {
   @UpdateDateColumn({ name: 'updated_at' })
   updatedAt: Date;
 }
-

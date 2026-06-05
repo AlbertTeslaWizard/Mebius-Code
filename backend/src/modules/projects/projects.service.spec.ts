@@ -554,6 +554,100 @@ describe('ProjectsService', () => {
     );
   });
 
+  it('imports a zip archive into an empty workspace and flattens a single root folder', async () => {
+    const project = projectFixture(paths.getProjectRoot('project-1'));
+    projects.findOne.mockResolvedValue(project);
+    await mkdir(project.workspacePath, { recursive: true });
+    const archive = createStoredZip({
+      'local-project/README.md': 'hello',
+      'local-project/src/app.ts': 'console.log("demo");',
+    });
+
+    const result = await service.importArchive(owner, project.id, {
+      originalname: 'local-project.zip',
+      mimetype: 'application/zip',
+      size: archive.length,
+      buffer: archive,
+    });
+
+    await expect(readFile(join(project.workspacePath, 'README.md'), 'utf8')).resolves.toBe('hello');
+    await expect(readFile(join(project.workspacePath, 'src', 'app.ts'), 'utf8')).resolves.toBe(
+      'console.log("demo");',
+    );
+    await expect(access(join(project.workspacePath, 'local-project'))).rejects.toThrow();
+    expect(project.sourceType).toBe(ProjectSourceType.Archive);
+    expect(project.gitUrl).toBeNull();
+    expect(projects.save).toHaveBeenCalledWith(project);
+    expect(audit.record).toHaveBeenCalledWith({
+      actor: owner,
+      action: 'project.archive_imported',
+      resourceType: 'project',
+      resourceId: project.id,
+      metadata: {
+        filename: 'local-project.zip',
+        size: archive.length,
+        files: 2,
+      },
+    });
+    expect(result).toBe(project);
+  });
+
+  it('rejects archive import into a non-empty workspace', async () => {
+    const project = projectFixture(paths.getProjectRoot('project-1'));
+    projects.findOne.mockResolvedValue(project);
+    await mkdir(project.workspacePath, { recursive: true });
+    await writeFile(join(project.workspacePath, 'existing.txt'), 'content');
+    const archive = createStoredZip({ 'src/app.ts': 'content' });
+
+    await expect(
+      service.importArchive(owner, project.id, {
+        originalname: 'project.zip',
+        mimetype: 'application/zip',
+        size: archive.length,
+        buffer: archive,
+      }),
+    ).rejects.toThrow('Workspace is not empty.');
+  });
+
+  it('rejects archive paths that escape the workspace', async () => {
+    const project = projectFixture(paths.getProjectRoot('project-1'));
+    projects.findOne.mockResolvedValue(project);
+    await mkdir(project.workspacePath, { recursive: true });
+    const archive = createStoredZip({ '../escape.txt': 'escape' });
+
+    await expect(
+      service.importArchive(owner, project.id, {
+        originalname: 'unsafe.zip',
+        mimetype: 'application/zip',
+        size: archive.length,
+        buffer: archive,
+      }),
+    ).rejects.toThrow('Archive contains parent directory traversal.');
+    await expect(access(join(project.workspacePath, 'escape.txt'))).rejects.toThrow();
+  });
+
+  it('skips blocked archive directories while importing safe files', async () => {
+    const project = projectFixture(paths.getProjectRoot('project-1'));
+    projects.findOne.mockResolvedValue(project);
+    await mkdir(project.workspacePath, { recursive: true });
+    const archive = createStoredZip({
+      'local-project/.git/config': 'secret',
+      'local-project/node_modules/pkg/index.js': 'generated',
+      'local-project/src/app.ts': 'safe',
+    });
+
+    await service.importArchive(owner, project.id, {
+      originalname: 'local-project.zip',
+      mimetype: 'application/zip',
+      size: archive.length,
+      buffer: archive,
+    });
+
+    await expect(readFile(join(project.workspacePath, 'src', 'app.ts'), 'utf8')).resolves.toBe('safe');
+    await expect(access(join(project.workspacePath, '.git', 'config'))).rejects.toThrow();
+    await expect(access(join(project.workspacePath, 'node_modules', 'pkg', 'index.js'))).rejects.toThrow();
+  });
+
   it('rejects push when no remote is configured', async () => {
     const project = projectFixture(paths.getProjectRoot('project-1'));
     projects.findOne.mockResolvedValue(project);
@@ -664,4 +758,62 @@ function projectFixture(workspacePath: string): Project {
     createdAt,
     updatedAt: createdAt,
   } as Project;
+}
+
+function createStoredZip(files: Record<string, string>): Buffer {
+  const localParts: Buffer[] = [];
+  const centralParts: Buffer[] = [];
+  let localOffset = 0;
+
+  Object.entries(files).forEach(([filename, content]) => {
+    const filenameBuffer = Buffer.from(filename, 'utf8');
+    const contentBuffer = Buffer.from(content, 'utf8');
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(0x04034b50, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt16LE(0, 6);
+    localHeader.writeUInt16LE(0, 8);
+    localHeader.writeUInt32LE(0, 10);
+    localHeader.writeUInt32LE(0, 14);
+    localHeader.writeUInt32LE(contentBuffer.length, 18);
+    localHeader.writeUInt32LE(contentBuffer.length, 22);
+    localHeader.writeUInt16LE(filenameBuffer.length, 26);
+    localHeader.writeUInt16LE(0, 28);
+    localParts.push(localHeader, filenameBuffer, contentBuffer);
+
+    const centralHeader = Buffer.alloc(46);
+    centralHeader.writeUInt32LE(0x02014b50, 0);
+    centralHeader.writeUInt16LE(20, 4);
+    centralHeader.writeUInt16LE(20, 6);
+    centralHeader.writeUInt16LE(0, 8);
+    centralHeader.writeUInt16LE(0, 10);
+    centralHeader.writeUInt32LE(0, 12);
+    centralHeader.writeUInt32LE(0, 16);
+    centralHeader.writeUInt32LE(contentBuffer.length, 20);
+    centralHeader.writeUInt32LE(contentBuffer.length, 24);
+    centralHeader.writeUInt16LE(filenameBuffer.length, 28);
+    centralHeader.writeUInt16LE(0, 30);
+    centralHeader.writeUInt16LE(0, 32);
+    centralHeader.writeUInt16LE(0, 34);
+    centralHeader.writeUInt16LE(0, 36);
+    centralHeader.writeUInt32LE(0, 38);
+    centralHeader.writeUInt32LE(localOffset, 42);
+    centralParts.push(centralHeader, filenameBuffer);
+
+    localOffset += localHeader.length + filenameBuffer.length + contentBuffer.length;
+  });
+
+  const centralDirectoryOffset = localOffset;
+  const centralDirectory = Buffer.concat(centralParts);
+  const endOfCentralDirectory = Buffer.alloc(22);
+  endOfCentralDirectory.writeUInt32LE(0x06054b50, 0);
+  endOfCentralDirectory.writeUInt16LE(0, 4);
+  endOfCentralDirectory.writeUInt16LE(0, 6);
+  endOfCentralDirectory.writeUInt16LE(Object.keys(files).length, 8);
+  endOfCentralDirectory.writeUInt16LE(Object.keys(files).length, 10);
+  endOfCentralDirectory.writeUInt32LE(centralDirectory.length, 12);
+  endOfCentralDirectory.writeUInt32LE(centralDirectoryOffset, 16);
+  endOfCentralDirectory.writeUInt16LE(0, 20);
+
+  return Buffer.concat([...localParts, centralDirectory, endOfCentralDirectory]);
 }

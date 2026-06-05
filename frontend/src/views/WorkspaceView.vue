@@ -58,15 +58,19 @@ import { useWorkspaceStore } from '../stores/workspace';
 
 type ComposerMode = 'build' | 'plan';
 type SidebarSide = 'left' | 'right';
+type WorkspaceResizeTarget = 'sessions' | 'file-tree';
 type FilePaneMode = 'preview' | 'editor';
 type EventFilter = 'all' | 'model' | 'tools' | 'commands' | 'messages';
+type ImportMode = 'git' | 'archive';
 
-const mainWorkspaceMinWidth = 420;
+const mainWorkspaceMinWidth = 360;
 const sidebarResizeStep = 16;
 const sidebarWidthLimits = {
-  left: { min: 220, max: 420, defaultValue: 280 },
-  right: { min: 320, max: 820, defaultValue: 420 },
+  left: { min: 240, max: 560, defaultValue: 320 },
+  right: { min: 360, max: 1200, defaultValue: 560 },
 };
+const sessionPaneWidthLimits = { min: 160, max: 420, defaultValue: 240 };
+const fileTreeHeightLimits = { min: 150, defaultValue: 300 };
 
 const auth = useAuthStore();
 const workspace = useWorkspaceStore();
@@ -75,6 +79,10 @@ const locale = useLocaleStore();
 
 const projectForm = reactive({ name: '', description: '' });
 const importForm = reactive({ gitUrl: '', branch: '' });
+const importMode = ref<ImportMode>('git');
+const projectImportOpen = ref(false);
+const archiveFile = ref<File | null>(null);
+const archiveFileInput = ref<HTMLInputElement | null>(null);
 const gitCommitMessage = ref('');
 const sessionTitle = ref('');
 const composer = ref('');
@@ -115,10 +123,15 @@ const copiedCommandRunId = ref('');
 const eventFilter = ref<EventFilter>('all');
 const liveLeftSidebarWidth = ref<number>(sidebarWidthLimits.left.defaultValue);
 const liveRightSidebarWidth = ref<number>(sidebarWidthLimits.right.defaultValue);
+const liveSessionPaneWidth = ref<number>(sessionPaneWidthLimits.defaultValue);
+const liveFileTreeHeight = ref<number>(fileTreeHeightLimits.defaultValue);
 const activeResizeSide = ref<SidebarSide | null>(null);
+const activeWorkspaceResizeTarget = ref<WorkspaceResizeTarget | null>(null);
 let compactViewportQuery: MediaQueryList | null = null;
 let filePreviewRequest = 0;
 let sidebarResizeState: { side: SidebarSide; startX: number; startWidth: number } | null = null;
+let sessionResizeState: { startX: number; startWidth: number } | null = null;
+let fileTreeResizeState: { startY: number; startHeight: number } | null = null;
 
 const canChat = computed(() => Boolean(workspace.currentSession));
 const fileTreeStats = computed(() => countTree(workspace.fileTree));
@@ -197,6 +210,12 @@ const workspaceGridStyle = computed<Record<string, string>>(() => ({
   '--left-sidebar-width': `${effectiveLeftSidebarWidth.value}px`,
   '--right-sidebar-width': `${effectiveRightSidebarWidth.value}px`,
 }));
+const workspaceContentStyle = computed<Record<string, string>>(() => ({
+  '--session-pane-width': `${liveSessionPaneWidth.value}px`,
+}));
+const fileWorkbenchStyle = computed<Record<string, string>>(() => ({
+  '--file-tree-pane-height': `${liveFileTreeHeight.value}px`,
+}));
 const leftSidebarToggleLabel = computed(() => {
   if (isCompactViewport.value) {
     return leftOverlayOpen.value ? locale.t('closeSidebar') : locale.t('openLeftSidebar');
@@ -227,19 +246,28 @@ const rightSidebarToggleIcon = computed(() =>
       ? PanelRightOpen
       : PanelRightClose,
 );
-const isImportingGit = computed(() => workspace.gitImportStatus === 'running');
+const isImportingProject = computed(() => workspace.gitImportStatus === 'running');
 const isLoadingGitStatus = computed(() => workspace.gitStatusLoading);
 const isPublishingGit = computed(() => workspace.gitPublishStatus === 'running');
 const gitStatus = computed(() => workspace.gitStatus);
 const pushableGitCommits = computed(() => gitStatus.value?.pushableCommits ?? 0);
-const gitImportFeedback = computed(() => {
-  if (workspace.gitImportStatus === 'running') return locale.t('gitImportRunning');
-  if (workspace.gitImportStatus === 'success') return locale.t('gitImportComplete');
-  if (workspace.gitImportStatus === 'error') return workspace.gitImportError || locale.t('gitImportFailed');
+const projectWorkspaceHasContent = computed(() => fileTreeStats.value.files + fileTreeStats.value.directories > 0);
+const archiveFileName = computed(() => archiveFile.value?.name ?? locale.t('noArchiveFileSelected'));
+const projectImportFeedback = computed(() => {
+  const isArchiveImport = importMode.value === 'archive';
+  if (workspace.gitImportStatus === 'running') {
+    return isArchiveImport ? locale.t('archiveImportRunning') : locale.t('gitImportRunning');
+  }
+  if (workspace.gitImportStatus === 'success') {
+    return isArchiveImport ? locale.t('archiveImportComplete') : locale.t('gitImportComplete');
+  }
+  if (workspace.gitImportStatus === 'error') {
+    return workspace.gitImportError || (isArchiveImport ? locale.t('archiveImportFailed') : locale.t('gitImportFailed'));
+  }
   return '';
 });
 const gitPublishFeedback = computed(() => workspace.gitPublishMessage);
-const gitImportFeedbackClass = computed(() => {
+const projectImportFeedbackClass = computed(() => {
   if (workspace.gitImportStatus === 'error') return 'text-red-600';
   if (workspace.gitImportStatus === 'success') return 'text-mebius-accent';
   return 'text-mebius-muted';
@@ -295,6 +323,24 @@ const canUnstageAllGit = computed(
 const agentActivityText = computed(() => {
   const activity = workspace.agentActivity;
   if (!activity) return '';
+  if (activity.message) return activity.message;
+  if (activity.status === 'failed') return locale.t('agentFailed');
+  if (activity.toolName === 'create_patch') {
+    const target = formatActivityTarget(activity.targetPaths);
+    if (activity.status === 'waiting_for_approval') {
+      return locale.t('agentWaitingPatchApproval', { target });
+    }
+    if (activity.activity === 'preparing_patch') {
+      return locale.t('agentPreparingPatch', { target });
+    }
+    if (activity.activity === 'patch_applied') {
+      return locale.t('agentPatchApplied', { target });
+    }
+    return locale.t('agentApplyingPatch', { target });
+  }
+  if (activity.toolName === 'run_command' && activity.command) {
+    return locale.t('agentRunningCommand', { command: truncate(activity.command, 64) });
+  }
   if (activity.status === 'thinking') return locale.t('agentThinking');
   if (activity.status === 'using_tools') {
     return activity.toolName
@@ -308,6 +354,19 @@ const agentActivityText = computed(() => {
   }
   return activity.message || locale.t('agentFailed');
 });
+const agentActivityIcon = computed(() => {
+  const activity = workspace.agentActivity;
+  if (!activity) return RefreshCw;
+  if (activity.status === 'failed') return AlertCircle;
+  if (activity.status === 'waiting_for_approval') return Clock3;
+  if (activity.toolName === 'create_patch') return FileText;
+  if (activity.toolName === 'run_command') return Terminal;
+  if (activity.status === 'using_tools') return Wrench;
+  return RefreshCw;
+});
+const agentActivitySpins = computed(
+  () => workspace.agentActivity?.status === 'thinking' || !workspace.agentActivity?.toolName,
+);
 const agentActivityToneClass = computed(() => {
   if (workspace.agentActivity?.status === 'failed') return 'border-red-200 bg-red-50 text-red-700';
   if (workspace.agentActivity?.status === 'waiting_for_approval') {
@@ -340,6 +399,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   cancelSidebarResize();
+  cancelSessionResize();
+  cancelFileTreeResize();
   window.removeEventListener('resize', handleWindowResize);
   window.removeEventListener('beforeunload', handleBeforeUnload);
   workspace.disconnectEvents();
@@ -421,6 +482,21 @@ watch(
     }
   },
 );
+
+watch(
+  () => workspace.eventLog[0]?.time,
+  () => {
+    const latestEvent = workspace.eventLog[0];
+    if (!latestEvent) return;
+    if (['tool_call_requested', 'tool_call_result', 'done'].includes(latestEvent.type)) {
+      void approvals.loadPending();
+    }
+  },
+);
+
+watch(importMode, () => {
+  workspace.resetGitImportStatus();
+});
 
 async function runTask(action: () => Promise<unknown>) {
   busy.value = true;
@@ -512,6 +588,138 @@ function cancelSidebarResize() {
   window.removeEventListener('pointermove', handleSidebarResizeMove);
   window.removeEventListener('pointerup', finishSidebarResize);
   window.removeEventListener('pointercancel', finishSidebarResize);
+}
+
+function startSessionResize(event: PointerEvent) {
+  if (isCompactViewport.value) return;
+
+  const target = event.currentTarget;
+  if (target instanceof HTMLElement) {
+    target.setPointerCapture(event.pointerId);
+  }
+
+  sessionResizeState = {
+    startX: event.clientX,
+    startWidth: liveSessionPaneWidth.value,
+  };
+  activeWorkspaceResizeTarget.value = 'sessions';
+  window.addEventListener('pointermove', handleSessionResizeMove);
+  window.addEventListener('pointerup', finishSessionResize);
+  window.addEventListener('pointercancel', finishSessionResize);
+  event.preventDefault();
+}
+
+function handleSessionResizeMove(event: PointerEvent) {
+  if (!sessionResizeState) return;
+  liveSessionPaneWidth.value = normalizeSessionPaneWidth(
+    sessionResizeState.startWidth + event.clientX - sessionResizeState.startX,
+  );
+}
+
+function finishSessionResize() {
+  cancelSessionResize();
+}
+
+function cancelSessionResize() {
+  sessionResizeState = null;
+  if (activeWorkspaceResizeTarget.value === 'sessions') {
+    activeWorkspaceResizeTarget.value = null;
+  }
+  window.removeEventListener('pointermove', handleSessionResizeMove);
+  window.removeEventListener('pointerup', finishSessionResize);
+  window.removeEventListener('pointercancel', finishSessionResize);
+}
+
+function handleSessionResizeKeydown(event: KeyboardEvent) {
+  let nextWidth = liveSessionPaneWidth.value;
+  if (event.key === 'ArrowRight') {
+    nextWidth += sidebarResizeStep;
+  } else if (event.key === 'ArrowLeft') {
+    nextWidth -= sidebarResizeStep;
+  } else if (event.key === 'Home') {
+    nextWidth = sessionPaneWidthLimits.min;
+  } else if (event.key === 'End') {
+    nextWidth = sessionPaneWidthLimits.max;
+  } else {
+    return;
+  }
+
+  event.preventDefault();
+  liveSessionPaneWidth.value = normalizeSessionPaneWidth(nextWidth);
+}
+
+function normalizeSessionPaneWidth(width: unknown): number {
+  if (typeof width !== 'number' || !Number.isFinite(width)) {
+    return sessionPaneWidthLimits.defaultValue;
+  }
+  return Math.min(sessionPaneWidthLimits.max, Math.max(sessionPaneWidthLimits.min, Math.round(width)));
+}
+
+function startFileTreeResize(event: PointerEvent) {
+  const target = event.currentTarget;
+  if (target instanceof HTMLElement) {
+    target.setPointerCapture(event.pointerId);
+  }
+
+  fileTreeResizeState = {
+    startY: event.clientY,
+    startHeight: liveFileTreeHeight.value,
+  };
+  activeWorkspaceResizeTarget.value = 'file-tree';
+  window.addEventListener('pointermove', handleFileTreeResizeMove);
+  window.addEventListener('pointerup', finishFileTreeResize);
+  window.addEventListener('pointercancel', finishFileTreeResize);
+  event.preventDefault();
+}
+
+function handleFileTreeResizeMove(event: PointerEvent) {
+  if (!fileTreeResizeState) return;
+  liveFileTreeHeight.value = normalizeFileTreeHeight(
+    fileTreeResizeState.startHeight + event.clientY - fileTreeResizeState.startY,
+  );
+}
+
+function finishFileTreeResize() {
+  cancelFileTreeResize();
+}
+
+function cancelFileTreeResize() {
+  fileTreeResizeState = null;
+  if (activeWorkspaceResizeTarget.value === 'file-tree') {
+    activeWorkspaceResizeTarget.value = null;
+  }
+  window.removeEventListener('pointermove', handleFileTreeResizeMove);
+  window.removeEventListener('pointerup', finishFileTreeResize);
+  window.removeEventListener('pointercancel', finishFileTreeResize);
+}
+
+function handleFileTreeResizeKeydown(event: KeyboardEvent) {
+  let nextHeight = liveFileTreeHeight.value;
+  if (event.key === 'ArrowDown') {
+    nextHeight += sidebarResizeStep;
+  } else if (event.key === 'ArrowUp') {
+    nextHeight -= sidebarResizeStep;
+  } else if (event.key === 'Home') {
+    nextHeight = fileTreeHeightLimits.min;
+  } else if (event.key === 'End') {
+    nextHeight = getFileTreeMaxHeight();
+  } else {
+    return;
+  }
+
+  event.preventDefault();
+  liveFileTreeHeight.value = normalizeFileTreeHeight(nextHeight);
+}
+
+function normalizeFileTreeHeight(height: unknown): number {
+  if (typeof height !== 'number' || !Number.isFinite(height)) {
+    return fileTreeHeightLimits.defaultValue;
+  }
+  return Math.min(getFileTreeMaxHeight(), Math.max(fileTreeHeightLimits.min, Math.round(height)));
+}
+
+function getFileTreeMaxHeight() {
+  return Math.max(fileTreeHeightLimits.min, window.innerHeight - 360);
 }
 
 function handleSidebarResizeKeydown(side: SidebarSide, event: KeyboardEvent) {
@@ -610,6 +818,7 @@ function closeSidebars() {
 
 function handleWindowResize() {
   viewportWidth.value = window.innerWidth;
+  liveFileTreeHeight.value = normalizeFileTreeHeight(liveFileTreeHeight.value);
 }
 
 function setupCompactViewportQuery() {
@@ -681,6 +890,23 @@ async function importGit() {
     });
     importForm.gitUrl = '';
     importForm.branch = '';
+  });
+}
+
+function selectArchiveFile(event: Event) {
+  const input = event.target as HTMLInputElement;
+  archiveFile.value = input.files?.[0] ?? null;
+  workspace.resetGitImportStatus();
+}
+
+async function importArchive() {
+  if (!archiveFile.value) return;
+  await runTask(async () => {
+    await workspace.importArchive(archiveFile.value as File);
+    archiveFile.value = null;
+    if (archiveFileInput.value) {
+      archiveFileInput.value.value = '';
+    }
   });
 }
 
@@ -1121,6 +1347,14 @@ function approvalContext(approval: Approval) {
   return approval.toolCall.session?.project?.name ?? locale.t('workspace');
 }
 
+function isPatchApproval(approval: Approval) {
+  return approval.toolCall.name === 'create_patch';
+}
+
+function approvalApproveLabel(approval: Approval) {
+  return isPatchApproval(approval) ? locale.t('applyPatchApproval') : locale.t('approve');
+}
+
 function eventToneClass(type: string) {
   const normalized = type.toLowerCase();
   if (normalized.includes('model_call_completed')) return 'is-success';
@@ -1145,7 +1379,16 @@ function eventToneIcon(type: string) {
   return Info;
 }
 
-function eventTitle(type: string) {
+function eventTitle(type: string, data: SsePayload) {
+  const toolName = eventToolName(data);
+  if (type === 'agent_status') return locale.t('eventTitleAgentStatus');
+  if (type === 'tool_call_requested' && toolName === 'create_patch') {
+    return locale.t('eventTitlePatchApproval');
+  }
+  if (type === 'patch_created') return locale.t('eventTitlePatchWritten');
+  if (type === 'tool_call_result') return locale.t('eventTitleToolResult');
+  if (type === 'command_started') return locale.t('eventTitleCommandStarted');
+  if (type === 'command_output') return locale.t('eventTitleCommandOutput');
   return type
     .split('_')
     .filter(Boolean)
@@ -1153,7 +1396,28 @@ function eventTitle(type: string) {
     .join(' ');
 }
 
-function eventSummary(data: SsePayload) {
+function eventSummary(type: string, data: SsePayload) {
+  const toolName = eventToolName(data);
+  const targetPaths = extractEventTargetPaths(data);
+  if (toolName === 'create_patch' || type === 'patch_created') {
+    const target = formatActivityTarget(targetPaths);
+    const activity = typeof data.activity === 'string' ? data.activity : '';
+    if (type === 'tool_call_requested' || data.status === 'waiting_for_approval') {
+      return locale.t('agentWaitingPatchApproval', { target });
+    }
+    if (type === 'patch_created' || activity === 'patch_applied') {
+      return locale.t('eventPatchCreatedSummary', { target });
+    }
+    if (activity === 'preparing_patch') {
+      return locale.t('agentPreparingPatch', { target });
+    }
+    if (activity === 'applying_patch') {
+      return locale.t('agentApplyingPatch', { target });
+    }
+  }
+  if ((type === 'command_started' || type === 'command_output') && typeof data.command === 'string') {
+    return locale.t('agentRunningCommand', { command: truncate(data.command, 64) });
+  }
   if (typeof data.modelName === 'string') {
     const duration = typeof data.durationMs === 'number' ? ` · ${data.durationMs} ms` : '';
     return `${data.modelName}${duration}`;
@@ -1166,6 +1430,42 @@ function eventSummary(data: SsePayload) {
     }
   }
   return locale.t('eventPayload');
+}
+
+function eventToolName(data: SsePayload) {
+  if (typeof data.toolName === 'string') return data.toolName;
+  if (typeof data.name === 'string') return data.name;
+  return undefined;
+}
+
+function extractEventTargetPaths(data: SsePayload): string[] {
+  if (Array.isArray(data.targetPaths)) {
+    return data.targetPaths.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+  }
+  if (typeof data.path === 'string' && data.path.trim()) {
+    return [data.path.trim()];
+  }
+  return extractPatchTargetPaths(data.arguments);
+}
+
+function extractPatchTargetPaths(args: unknown): string[] {
+  if (!args || typeof args !== 'object') return [];
+  const record = args as Record<string, unknown>;
+  const rawPaths = Array.isArray(record.files)
+    ? record.files.map((item) =>
+        item && typeof item === 'object' ? (item as Record<string, unknown>).path : undefined,
+      )
+    : [record.path];
+  return rawPaths
+    .filter((path): path is string => typeof path === 'string' && path.trim().length > 0)
+    .map((path) => path.trim().replaceAll('\\', '/'));
+}
+
+function formatActivityTarget(paths: string[] | undefined) {
+  if (!paths || paths.length === 0) return locale.t('agentPatchTargetFallback');
+  if (paths.length === 1) return paths[0];
+  if (paths.length === 2) return paths.join(', ');
+  return locale.t('agentPatchTargetCount', { count: paths.length });
 }
 
 function eventMatchesFilter(type: string, filter: EventFilter) {
@@ -1213,7 +1513,15 @@ function truncate(value: string, maxLength: number) {
 
 <template>
   <main class="h-screen overflow-hidden bg-mebius-bg text-mebius-ink">
-    <div class="workspace-shell" :class="{ 'is-resizing-sidebar': activeResizeSide }" :style="workspaceGridStyle">
+    <div
+      class="workspace-shell"
+      :class="{
+        'is-resizing-sidebar': activeResizeSide,
+        'is-resizing-session-pane': activeWorkspaceResizeTarget === 'sessions',
+        'is-resizing-file-pane': activeWorkspaceResizeTarget === 'file-tree',
+      }"
+      :style="workspaceGridStyle"
+    >
       <button
         v-if="isCompactViewport && hasOverlayOpen"
         class="fixed inset-0 z-20 bg-slate-950/20 lg:hidden"
@@ -1262,7 +1570,8 @@ function truncate(value: string, maxLength: number) {
           </n-alert>
         </header>
 
-        <section class="border-b border-mebius-border p-3">
+        <div class="left-sidebar-body scrollbar-thin">
+        <section class="left-sidebar-card left-sidebar-card--fixed border-b border-mebius-border p-3">
           <div class="mb-2 flex items-center gap-2 text-sm font-medium">
             <n-icon><Folder /></n-icon>
             {{ locale.t('projects') }}
@@ -1281,7 +1590,7 @@ function truncate(value: string, maxLength: number) {
           </div>
         </section>
 
-        <section class="min-h-0 flex-1 overflow-y-auto p-3 scrollbar-thin">
+        <section class="left-sidebar-card left-sidebar-card--projects p-3">
           <n-list hoverable clickable>
             <n-list-item
               v-for="project in workspace.projects"
@@ -1311,40 +1620,103 @@ function truncate(value: string, maxLength: number) {
           </n-list>
         </section>
 
-        <section class="border-t border-mebius-border p-3">
-          <div class="mb-2 flex items-center gap-2 text-sm font-medium">
-            <n-icon><GitBranch /></n-icon>
-            {{ locale.t('gitImport') }}
-          </div>
-          <n-input
-            v-model:value="importForm.gitUrl"
-            class="mb-2"
-            size="small"
-            :disabled="isImportingGit"
-            :placeholder="locale.t('repositoryUrl')"
-          />
-          <n-input
-            v-model:value="importForm.branch"
-            class="mb-2"
-            size="small"
-            :disabled="isImportingGit"
-            :placeholder="locale.t('branch')"
-          />
-          <n-button
-            size="small"
-            block
-            :loading="isImportingGit"
-            :disabled="!workspace.currentProject || !importForm.gitUrl || isImportingGit"
-            @click="importGit"
+        <section class="left-sidebar-card border-t border-mebius-border">
+          <button
+            type="button"
+            class="left-sidebar-disclosure"
+            :aria-expanded="projectImportOpen"
+            @click="projectImportOpen = !projectImportOpen"
           >
-            {{ locale.t('importIntoCurrentProject') }}
-          </n-button>
-          <p v-if="gitImportFeedback" class="m-0 mt-2 text-xs leading-5" :class="gitImportFeedbackClass">
-            {{ gitImportFeedback }}
-          </p>
+            <span class="left-sidebar-disclosure__title">
+              <n-icon><FolderTree /></n-icon>
+              {{ locale.t('projectImport') }}
+            </span>
+            <n-icon class="left-sidebar-disclosure__chevron">
+              <ChevronDown v-if="projectImportOpen" />
+              <ChevronRight v-else />
+            </n-icon>
+          </button>
+          <div v-if="projectImportOpen" class="p-3 pt-0">
+            <n-radio-group v-model:value="importMode" class="mb-2 w-full" size="small" :disabled="isImportingProject">
+              <n-radio-button value="git">{{ locale.t('gitRepository') }}</n-radio-button>
+              <n-radio-button value="archive">{{ locale.t('localArchive') }}</n-radio-button>
+            </n-radio-group>
+            <p class="m-0 mb-2 text-xs leading-5 text-mebius-muted">{{ locale.t('projectImportScopeHint') }}</p>
+            <p
+              v-if="projectWorkspaceHasContent"
+              class="m-0 mb-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs leading-5 text-amber-700"
+            >
+              {{ locale.t('projectImportRequiresEmptyWorkspace') }}
+            </p>
+
+            <template v-if="importMode === 'git'">
+              <n-input
+                v-model:value="importForm.gitUrl"
+                class="mb-2"
+                size="small"
+                :disabled="isImportingProject"
+                :placeholder="locale.t('repositoryUrl')"
+              />
+              <n-input
+                v-model:value="importForm.branch"
+                class="mb-2"
+                size="small"
+                :disabled="isImportingProject"
+                :placeholder="locale.t('branch')"
+              />
+              <n-button
+                size="small"
+                block
+                :loading="isImportingProject"
+                :disabled="
+                  !workspace.currentProject ||
+                  !importForm.gitUrl ||
+                  isImportingProject ||
+                  projectWorkspaceHasContent
+                "
+                @click="importGit"
+              >
+                {{ locale.t('importIntoCurrentProject') }}
+              </n-button>
+            </template>
+
+            <template v-else>
+              <label
+                class="mb-2 block cursor-pointer rounded-lg border border-dashed border-mebius-border bg-white/70 px-3 py-2 text-xs leading-5 transition hover:border-mebius-accent"
+                :class="{ 'cursor-not-allowed opacity-70': isImportingProject }"
+              >
+                <input
+                  ref="archiveFileInput"
+                  class="hidden"
+                  type="file"
+                  accept=".zip,application/zip,application/x-zip-compressed"
+                  :disabled="isImportingProject"
+                  @change="selectArchiveFile"
+                />
+                <span class="block text-mebius-muted">{{ locale.t('archiveFile') }}</span>
+                <span class="block truncate text-slate-800">{{ archiveFileName }}</span>
+              </label>
+              <p class="m-0 mb-2 text-xs leading-5 text-mebius-muted">{{ locale.t('archiveImportHint') }}</p>
+              <n-button
+                size="small"
+                block
+                :loading="isImportingProject"
+                :disabled="
+                  !workspace.currentProject || !archiveFile || isImportingProject || projectWorkspaceHasContent
+                "
+                @click="importArchive"
+              >
+                {{ locale.t('importArchiveIntoCurrentProject') }}
+              </n-button>
+            </template>
+
+            <p v-if="projectImportFeedback" class="m-0 mt-2 text-xs leading-5" :class="projectImportFeedbackClass">
+              {{ projectImportFeedback }}
+            </p>
+          </div>
         </section>
 
-        <section class="border-t border-mebius-border p-3">
+        <section class="left-sidebar-card border-t border-mebius-border p-3">
           <div class="mb-2 flex items-center justify-between gap-2">
             <div class="flex items-center gap-2 text-sm font-medium">
               <n-icon><GitBranch /></n-icon>
@@ -1478,6 +1850,7 @@ function truncate(value: string, maxLength: number) {
             {{ gitPublishFeedback }}
           </p>
         </section>
+        </div>
 
         <div
           v-if="!isCompactViewport && !leftSidebarCollapsed"
@@ -1543,8 +1916,8 @@ function truncate(value: string, maxLength: number) {
           </n-space>
         </header>
 
-        <div class="grid min-h-0 flex-1 grid-cols-[220px_1fr]">
-          <aside class="min-h-0 border-r border-mebius-border bg-white p-3">
+        <div class="workspace-content-grid" :style="workspaceContentStyle">
+          <aside class="session-pane min-h-0 border-r border-mebius-border bg-white p-3">
             <div class="mb-3 flex items-center justify-between">
               <span class="text-sm font-medium">{{ locale.t('sessions') }}</span>
               <n-button circle quaternary size="small" :title="locale.t('newSession')" @click="createSession">
@@ -1552,7 +1925,7 @@ function truncate(value: string, maxLength: number) {
               </n-button>
             </div>
             <n-input v-model:value="sessionTitle" class="mb-2" size="small" :placeholder="locale.t('sessionTitle')" />
-            <div class="h-[calc(100%-72px)] overflow-y-auto scrollbar-thin">
+            <div class="session-list scrollbar-thin">
               <n-list hoverable clickable>
                 <n-list-item
                   v-for="session in workspace.sessions"
@@ -1586,6 +1959,20 @@ function truncate(value: string, maxLength: number) {
               </n-list>
             </div>
           </aside>
+          <div
+            v-if="!isCompactViewport"
+            class="workspace-content-resize-handle"
+            :class="{ 'is-active': activeWorkspaceResizeTarget === 'sessions' }"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize sessions"
+            :aria-valuemin="sessionPaneWidthLimits.min"
+            :aria-valuemax="sessionPaneWidthLimits.max"
+            :aria-valuenow="liveSessionPaneWidth"
+            tabindex="0"
+            @pointerdown="startSessionResize"
+            @keydown="handleSessionResizeKeydown"
+          />
 
           <div class="flex min-h-0 flex-col">
             <div class="min-h-0 flex-1 overflow-y-auto p-4 scrollbar-thin">
@@ -1608,8 +1995,8 @@ function truncate(value: string, maxLength: number) {
                 class="mb-3 flex items-center gap-2 rounded border p-3 text-sm"
                 :class="agentActivityToneClass"
               >
-                <n-icon v-if="workspace.agentActivity?.status !== 'failed'" class="shrink-0 animate-spin">
-                  <RefreshCw />
+                <n-icon class="shrink-0" :class="{ 'animate-spin': agentActivitySpins }">
+                  <component :is="agentActivityIcon" />
                 </n-icon>
                 <span>{{ agentActivityText }}</span>
               </div>
@@ -1692,9 +2079,9 @@ function truncate(value: string, maxLength: number) {
         >
           <template #icon><n-icon><X /></n-icon></template>
         </n-button>
-        <n-tabs type="line" animated class="workbench-tabs min-h-0 flex-1" pane-class="h-full min-h-0">
+        <n-tabs type="line" class="workbench-tabs min-h-0 flex-1" pane-class="workbench-tabs__pane">
           <n-tab-pane name="files" :tab="locale.t('files')">
-            <div class="workbench-pane workbench-pane--files">
+            <div class="workbench-pane workbench-pane--files" :style="fileWorkbenchStyle">
               <section class="workbench-section workbench-section--tree">
                 <header class="workbench-section__header">
                   <div class="min-w-0">
@@ -1704,6 +2091,13 @@ function truncate(value: string, maxLength: number) {
                     </div>
                     <p class="workbench-section__subtitle">
                       {{ locale.t('fileTreeSummary', { files: fileTreeStats.files, directories: fileTreeStats.directories }) }}
+                    </p>
+                    <p class="workbench-section__subtitle">
+                      {{
+                        locale.t('fileTreeProjectScopeHint', {
+                          project: workspace.currentProject?.name ?? locale.t('workspace'),
+                        })
+                      }}
                     </p>
                   </div>
                   <div class="flex shrink-0 items-center gap-2">
@@ -1744,6 +2138,19 @@ function truncate(value: string, maxLength: number) {
                   />
                 </div>
               </section>
+              <div
+                class="file-pane-resize-handle"
+                :class="{ 'is-active': activeWorkspaceResizeTarget === 'file-tree' }"
+                role="separator"
+                aria-orientation="horizontal"
+                aria-label="Resize file tree"
+                :aria-valuemin="fileTreeHeightLimits.min"
+                :aria-valuemax="getFileTreeMaxHeight()"
+                :aria-valuenow="liveFileTreeHeight"
+                tabindex="0"
+                @pointerdown="startFileTreeResize"
+                @keydown="handleFileTreeResizeKeydown"
+              />
 
               <section class="workbench-section workbench-section--preview">
                 <div v-if="workspace.currentFile || filePreviewLoading || filePreviewError" class="file-workbench">
@@ -1893,7 +2300,19 @@ function truncate(value: string, maxLength: number) {
                           {{ approvalPreviewTitle(approval) }} · {{ approvalContext(approval) }} · {{ formatEventTime(approval.createdAt) }}
                         </div>
                       </div>
-                      <span class="approval-card__status">{{ approval.status }}</span>
+                      <div class="approval-card__header-actions">
+                        <span class="approval-card__status">{{ approval.status }}</span>
+                        <div class="approval-card__actions approval-card__actions--header">
+                          <n-button size="small" type="primary" @click="approvals.approve(approval.id)">
+                            <template #icon><n-icon><Check /></n-icon></template>
+                            {{ approvalApproveLabel(approval) }}
+                          </n-button>
+                          <n-button size="small" secondary @click="approvals.reject(approval.id)">
+                            <template #icon><n-icon><X /></n-icon></template>
+                            {{ locale.t('reject') }}
+                          </n-button>
+                        </div>
+                      </div>
                     </header>
                     <div v-if="approval.preview?.kind === 'patch'" class="approval-card__preview">
                       <DiffPreview
@@ -1927,16 +2346,6 @@ function truncate(value: string, maxLength: number) {
                       </div>
                     </div>
                     <pre v-else class="approval-card__payload scrollbar-thin">{{ approvalArguments(approval) }}</pre>
-                    <div class="approval-card__actions">
-                      <n-button size="small" type="primary" @click="approvals.approve(approval.id)">
-                        <template #icon><n-icon><Check /></n-icon></template>
-                        {{ locale.t('approve') }}
-                      </n-button>
-                      <n-button size="small" secondary @click="approvals.reject(approval.id)">
-                        <template #icon><n-icon><X /></n-icon></template>
-                        {{ locale.t('reject') }}
-                      </n-button>
-                    </div>
                   </article>
 
                   <div class="review-block-title">{{ locale.t('patchHistory') }}</div>
@@ -1961,6 +2370,9 @@ function truncate(value: string, maxLength: number) {
                     </header>
                     <div class="approval-card__preview">
                       <DiffPreview :path="patch.relativePath" :diff-text="patch.diffText" />
+                      <p v-if="patch.status === 'proposed'" class="approval-card__hint">
+                        {{ locale.t('proposedPatchApprovalHint') }}
+                      </p>
                     </div>
                     <div v-if="patch.status === 'applied'" class="approval-card__actions">
                       <n-button size="small" secondary @click="revertPatch(patch.id)">
@@ -2134,10 +2546,10 @@ function truncate(value: string, maxLength: number) {
                     </div>
                     <div class="event-item__body">
                       <header class="event-item__header">
-                        <span class="event-item__type">{{ eventTitle(event.type) }}</span>
+                        <span class="event-item__type">{{ eventTitle(event.type, event.data) }}</span>
                         <time class="event-item__time">{{ formatEventTime(event.time) }}</time>
                       </header>
-                      <p class="event-item__summary">{{ eventSummary(event.data) }}</p>
+                      <p class="event-item__summary">{{ eventSummary(event.type, event.data) }}</p>
                       <pre class="event-item__payload scrollbar-thin">{{ stringifyPayload(event.data) }}</pre>
                     </div>
                   </article>
@@ -2273,19 +2685,150 @@ function truncate(value: string, maxLength: number) {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   height: 100%;
+  min-height: 0;
+  overflow: hidden;
   position: relative;
 }
 
 .workspace-side-panel {
+  min-height: 0;
   min-width: 0;
 }
 
 .workspace-main {
+  min-height: 0;
   min-width: 0;
+  overflow: hidden;
 }
 
 .workspace-side-panel--right {
   background: #f8fafc;
+}
+
+.left-sidebar-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.left-sidebar-card {
+  flex-shrink: 0;
+}
+
+.left-sidebar-card--projects {
+  max-height: 34vh;
+  min-height: 140px;
+  overflow-y: auto;
+}
+
+.left-sidebar-disclosure {
+  align-items: center;
+  background: #ffffff;
+  border: 0;
+  color: #0f172a;
+  cursor: pointer;
+  display: flex;
+  font-size: 14px;
+  font-weight: 600;
+  justify-content: space-between;
+  letter-spacing: 0;
+  min-height: 42px;
+  outline: none;
+  padding: 0.65rem 0.75rem;
+  text-align: left;
+  width: 100%;
+}
+
+.left-sidebar-disclosure:hover,
+.left-sidebar-disclosure:focus-visible {
+  background: #f8fafc;
+}
+
+.left-sidebar-disclosure__title {
+  align-items: center;
+  display: inline-flex;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.left-sidebar-disclosure__chevron {
+  color: #64748b;
+  flex-shrink: 0;
+}
+
+.workspace-content-grid {
+  display: grid;
+  flex: 1;
+  grid-template-columns: var(--session-pane-width) 10px minmax(0, 1fr);
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.session-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.session-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.workspace-content-resize-handle {
+  cursor: col-resize;
+  min-height: 0;
+  outline: none;
+  position: relative;
+  touch-action: none;
+  width: 10px;
+}
+
+.workspace-content-resize-handle::before,
+.workspace-content-resize-handle::after {
+  content: "";
+  left: 50%;
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  transition:
+    background-color 140ms ease,
+    box-shadow 140ms ease,
+    opacity 140ms ease;
+}
+
+.workspace-content-resize-handle::before {
+  background: #e2e8f0;
+  bottom: 0;
+  width: 1px;
+}
+
+.workspace-content-resize-handle::after {
+  background: #0f766e;
+  border-radius: 999px;
+  box-shadow: 0 0 0 3px rgb(15 118 110 / 12%);
+  height: 40px;
+  opacity: 0;
+  top: 50%;
+  width: 3px;
+}
+
+.workspace-content-resize-handle:hover::before,
+.workspace-content-resize-handle:focus-visible::before,
+.workspace-content-resize-handle.is-active::before {
+  background: #99f6e4;
+}
+
+.workspace-content-resize-handle:hover::after,
+.workspace-content-resize-handle:focus-visible::after,
+.workspace-content-resize-handle.is-active::after {
+  opacity: 1;
 }
 
 .sidebar-resize-handle {
@@ -2352,11 +2895,16 @@ function truncate(value: string, maxLength: number) {
 
 .workbench-tabs {
   background: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
 }
 
 .workbench-tabs :deep(.n-tabs-nav) {
   background: #ffffff;
   border-bottom: 1px solid #d9dee7;
+  flex-shrink: 0;
   padding: 0 0.75rem;
 }
 
@@ -2364,22 +2912,91 @@ function truncate(value: string, maxLength: number) {
   letter-spacing: 0;
 }
 
-.workbench-tabs :deep(.n-tabs-pane-wrapper),
-.workbench-tabs :deep(.n-tab-pane) {
+.workbench-tabs :deep(.n-tabs-pane-wrapper) {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
   min-height: 0;
+  overflow: hidden;
+}
+
+.workbench-tabs :deep(.n-tab-pane),
+.workbench-tabs :deep(.workbench-tabs__pane) {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  height: auto;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .workbench-pane {
-  height: calc(100vh - 48px);
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  height: 100%;
   min-height: 0;
   overflow: hidden;
   padding: 0.75rem;
 }
 
+.workbench-pane > .workbench-section {
+  flex: 1 1 0;
+  min-height: 0;
+}
+
 .workbench-pane--files {
   display: grid;
-  gap: 0.75rem;
-  grid-template-rows: minmax(190px, 30vh) minmax(0, 1fr);
+  gap: 0;
+  grid-template-rows: minmax(150px, var(--file-tree-pane-height)) 12px minmax(160px, 1fr);
+}
+
+.file-pane-resize-handle {
+  cursor: row-resize;
+  min-height: 12px;
+  outline: none;
+  position: relative;
+  touch-action: none;
+}
+
+.file-pane-resize-handle::before,
+.file-pane-resize-handle::after {
+  content: "";
+  left: 50%;
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  transition:
+    background-color 140ms ease,
+    box-shadow 140ms ease,
+    opacity 140ms ease;
+}
+
+.file-pane-resize-handle::before {
+  background: #dbe3ee;
+  height: 1px;
+  width: 100%;
+}
+
+.file-pane-resize-handle::after {
+  background: #0f766e;
+  border-radius: 999px;
+  box-shadow: 0 0 0 3px rgb(15 118 110 / 12%);
+  height: 3px;
+  opacity: 0;
+  width: 44px;
+}
+
+.file-pane-resize-handle:hover::before,
+.file-pane-resize-handle:focus-visible::before,
+.file-pane-resize-handle.is-active::before {
+  background: #99f6e4;
+}
+
+.file-pane-resize-handle:hover::after,
+.file-pane-resize-handle:focus-visible::after,
+.file-pane-resize-handle.is-active::after {
+  opacity: 1;
 }
 
 .workbench-pane--events {
@@ -2427,6 +3044,7 @@ function truncate(value: string, maxLength: number) {
   align-items: center;
   border-bottom: 1px solid #e3e8ef;
   display: flex;
+  flex-shrink: 0;
   gap: 0.75rem;
   justify-content: space-between;
   min-height: 58px;
@@ -2458,7 +3076,7 @@ function truncate(value: string, maxLength: number) {
 .workbench-tree-shell,
 .workbench-list,
 .event-timeline {
-  flex: 1;
+  flex: 1 1 0;
   min-height: 0;
   overflow: auto;
 }
@@ -2475,6 +3093,7 @@ function truncate(value: string, maxLength: number) {
 }
 
 .review-section {
+  flex: 1 1 0;
   min-height: 0;
 }
 
@@ -2482,6 +3101,14 @@ function truncate(value: string, maxLength: number) {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+  overflow-x: hidden;
+  overflow-y: scroll;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.review-list > * {
+  flex-shrink: 0;
 }
 
 .review-card {
@@ -2604,9 +3231,23 @@ function truncate(value: string, maxLength: number) {
 .approval-card__header {
   align-items: flex-start;
   display: flex;
+  flex-wrap: wrap;
   gap: 0.65rem;
   justify-content: space-between;
   padding: 0.75rem 0.75rem 0.5rem;
+}
+
+.approval-card__header > .min-w-0 {
+  flex: 1 1 180px;
+}
+
+.approval-card__header-actions {
+  align-items: flex-end;
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
 }
 
 .approval-card__title {
@@ -2845,6 +3486,11 @@ function truncate(value: string, maxLength: number) {
   padding: 0.65rem 0.75rem 0.75rem;
 }
 
+.approval-card__actions--header {
+  justify-content: flex-end;
+  padding: 0;
+}
+
 .event-status {
   align-items: center;
   border: 1px solid #cbd5e1;
@@ -3076,6 +3722,18 @@ function truncate(value: string, maxLength: number) {
     user-select: none;
   }
 
+  .workspace-shell.is-resizing-session-pane,
+  .workspace-shell.is-resizing-session-pane * {
+    cursor: col-resize !important;
+    user-select: none;
+  }
+
+  .workspace-shell.is-resizing-file-pane,
+  .workspace-shell.is-resizing-file-pane * {
+    cursor: row-resize !important;
+    user-select: none;
+  }
+
   .workspace-side-panel.is-collapsed {
     opacity: 0;
     pointer-events: none;
@@ -3083,6 +3741,14 @@ function truncate(value: string, maxLength: number) {
 }
 
 @media (max-width: 1023px) {
+  .workspace-content-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .session-pane {
+    display: none;
+  }
+
   .workspace-side-panel {
     bottom: 0;
     max-width: 90vw;

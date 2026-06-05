@@ -5,12 +5,25 @@ import { Dirent } from 'fs';
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'fs/promises';
 import { basename, dirname, join, relative, resolve } from 'path';
 import { Repository } from 'typeorm';
+import { inflateRawSync } from 'zlib';
 import { PathSandboxService } from '../../common/security/path-sandbox.service';
 import { AuditService } from '../audit/audit.service';
 import { User } from '../users/user.entity';
 import { CreateProjectDto } from './dto/create-project.dto';
 import { ImportGitDto } from './dto/import-git.dto';
 import { Project, ProjectSourceType } from './project.entity';
+
+export const PROJECT_ARCHIVE_MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+
+const PROJECT_ARCHIVE_MAX_EXTRACTED_BYTES = 100 * 1024 * 1024;
+const PROJECT_ARCHIVE_MAX_FILES = 5000;
+const ZIP_EOCD_SIGNATURE = 0x06054b50;
+const ZIP_CENTRAL_DIRECTORY_SIGNATURE = 0x02014b50;
+const ZIP_LOCAL_FILE_SIGNATURE = 0x04034b50;
+const ZIP_MAX_EOCD_SEARCH_BYTES = 65_557;
+const ZIP_COMPRESSION_STORE = 0;
+const ZIP_COMPRESSION_DEFLATE = 8;
+const ARCHIVE_BLOCKED_SEGMENTS = new Set(['.git', '.env', 'node_modules', 'dist', 'coverage']);
 
 export interface TreeNode {
   name: string;
@@ -68,6 +81,26 @@ export interface ProjectFileView {
   path: string;
   content: string;
   size: number;
+}
+
+export interface ArchiveUploadFile {
+  originalname?: string;
+  mimetype?: string;
+  size?: number;
+  buffer?: Buffer;
+}
+
+interface ZipEntry {
+  path: string;
+  compressionMethod: number;
+  compressedSize: number;
+  uncompressedSize: number;
+  localHeaderOffset: number;
+}
+
+interface ExtractedArchiveFile {
+  path: string;
+  content: Buffer;
 }
 
 @Injectable()
@@ -136,6 +169,43 @@ export class ProjectsService {
       resourceType: 'project',
       resourceId: project.id,
       metadata: { gitUrl: dto.gitUrl, branch: dto.branch },
+    });
+    return saved;
+  }
+
+  async importArchive(owner: User, projectId: string, file: ArchiveUploadFile): Promise<Project> {
+    const project = await this.findOwned(owner.id, projectId);
+    const workspacePath = await this.ensureCurrentWorkspacePath(project);
+    const existingFiles = await readdir(workspacePath);
+    if (existingFiles.length > 0) {
+      throw new BadRequestException('Workspace is not empty.');
+    }
+
+    this.assertSupportedArchiveFile(file);
+    const extractedFiles = this.extractZipArchive(file.buffer as Buffer);
+    if (extractedFiles.length === 0) {
+      throw new BadRequestException('Archive contains no importable files.');
+    }
+
+    for (const entry of extractedFiles) {
+      const absolutePath = this.paths.resolveProjectPath(workspacePath, entry.path);
+      await mkdir(dirname(absolutePath), { recursive: true });
+      await writeFile(absolutePath, entry.content);
+    }
+
+    project.sourceType = ProjectSourceType.Archive;
+    project.gitUrl = null;
+    const saved = await this.projects.save(project);
+    await this.audit.record({
+      actor: owner,
+      action: 'project.archive_imported',
+      resourceType: 'project',
+      resourceId: project.id,
+      metadata: {
+        filename: file.originalname,
+        size: file.size,
+        files: extractedFiles.length,
+      },
     });
     return saved;
   }
@@ -561,6 +631,216 @@ export class ProjectsService {
         }
       });
     });
+  }
+
+  private assertSupportedArchiveFile(file: ArchiveUploadFile): asserts file is ArchiveUploadFile & { buffer: Buffer } {
+    if (!file?.buffer || file.buffer.length === 0) {
+      throw new BadRequestException('Archive file is required.');
+    }
+
+    const size = file.size ?? file.buffer.length;
+    if (size > PROJECT_ARCHIVE_MAX_UPLOAD_BYTES || file.buffer.length > PROJECT_ARCHIVE_MAX_UPLOAD_BYTES) {
+      throw new BadRequestException('Archive file is too large.');
+    }
+
+    const filename = file.originalname?.toLowerCase() ?? '';
+    const mimetype = file.mimetype?.toLowerCase() ?? '';
+    const hasZipName = filename.endsWith('.zip');
+    const hasZipType =
+      mimetype === 'application/zip' ||
+      mimetype === 'application/x-zip-compressed' ||
+      mimetype === 'application/octet-stream';
+
+    if (!hasZipName && !hasZipType) {
+      throw new BadRequestException('Only .zip archives are supported.');
+    }
+  }
+
+  private extractZipArchive(buffer: Buffer): ExtractedArchiveFile[] {
+    const entries = this.readZipEntries(buffer);
+    const stripRoot = this.findSingleArchiveRoot(entries.map((entry) => entry.path));
+    const extractedFiles: ExtractedArchiveFile[] = [];
+    const seenPaths = new Set<string>();
+    let totalExtractedBytes = 0;
+
+    for (const entry of entries) {
+      const archivePath = stripRoot ? entry.path.slice(stripRoot.length + 1) : entry.path;
+      if (!archivePath || this.hasBlockedArchiveSegment(archivePath)) {
+        continue;
+      }
+
+      const pathKey = archivePath.toLowerCase();
+      if (seenPaths.has(pathKey)) {
+        throw new BadRequestException(`Archive contains duplicate file path: ${archivePath}`);
+      }
+      seenPaths.add(pathKey);
+
+      totalExtractedBytes += entry.uncompressedSize;
+      if (totalExtractedBytes > PROJECT_ARCHIVE_MAX_EXTRACTED_BYTES) {
+        throw new BadRequestException('Archive expands to too much data.');
+      }
+
+      extractedFiles.push({
+        path: archivePath,
+        content: this.readZipEntryContent(buffer, entry),
+      });
+    }
+
+    return extractedFiles;
+  }
+
+  private readZipEntries(buffer: Buffer): ZipEntry[] {
+    const endOfCentralDirectoryOffset = this.findEndOfCentralDirectory(buffer);
+    const totalEntries = buffer.readUInt16LE(endOfCentralDirectoryOffset + 10);
+    const centralDirectorySize = buffer.readUInt32LE(endOfCentralDirectoryOffset + 12);
+    const centralDirectoryOffset = buffer.readUInt32LE(endOfCentralDirectoryOffset + 16);
+
+    if (
+      totalEntries === 0xffff ||
+      centralDirectorySize === 0xffffffff ||
+      centralDirectoryOffset === 0xffffffff
+    ) {
+      throw new BadRequestException('Zip64 archives are not supported.');
+    }
+    if (totalEntries > PROJECT_ARCHIVE_MAX_FILES) {
+      throw new BadRequestException('Archive contains too many files.');
+    }
+    if (centralDirectoryOffset + centralDirectorySize > buffer.length) {
+      throw new BadRequestException('Archive central directory is invalid.');
+    }
+
+    const entries: ZipEntry[] = [];
+    let offset = centralDirectoryOffset;
+    for (let index = 0; index < totalEntries; index += 1) {
+      if (offset + 46 > buffer.length || buffer.readUInt32LE(offset) !== ZIP_CENTRAL_DIRECTORY_SIGNATURE) {
+        throw new BadRequestException('Archive central directory is invalid.');
+      }
+
+      const flags = buffer.readUInt16LE(offset + 8);
+      const compressionMethod = buffer.readUInt16LE(offset + 10);
+      const compressedSize = buffer.readUInt32LE(offset + 20);
+      const uncompressedSize = buffer.readUInt32LE(offset + 24);
+      const filenameLength = buffer.readUInt16LE(offset + 28);
+      const extraLength = buffer.readUInt16LE(offset + 30);
+      const commentLength = buffer.readUInt16LE(offset + 32);
+      const localHeaderOffset = buffer.readUInt32LE(offset + 42);
+      const filenameStart = offset + 46;
+      const filenameEnd = filenameStart + filenameLength;
+
+      if (filenameEnd > buffer.length) {
+        throw new BadRequestException('Archive central directory is invalid.');
+      }
+      if ((flags & 0x01) === 0x01) {
+        throw new BadRequestException('Encrypted zip archives are not supported.');
+      }
+      if (compressionMethod !== ZIP_COMPRESSION_STORE && compressionMethod !== ZIP_COMPRESSION_DEFLATE) {
+        throw new BadRequestException('Archive contains unsupported compression method.');
+      }
+      if (
+        compressedSize === 0xffffffff ||
+        uncompressedSize === 0xffffffff ||
+        localHeaderOffset === 0xffffffff
+      ) {
+        throw new BadRequestException('Zip64 archives are not supported.');
+      }
+
+      const rawPath = buffer.subarray(filenameStart, filenameEnd).toString('utf8');
+      const normalizedPath = this.normalizeArchivePath(rawPath);
+      if (normalizedPath && !rawPath.replaceAll('\\', '/').endsWith('/')) {
+        entries.push({
+          path: normalizedPath,
+          compressionMethod,
+          compressedSize,
+          uncompressedSize,
+          localHeaderOffset,
+        });
+      }
+
+      offset = filenameEnd + extraLength + commentLength;
+    }
+
+    return entries;
+  }
+
+  private findEndOfCentralDirectory(buffer: Buffer): number {
+    const start = Math.max(0, buffer.length - ZIP_MAX_EOCD_SEARCH_BYTES);
+    for (let offset = buffer.length - 22; offset >= start; offset -= 1) {
+      if (buffer.readUInt32LE(offset) === ZIP_EOCD_SIGNATURE) {
+        return offset;
+      }
+    }
+    throw new BadRequestException('Invalid zip archive.');
+  }
+
+  private normalizeArchivePath(rawPath: string): string | null {
+    const value = rawPath.replaceAll('\\', '/').trim();
+    if (!value || value.includes('\0')) {
+      return null;
+    }
+    if (value.startsWith('/') || /^[A-Za-z]:\//.test(value)) {
+      throw new BadRequestException('Archive contains an unsafe absolute path.');
+    }
+
+    const segments = value.split('/').filter(Boolean);
+    if (segments.length === 0) {
+      return null;
+    }
+    if (segments.includes('..')) {
+      throw new BadRequestException('Archive contains parent directory traversal.');
+    }
+
+    return segments.join('/');
+  }
+
+  private findSingleArchiveRoot(paths: string[]): string | null {
+    if (paths.length === 0) {
+      return null;
+    }
+
+    const firstSegments = paths.map((path) => path.split('/')[0]);
+    const root = firstSegments[0];
+    const allShareRoot = firstSegments.every((segment) => segment === root);
+    const allNestedUnderRoot = paths.every((path) => path.includes('/'));
+    return allShareRoot && allNestedUnderRoot ? root : null;
+  }
+
+  private hasBlockedArchiveSegment(path: string): boolean {
+    return path.split('/').some((segment) => ARCHIVE_BLOCKED_SEGMENTS.has(segment));
+  }
+
+  private readZipEntryContent(buffer: Buffer, entry: ZipEntry): Buffer {
+    const offset = entry.localHeaderOffset;
+    if (offset + 30 > buffer.length || buffer.readUInt32LE(offset) !== ZIP_LOCAL_FILE_SIGNATURE) {
+      throw new BadRequestException('Archive local file header is invalid.');
+    }
+
+    const filenameLength = buffer.readUInt16LE(offset + 26);
+    const extraLength = buffer.readUInt16LE(offset + 28);
+    const dataStart = offset + 30 + filenameLength + extraLength;
+    const dataEnd = dataStart + entry.compressedSize;
+    if (dataStart > buffer.length || dataEnd > buffer.length) {
+      throw new BadRequestException('Archive file data is invalid.');
+    }
+
+    const compressedContent = buffer.subarray(dataStart, dataEnd);
+    const content =
+      entry.compressionMethod === ZIP_COMPRESSION_STORE
+        ? Buffer.from(compressedContent)
+        : this.inflateZipEntry(compressedContent);
+
+    if (content.length !== entry.uncompressedSize) {
+      throw new BadRequestException('Archive file size metadata is invalid.');
+    }
+
+    return content;
+  }
+
+  private inflateZipEntry(content: Buffer): Buffer {
+    try {
+      return inflateRawSync(content);
+    } catch {
+      throw new BadRequestException('Archive file data is invalid.');
+    }
   }
 
   private async assertGitRepository(projectRoot: string): Promise<void> {
