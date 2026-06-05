@@ -70,6 +70,10 @@ POST /api/sessions/:id/run
 GET  /api/approvals/pending
 POST /api/approvals/:id/approve
 POST /api/approvals/:id/reject
+GET  /api/command-policy
+PATCH /api/command-policy
+GET  /api/sessions/:id/command-runs
+POST /api/sessions/:id/command-runs
 
 GET  /api/audit-logs
 ```
@@ -102,4 +106,7 @@ not embedded in the command string.
 - File tools are restricted to the project workspace root.
 - `.git`, `.env`, `node_modules`, `dist`, and `coverage` are blocked by default.
 - `create_patch` and `run_command` require approval.
-- Commands must match `MEBIUS_CODE_COMMAND_ALLOWLIST`.
+- `MEBIUS_CODE_COMMAND_ALLOWLIST` remains the immutable environment baseline.
+- Administrators can enable Git, Node.js, and Python presets or add command prefixes through **Settings > Command permissions**.
+- Safe commands outside the active policy are rejected before approval for regular users. Administrators may run one once or enable the exact command for the current project.
+- Shell chaining, redirection, command substitution, and paths outside the project workspace remain blocked.

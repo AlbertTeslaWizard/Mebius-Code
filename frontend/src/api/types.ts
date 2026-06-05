@@ -204,6 +204,24 @@ export interface CommandRunView {
   };
 }
 
+export interface CommandPolicyPreset {
+  id: string;
+  label: string;
+  description: string;
+  commands: string[];
+  enabled: boolean;
+}
+
+export interface CommandPolicy {
+  canManage: boolean;
+  environmentCommands: string[];
+  enabledPresets: string[];
+  customCommands: string[];
+  effectiveCommands: string[];
+  presets: CommandPolicyPreset[];
+  updatedAt?: string;
+}
+
 export type ApprovalPreview =
   | {
       kind: 'patch';
@@ -225,6 +243,8 @@ export type ApprovalPreview =
       kind: 'command';
       command: string;
       cwd?: string;
+      policyAllowed: boolean;
+      policySource?: 'environment' | 'preset' | 'custom' | 'project';
       truncated: false;
     };
 

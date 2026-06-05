@@ -7,6 +7,7 @@ import { EventsModule } from '../events/events.module';
 import { SessionsModule } from '../sessions/sessions.module';
 import { UsersModule } from '../users/users.module';
 import { CommandRun } from './command-run.entity';
+import { CommandPolicyController } from './command-policy.controller';
 import { FilePatch } from './file-patch.entity';
 import { ToolApproval } from './tool-approval.entity';
 import { ToolCall } from './tool-call.entity';
@@ -23,7 +24,7 @@ import { ToolsService } from './tools.service';
     SessionsModule,
     UsersModule,
   ],
-  controllers: [ToolsController, ToolsReadController],
+  controllers: [ToolsController, ToolsReadController, CommandPolicyController],
   providers: [ToolsService],
   exports: [ToolsService],
 })

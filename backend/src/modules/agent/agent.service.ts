@@ -12,7 +12,7 @@ import { SessionsService } from '../sessions/sessions.service';
 import { User } from '../users/user.entity';
 import { ToolsService } from '../tools/tools.service';
 import { ToolCall } from '../tools/tool-call.entity';
-import { CODING_TOOL_SPECS } from '../tools/tool-specs';
+import { buildCodingToolSpecs } from '../tools/tool-specs';
 import { PendingToolMessage, PendingToolResumeContext } from './agent-resume.types';
 import { CreatePlanDto } from './dto/create-plan.dto';
 import { RunAgentDto } from './dto/run-agent.dto';
@@ -255,6 +255,9 @@ export class AgentService {
     assistant?: Message;
     toolCalls: unknown[];
   }> {
+    const projectId = this.getProjectId(session);
+    const commandCapabilities = await this.tools.listAllowedCommands(projectId);
+    const codingToolSpecs = buildCodingToolSpecs(commandCapabilities);
     for (let turn = 0; turn <= MAX_TOOL_TURNS; turn += 1) {
       this.events.publish(session.id, 'agent_status', {
         status: turn === 0 ? initialStatus : 'using_tools',
@@ -269,7 +272,7 @@ export class AgentService {
             {
               config,
               messages,
-              tools: CODING_TOOL_SPECS,
+              tools: codingToolSpecs,
             },
             ({ delta, content }) => {
               this.events.publish(session.id, 'token', { delta, content });
@@ -394,6 +397,11 @@ export class AgentService {
       return session.id;
     }
     throw new NotFoundException('Session not found for tool approval.');
+  }
+
+  private getProjectId(session: Message['session']): string | undefined {
+    const project = (session as Message['session'] & { project?: { id?: string } }).project;
+    return project?.id;
   }
 
   private requiresApproval(toolName: string): boolean {

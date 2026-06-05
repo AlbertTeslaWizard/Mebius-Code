@@ -1,7 +1,9 @@
-import { Controller, Get, Param, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Req, UseGuards } from '@nestjs/common';
 import { RequestWithUser } from '../../common/types/request-with-user';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { UsersService } from '../users/users.service';
+import { ApproveToolDto } from './dto/approve-tool.dto';
+import { RequestCommandDto } from './dto/request-command.dto';
 import { ToolsService } from './tools.service';
 
 @Controller('approvals')
@@ -18,9 +20,9 @@ export class ToolsController {
   }
 
   @Post(':id/approve')
-  async approve(@Req() request: RequestWithUser, @Param('id') id: string) {
+  async approve(@Req() request: RequestWithUser, @Param('id') id: string, @Body() dto: ApproveToolDto) {
     const owner = await this.users.findById(request.user.sub);
-    return this.tools.approve(owner, id);
+    return this.tools.approve(owner, id, dto.mode ?? 'once');
   }
 
   @Post(':id/reject')
@@ -46,6 +48,21 @@ export class ToolsReadController {
   @Get('sessions/:sessionId/command-runs')
   commandRuns(@Req() request: RequestWithUser, @Param('sessionId') sessionId: string) {
     return this.tools.listSessionCommandRuns(request.user.sub, sessionId);
+  }
+
+  @Get('sessions/:sessionId/allowed-commands')
+  allowedCommands(@Req() request: RequestWithUser, @Param('sessionId') sessionId: string) {
+    return this.tools.listSessionAllowedCommands(request.user.sub, sessionId);
+  }
+
+  @Post('sessions/:sessionId/command-runs')
+  async requestCommand(
+    @Req() request: RequestWithUser,
+    @Param('sessionId') sessionId: string,
+    @Body() dto: RequestCommandDto,
+  ) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.tools.requestManualCommand(owner, sessionId, dto);
   }
 
   @Post('patches/:id/revert')

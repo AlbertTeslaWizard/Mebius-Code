@@ -11,6 +11,7 @@ import {
   FilePatchStatus,
   ToolCallStatus,
 } from '../../common/enums/tool-status.enum';
+import { UserRole } from '../../common/enums/user-role.enum';
 import { CommandPolicyService } from '../../common/security/command-policy.service';
 import { PathSandboxService } from '../../common/security/path-sandbox.service';
 import { AuditService } from '../audit/audit.service';
@@ -49,6 +50,8 @@ type ApprovalPreview =
       kind: 'command';
       command: string;
       cwd?: string;
+      policyAllowed: boolean;
+      policySource?: 'environment' | 'preset' | 'custom' | 'project';
       truncated: false;
     };
 
@@ -91,6 +94,18 @@ export class ToolsService {
     resumeContext?: PendingToolResumeContext;
   }): Promise<ToolCall> {
     const session = await this.sessions.findOwned(input.owner.id, input.sessionId);
+    if (input.name === 'run_command') {
+      if (typeof input.args.command !== 'string') {
+        throw new BadRequestException('run_command requires command.');
+      }
+      const project = session.project as Project;
+      const inspection = await this.commandPolicy.inspect(input.args.command, project.id);
+      if (!inspection.allowed && input.owner.role !== UserRole.Admin) {
+        throw new BadRequestException(
+          'Command is not enabled for this project. Ask an administrator to enable a command preset.',
+        );
+      }
+    }
     const requiresApproval = APPROVAL_REQUIRED_TOOLS.has(input.name);
     const toolCall = await this.toolCalls.save(
       this.toolCalls.create({
@@ -196,14 +211,55 @@ export class ToolsService {
     return runs.map((run) => this.serializeCommandRun(run));
   }
 
-  async approve(owner: User, approvalId: string): Promise<ToolCall> {
+  async requestManualCommand(
+    owner: User,
+    sessionId: string,
+    input: { command: string; cwd?: string },
+  ): Promise<ToolCall> {
+    return this.requestOrExecute({
+      owner,
+      sessionId,
+      name: 'run_command',
+      args: {
+        command: input.command,
+        ...(input.cwd ? { cwd: input.cwd } : {}),
+        reason: 'Requested manually from the Runs panel.',
+      },
+    });
+  }
+
+  async listAllowedCommands(projectId?: string): Promise<string[]> {
+    return this.commandPolicy.listAllowedCommands(projectId);
+  }
+
+  async listSessionAllowedCommands(ownerId: string, sessionId: string): Promise<string[]> {
+    const session = await this.sessions.findOwned(ownerId, sessionId);
+    const project = session.project as Project;
+    return this.listAllowedCommands(project.id);
+  }
+
+  async approve(owner: User, approvalId: string, mode: 'once' | 'project' = 'once'): Promise<ToolCall> {
     const approval = await this.findPendingApproval(owner.id, approvalId);
+    const toolCall = approval.toolCall;
+    const resumeContext = this.decodeResumeContext(toolCall.resultText);
+    let projectCommandToRemember: { project: Project; command: string; normalized: string } | null = null;
+    if (toolCall.name === 'run_command') {
+      const project = toolCall.session.project as Project;
+      const command = toolCall.arguments.command;
+      if (typeof command !== 'string') {
+        throw new BadRequestException('run_command requires command.');
+      }
+      const inspection = await this.commandPolicy.inspect(command, project.id);
+      if (!inspection.allowed && owner.role !== UserRole.Admin) {
+        throw new BadRequestException('Only administrators can authorize a command outside the enabled policy.');
+      }
+      if (mode === 'project') {
+        projectCommandToRemember = { project, command, normalized: inspection.normalized };
+      }
+    }
     approval.status = ApprovalStatus.Approved;
     approval.approver = owner;
     await this.approvals.save(approval);
-
-    const toolCall = approval.toolCall;
-    const resumeContext = this.decodeResumeContext(toolCall.resultText);
     toolCall.status = ToolCallStatus.Running;
     await this.toolCalls.save(toolCall);
     this.events.publish(
@@ -218,7 +274,23 @@ export class ToolsService {
     );
 
     try {
-      const result = await this.executeTool(toolCall, owner);
+      const result = await this.executeTool(toolCall, owner, {
+        commandAuthorized: toolCall.name === 'run_command',
+      });
+      if (projectCommandToRemember) {
+        await this.commandPolicy.rememberProjectCommand(
+          projectCommandToRemember.project,
+          owner,
+          projectCommandToRemember.command,
+        );
+        await this.audit.record({
+          actor: owner,
+          action: 'command_policy.project_command_added',
+          resourceType: 'project',
+          resourceId: projectCommandToRemember.project.id,
+          metadata: { command: projectCommandToRemember.normalized },
+        });
+      }
       toolCall.status = ToolCallStatus.Succeeded;
       toolCall.resultText = result;
       const saved = await this.toolCalls.save(toolCall);
@@ -355,7 +427,11 @@ export class ToolsService {
     return saved;
   }
 
-  private async executeTool(toolCall: ToolCall, owner: User): Promise<string> {
+  private async executeTool(
+    toolCall: ToolCall,
+    owner: User,
+    options: { commandAuthorized?: boolean } = {},
+  ): Promise<string> {
     const session = toolCall.session;
     const project = session.project as Project;
 
@@ -369,7 +445,7 @@ export class ToolsService {
       case 'create_patch':
         return this.applyPatch(toolCall, owner, project, toolCall.arguments);
       case 'run_command':
-        return this.runCommand(toolCall, owner, project, toolCall.arguments);
+        return this.runCommand(toolCall, owner, project, toolCall.arguments, options.commandAuthorized ?? false);
       default:
         throw new BadRequestException(`Unknown tool: ${toolCall.name}`);
     }
@@ -488,6 +564,7 @@ export class ToolsService {
     owner: User,
     project: Project,
     args: Record<string, unknown>,
+    commandAuthorized: boolean,
   ): Promise<string> {
     if (typeof args.command !== 'string') {
       throw new BadRequestException('run_command requires command.');
@@ -496,7 +573,9 @@ export class ToolsService {
       typeof args.cwd === 'string'
         ? this.paths.resolveProjectPath(project.workspacePath, args.cwd)
         : project.workspacePath;
-    const parsed = this.commandPolicy.parse(args.command);
+    const parsed = commandAuthorized
+      ? this.commandPolicy.parseAuthorized(args.command)
+      : await this.commandPolicy.parse(args.command, project.id);
 
     const run = await this.commandRuns.save(
       this.commandRuns.create({
@@ -740,10 +819,14 @@ export class ToolsService {
   private async buildApprovalPreview(approval: ToolApproval): Promise<ApprovalPreview | undefined> {
     const toolCall = approval.toolCall;
     if (toolCall.name === 'run_command' && typeof toolCall.arguments.command === 'string') {
+      const project = toolCall.session.project as Project;
+      const inspection = await this.commandPolicy.inspect(toolCall.arguments.command, project.id);
       return {
         kind: 'command',
         command: toolCall.arguments.command,
         cwd: typeof toolCall.arguments.cwd === 'string' ? toolCall.arguments.cwd : undefined,
+        policyAllowed: inspection.allowed,
+        policySource: inspection.source,
         truncated: false,
       };
     }

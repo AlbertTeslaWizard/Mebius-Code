@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { RouterLink } from 'vue-router';
+import { RouterLink, useRouter } from 'vue-router';
 import {
   Activity,
   AlertCircle,
@@ -62,6 +62,7 @@ type WorkspaceResizeTarget = 'sessions' | 'file-tree';
 type FilePaneMode = 'preview' | 'editor';
 type EventFilter = 'all' | 'model' | 'tools' | 'commands' | 'messages';
 type ImportMode = 'git' | 'archive';
+type WorkbenchTab = 'files' | 'review' | 'runs' | 'events';
 
 const mainWorkspaceMinWidth = 360;
 const sidebarResizeStep = 16;
@@ -76,6 +77,7 @@ const auth = useAuthStore();
 const workspace = useWorkspaceStore();
 const approvals = useApprovalStore();
 const locale = useLocaleStore();
+const router = useRouter();
 
 const projectForm = reactive({ name: '', description: '' });
 const importForm = reactive({ gitUrl: '', branch: '' });
@@ -87,6 +89,9 @@ const gitCommitMessage = ref('');
 const sessionTitle = ref('');
 const composer = ref('');
 const composerMode = ref<ComposerMode>('build');
+const activeWorkbenchTab = ref<WorkbenchTab>('files');
+const manualCommand = ref('');
+const manualCommandCwd = ref('');
 const selectedFilePath = ref('');
 const newFileModal = ref(false);
 const newFilePath = ref('');
@@ -164,6 +169,29 @@ const commandRunStats = computed(() => {
   });
   return stats;
 });
+const commandOptions = computed(() =>
+  workspace.allowedCommands.map((command) => ({
+    label: command,
+    value: command,
+  })),
+);
+const commandDirectoryOptions = computed(() => [
+  { label: locale.t('commandCwdRoot'), value: '' },
+  ...collectDirectoryOptions(workspace.fileTree),
+]);
+const canSubmitManualCommand = computed(
+  () =>
+    Boolean(workspace.currentSession) &&
+    Boolean(manualCommand.value.trim()) &&
+    !busy.value &&
+    !workspace.allowedCommandsLoading,
+);
+const showNoAllowedCommands = computed(
+  () => Boolean(workspace.currentSession) && !workspace.allowedCommandsLoading && workspace.allowedCommands.length === 0,
+);
+const noAllowedCommandsHint = computed(() =>
+  auth.user?.role === 'admin' ? locale.t('noAllowedCommandsAdmin') : locale.t('noAllowedCommandsUser'),
+);
 const composerModeOptions = computed<Array<{ label: string; value: ComposerMode }>>(() => [
   { label: locale.t('build'), value: 'build' },
   { label: locale.t('plan'), value: 'plan' },
@@ -181,6 +209,7 @@ const eventFilterOptions = computed<Array<{ label: string; value: EventFilter }>
 ]);
 const settingsOptions = computed(() => [
   { label: locale.t('modelConfigs'), key: 'models' },
+  ...(auth.user?.role === 'admin' ? [{ label: locale.t('commandPolicy'), key: 'commands' }] : []),
   { label: locale.t('auditLogs'), key: 'audit' },
   { label: locale.t('signOut'), key: 'logout' },
 ]);
@@ -470,6 +499,19 @@ watch(
       }
     });
     expandedFilePaths.value = Array.from(next);
+    if (manualCommandCwd.value && findTreeNode(nodes, manualCommandCwd.value)?.type !== 'directory') {
+      manualCommandCwd.value = '';
+    }
+  },
+  { deep: true },
+);
+
+watch(
+  () => workspace.allowedCommands,
+  (commands) => {
+    if (manualCommand.value && !commands.includes(manualCommand.value)) {
+      manualCommand.value = '';
+    }
   },
   { deep: true },
 );
@@ -1002,12 +1044,46 @@ async function executeActivePlan() {
   await runTask(() => workspace.submitText(request, { approvedPlanId: bundle.plan.id }));
 }
 
+async function submitManualCommand() {
+  const command = manualCommand.value.trim();
+  if (!command || !canSubmitManualCommand.value) return;
+  await runTask(async () => {
+    await workspace.requestCommand({
+      command,
+      ...(manualCommandCwd.value.trim() ? { cwd: manualCommandCwd.value.trim() } : {}),
+    });
+    manualCommand.value = '';
+    await approvals.loadPending();
+    activeWorkbenchTab.value = 'review';
+  });
+}
+
+function openSettings(key: string) {
+  if (key === 'logout') {
+    auth.logout();
+    return;
+  }
+  const routes: Record<string, string> = {
+    models: '/settings/models',
+    commands: '/settings/commands',
+    audit: '/settings/audit',
+  };
+  const path = routes[key];
+  if (path) {
+    void router.push(path);
+  }
+}
+
 async function revertPatch(patchId: string) {
   await runTask(() => workspace.revertPatch(patchId));
 }
 
 async function refreshReviewPanel() {
   await Promise.all([approvals.loadPending(), workspace.refreshReviewData()]);
+}
+
+async function refreshRunsPanel() {
+  await Promise.all([workspace.loadCommandRuns(), workspace.loadAllowedCommands()]);
 }
 
 async function openConnect(initialQuery = '') {
@@ -1280,6 +1356,16 @@ function countTree(nodes: TreeNode[]) {
   );
 }
 
+function collectDirectoryOptions(nodes: TreeNode[]): Array<{ label: string; value: string }> {
+  return nodes.flatMap((node) => {
+    if (node.type !== 'directory') return [];
+    return [
+      { label: node.path, value: node.path },
+      ...collectDirectoryOptions(node.children ?? []),
+    ];
+  });
+}
+
 function collectInitialDirectoryPaths(nodes: TreeNode[], depth = 0): string[] {
   return nodes.flatMap((node) => {
     if (node.type !== 'directory') return [];
@@ -1547,7 +1633,7 @@ function truncate(value: string, maxLength: number) {
               <n-dropdown
                 trigger="click"
                 :options="settingsOptions"
-                @select="(key: string) => key === 'logout' ? auth.logout() : $router.push(key === 'models' ? '/settings/models' : '/settings/audit')"
+                @select="openSettings"
               >
                 <n-button circle quaternary :title="locale.t('settings')">
                   <template #icon><n-icon><Settings /></n-icon></template>
@@ -2079,7 +2165,12 @@ function truncate(value: string, maxLength: number) {
         >
           <template #icon><n-icon><X /></n-icon></template>
         </n-button>
-        <n-tabs type="line" class="workbench-tabs min-h-0 flex-1" pane-class="workbench-tabs__pane">
+        <n-tabs
+          v-model:value="activeWorkbenchTab"
+          type="line"
+          class="workbench-tabs min-h-0 flex-1"
+          pane-class="workbench-tabs__pane"
+        >
           <n-tab-pane name="files" :tab="locale.t('files')">
             <div class="workbench-pane workbench-pane--files" :style="fileWorkbenchStyle">
               <section class="workbench-section workbench-section--tree">
@@ -2210,7 +2301,7 @@ function truncate(value: string, maxLength: number) {
           </n-tab-pane>
 
           <n-tab-pane name="review" :tab="locale.t('review')">
-            <div class="workbench-pane">
+            <div class="workbench-pane workbench-pane--stack-scroll scrollbar-thin">
               <section class="workbench-section review-section">
                 <header class="workbench-section__header">
                   <div class="min-w-0">
@@ -2303,9 +2394,36 @@ function truncate(value: string, maxLength: number) {
                       <div class="approval-card__header-actions">
                         <span class="approval-card__status">{{ approval.status }}</span>
                         <div class="approval-card__actions approval-card__actions--header">
-                          <n-button size="small" type="primary" @click="approvals.approve(approval.id)">
+                          <n-button
+                            v-if="approval.toolCall.name !== 'run_command'"
+                            size="small"
+                            type="primary"
+                            @click="approvals.approve(approval.id)"
+                          >
                             <template #icon><n-icon><Check /></n-icon></template>
                             {{ approvalApproveLabel(approval) }}
+                          </n-button>
+                          <n-button
+                            v-else
+                            size="small"
+                            type="primary"
+                            @click="approvals.approve(approval.id, 'once')"
+                          >
+                            <template #icon><n-icon><Play /></n-icon></template>
+                            {{ locale.t('runOnce') }}
+                          </n-button>
+                          <n-button
+                            v-if="
+                              approval.toolCall.name === 'run_command' &&
+                              approval.preview?.kind === 'command' &&
+                              !approval.preview.policyAllowed
+                            "
+                            size="small"
+                            secondary
+                            @click="approvals.approve(approval.id, 'project')"
+                          >
+                            <template #icon><n-icon><ShieldCheck /></n-icon></template>
+                            {{ locale.t('allowForProject') }}
                           </n-button>
                           <n-button size="small" secondary @click="approvals.reject(approval.id)">
                             <template #icon><n-icon><X /></n-icon></template>
@@ -2343,6 +2461,16 @@ function truncate(value: string, maxLength: number) {
                         <div class="command-preview__label">{{ locale.t('commandPreview') }}</div>
                         <code>{{ approval.preview.command }}</code>
                         <span v-if="approval.preview.cwd">{{ approval.preview.cwd }}</span>
+                        <span
+                          class="command-preview__policy"
+                          :class="{ 'is-warning': !approval.preview.policyAllowed }"
+                        >
+                          {{
+                            approval.preview.policyAllowed
+                              ? locale.t('commandPolicyAllowed')
+                              : locale.t('commandPolicyNeedsAuthorization')
+                          }}
+                        </span>
                       </div>
                     </div>
                     <pre v-else class="approval-card__payload scrollbar-thin">{{ approvalArguments(approval) }}</pre>
@@ -2386,7 +2514,7 @@ function truncate(value: string, maxLength: number) {
           </n-tab-pane>
 
           <n-tab-pane name="runs" :tab="locale.t('runs')">
-            <div class="workbench-pane">
+            <div class="workbench-pane workbench-pane--stack-scroll scrollbar-thin">
               <section class="workbench-section">
                 <header class="workbench-section__header">
                   <div class="min-w-0">
@@ -2403,11 +2531,58 @@ function truncate(value: string, maxLength: number) {
                     secondary
                     size="small"
                     :title="locale.t('refresh')"
-                    @click="workspace.loadCommandRuns"
+                    @click="refreshRunsPanel"
                   >
                     <template #icon><n-icon><RefreshCw /></n-icon></template>
                   </n-button>
                 </header>
+
+                <div class="command-request">
+                  <div class="command-request__main">
+                    <n-select
+                      v-model:value="manualCommand"
+                      class="command-request__select"
+                      :options="commandOptions"
+                      :placeholder="locale.t('commandInputPlaceholder')"
+                      :disabled="!workspace.currentSession || busy || commandOptions.length === 0"
+                      :loading="workspace.allowedCommandsLoading"
+                      filterable
+                      :consistent-menu-width="false"
+                    />
+                    <n-select
+                      v-model:value="manualCommandCwd"
+                      class="command-request__cwd"
+                      :options="commandDirectoryOptions"
+                      :placeholder="locale.t('commandCwdPlaceholder')"
+                      :disabled="!workspace.currentSession || busy"
+                      filterable
+                      :consistent-menu-width="false"
+                    />
+                  </div>
+                  <div class="command-request__actions">
+                    <n-button
+                      v-if="showNoAllowedCommands && auth.user?.role === 'admin'"
+                      secondary
+                      @click="openSettings('commands')"
+                    >
+                      <template #icon><n-icon><Settings /></n-icon></template>
+                      {{ locale.t('commandPolicy') }}
+                    </n-button>
+                    <n-button
+                      type="primary"
+                      :loading="busy"
+                      :disabled="!canSubmitManualCommand"
+                      @click="submitManualCommand"
+                    >
+                      <template #icon><n-icon><Send /></n-icon></template>
+                      {{ locale.t('requestRun') }}
+                    </n-button>
+                  </div>
+                  <div v-if="showNoAllowedCommands" class="command-request__notice">
+                    <n-icon><Info /></n-icon>
+                    <span>{{ noAllowedCommandsHint }}</span>
+                  </div>
+                </div>
 
                 <div class="workbench-list runs-list scrollbar-thin">
                   <div v-if="workspace.commandRuns.length === 0" class="workbench-empty-state">
@@ -2945,6 +3120,25 @@ function truncate(value: string, maxLength: number) {
   min-height: 0;
 }
 
+.workbench-pane--stack-scroll {
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.workbench-pane--stack-scroll > .workbench-section {
+  flex: 0 0 auto;
+  min-height: 100%;
+  overflow: visible;
+}
+
+.workbench-pane--stack-scroll .workbench-list {
+  flex: 0 0 auto;
+  min-height: auto;
+  overflow: visible;
+}
+
 .workbench-pane--files {
   display: grid;
   gap: 0;
@@ -3338,10 +3532,80 @@ function truncate(value: string, maxLength: number) {
   font-size: 11px;
 }
 
+.command-preview__policy {
+  border-left: 3px solid #10b981;
+  padding-left: 0.5rem;
+}
+
+.command-preview__policy.is-warning {
+  border-left-color: #f59e0b;
+  color: #92400e;
+}
+
+.command-request {
+  align-items: flex-start;
+  background: #f8fafc;
+  border-bottom: 1px solid #e2e8f0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 0.75rem;
+}
+
+.command-request__main {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 0.5rem;
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 0.35fr);
+  min-width: 0;
+}
+
+.command-request__select,
+.command-request__cwd {
+  min-width: 0;
+}
+
+.command-request__actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.command-request__notice {
+  align-items: center;
+  color: #92400e;
+  display: flex;
+  flex: 1 1 100%;
+  font-size: 12px;
+  gap: 0.4rem;
+  line-height: 1.4;
+  min-width: 0;
+}
+
+.command-request__notice .n-icon {
+  flex: 0 0 auto;
+}
+
 .runs-list {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+}
+
+@media (max-width: 760px) {
+  .command-request {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .command-request__main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .command-request__actions {
+    justify-content: flex-end;
+  }
 }
 
 .run-card {

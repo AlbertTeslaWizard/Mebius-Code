@@ -64,6 +64,8 @@ interface WorkspaceState {
   activePlan: { plan: Plan; steps: PlanStep[] } | null;
   filePatches: FilePatch[];
   commandRuns: CommandRunView[];
+  allowedCommands: string[];
+  allowedCommandsLoading: boolean;
   loading: boolean;
   eventStatus: 'idle' | 'connecting' | 'open' | 'closed';
   eventSource: EventSource | null;
@@ -93,6 +95,8 @@ export const useWorkspaceStore = defineStore('workspace', {
     activePlan: null,
     filePatches: [],
     commandRuns: [],
+    allowedCommands: [],
+    allowedCommandsLoading: false,
     loading: false,
     eventStatus: 'idle',
     eventSource: null,
@@ -145,6 +149,8 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.activePlan = null;
       this.filePatches = [];
       this.commandRuns = [];
+      this.allowedCommands = [];
+      this.allowedCommandsLoading = false;
       this.streamingAssistantId = null;
       this.agentActivity = null;
       this.gitStatus = null;
@@ -223,6 +229,8 @@ export const useWorkspaceStore = defineStore('workspace', {
         this.activePlan = null;
         this.filePatches = [];
         this.commandRuns = [];
+        this.allowedCommands = [];
+        this.allowedCommandsLoading = false;
         this.streamingAssistantId = null;
         this.agentActivity = null;
         this.disconnectEvents();
@@ -398,6 +406,8 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.activePlan = null;
       this.filePatches = [];
       this.commandRuns = [];
+      this.allowedCommands = [];
+      this.allowedCommandsLoading = false;
       this.streamingAssistantId = null;
       this.agentActivity = null;
 
@@ -522,12 +532,38 @@ export const useWorkspaceStore = defineStore('workspace', {
       );
       return this.commandRuns;
     },
+    async loadAllowedCommands() {
+      if (!this.currentSession) {
+        this.allowedCommands = [];
+        this.allowedCommandsLoading = false;
+        return [];
+      }
+      this.allowedCommandsLoading = true;
+      try {
+        this.allowedCommands = await request<string[]>(`/sessions/${this.currentSession.id}/allowed-commands`);
+        return this.allowedCommands;
+      } finally {
+        this.allowedCommandsLoading = false;
+      }
+    },
+    async requestCommand(input: { command: string; cwd?: string }) {
+      if (!this.currentSession) return null;
+      const toolCall = await request<{ id: string; status: string }>(
+        `/sessions/${this.currentSession.id}/command-runs`,
+        {
+          method: 'POST',
+          body: jsonBody(input),
+        },
+      );
+      await this.refreshCurrentSession();
+      return toolCall;
+    },
     async revertPatch(patchId: string) {
       await request<FilePatch>(`/patches/${patchId}/revert`, { method: 'POST' });
       await Promise.all([this.loadPatches(), this.loadTree(), this.loadGitStatus()]);
     },
     async refreshReviewData() {
-      await Promise.all([this.loadLatestPlan(), this.loadPatches(), this.loadCommandRuns()]);
+      await Promise.all([this.loadLatestPlan(), this.loadPatches(), this.loadCommandRuns(), this.loadAllowedCommands()]);
     },
     async loadTree(path = '.', depth = 3) {
       if (!this.currentProject) return;

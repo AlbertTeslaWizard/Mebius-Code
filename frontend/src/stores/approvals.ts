@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { request } from '../api/http';
+import { jsonBody, request } from '../api/http';
 import type { Approval } from '../api/types';
 import { useWorkspaceStore } from './workspace';
 
@@ -22,9 +22,9 @@ export const useApprovalStore = defineStore('approvals', {
         this.loading = false;
       }
     },
-    async approve(id: string) {
+    async approve(id: string, mode: 'once' | 'project' = 'once') {
       const workspace = useWorkspaceStore();
-      await request(`/approvals/${id}/approve`, { method: 'POST' });
+      await request(`/approvals/${id}/approve`, { method: 'POST', body: jsonBody({ mode }) });
       await this.loadPending();
       if (workspace.currentSession) {
         await Promise.all([

@@ -8,6 +8,7 @@ import {
   FilePatchStatus,
   ToolCallStatus,
 } from '../../common/enums/tool-status.enum';
+import { UserRole } from '../../common/enums/user-role.enum';
 import { CommandPolicyService } from '../../common/security/command-policy.service';
 import { PathSandboxService } from '../../common/security/path-sandbox.service';
 import { AgentService } from '../agent/agent.service';
@@ -85,7 +86,11 @@ describe('ToolsService', () => {
     normalizeRelativePath: jest.fn(),
   } as unknown as jest.Mocked<PathSandboxService>;
   const commandPolicy = {
+    inspect: jest.fn(),
     parse: jest.fn(),
+    parseAuthorized: jest.fn(),
+    rememberProjectCommand: jest.fn(),
+    listAllowedCommands: jest.fn(),
   } as unknown as jest.Mocked<CommandPolicyService>;
   const audit = {
     record: jest.fn(),
@@ -134,7 +139,16 @@ describe('ToolsService', () => {
         createdAt: new Date('2026-06-03T00:00:00.000Z'),
       } as FilePatch,
     ]);
-    commandPolicy.parse.mockReturnValue({ command: 'npm', args: ['test'] });
+    commandPolicy.inspect.mockResolvedValue({
+      normalized: 'npm test',
+      command: 'npm',
+      args: ['test'],
+      allowed: true,
+      source: 'environment',
+    });
+    commandPolicy.parse.mockResolvedValue({ command: 'npm', args: ['test'] });
+    commandPolicy.parseAuthorized.mockReturnValue({ command: 'npm', args: ['test'] });
+    commandPolicy.listAllowedCommands.mockResolvedValue(['npm test']);
     commandRuns.save.mockImplementation(async (value: any) => ({
       id: 'run-1',
       stdout: '',
@@ -174,6 +188,57 @@ describe('ToolsService', () => {
         activity: 'waiting_for_approval',
         targetPaths: ['demo.py'],
       }),
+    );
+  });
+
+  it('rejects a non-enabled command before creating an approval for a regular user', async () => {
+    commandPolicy.inspect.mockResolvedValueOnce({
+      normalized: 'python --version',
+      command: 'python',
+      args: ['--version'],
+      allowed: false,
+    });
+
+    await expect(
+      service.requestOrExecute({
+        owner: { ...owner, role: UserRole.User },
+        sessionId: session.id,
+        name: 'run_command',
+        args: { command: 'python --version' },
+      }),
+    ).rejects.toThrow('Command is not enabled for this project');
+  });
+
+  it('remembers an administrator-authorized command only after successful execution', async () => {
+    const commandToolCall = {
+      id: 'tool-command-approval',
+      session,
+      name: 'run_command',
+      arguments: { command: 'python --version' },
+      requiresApproval: true,
+      status: ToolCallStatus.PendingApproval,
+    } as unknown as ToolCall;
+    approvals.findOne.mockResolvedValueOnce({
+      id: 'approval-command',
+      status: ApprovalStatus.Pending,
+      toolCall: commandToolCall,
+    } as ToolApproval);
+    commandPolicy.inspect.mockResolvedValueOnce({
+      normalized: 'python --version',
+      command: 'python',
+      args: ['--version'],
+      allowed: false,
+    });
+    jest.spyOn(service as any, 'executeTool').mockResolvedValueOnce('Command exited with 0.');
+
+    const admin = { ...owner, role: UserRole.Admin } as User;
+    const result = await service.approve(admin, 'approval-command', 'project');
+
+    expect(result.status).toBe(ToolCallStatus.Succeeded);
+    expect(commandPolicy.rememberProjectCommand).toHaveBeenCalledWith(
+      session.project,
+      admin,
+      'python --version',
     );
   });
 
@@ -289,6 +354,24 @@ describe('ToolsService', () => {
       status: CommandRunStatus.Succeeded,
       toolCall: { id: 'tool-1', name: 'run_command', status: ToolCallStatus.Succeeded },
     });
+  });
+
+  it('lists allowed commands for an owned session project', async () => {
+    commandPolicy.listAllowedCommands.mockResolvedValueOnce(['npm test', 'python --version']);
+
+    const result = await service.listSessionAllowedCommands(owner.id, session.id);
+
+    expect(sessions.findOwned).toHaveBeenCalledWith(owner.id, session.id);
+    expect(commandPolicy.listAllowedCommands).toHaveBeenCalledWith('project-1');
+    expect(result).toEqual(['npm test', 'python --version']);
+  });
+
+  it('does not list allowed commands when session ownership fails', async () => {
+    sessions.findOwned.mockRejectedValueOnce(new Error('Session not found.'));
+
+    await expect(service.listSessionAllowedCommands(owner.id, 'missing-session')).rejects.toThrow('Session not found.');
+
+    expect(commandPolicy.listAllowedCommands).not.toHaveBeenCalled();
   });
 
   it('publishes command_started before command output', async () => {

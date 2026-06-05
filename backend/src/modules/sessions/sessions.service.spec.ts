@@ -166,7 +166,7 @@ describe('SessionsService', () => {
         name: 'create_patch',
         arguments: { path: 'demo.py', content: 'print(1)' },
       },
-    } as ToolApproval);
+    } as unknown as ToolApproval);
 
     const result = await service.get('owner-1', 'session-1');
 
@@ -190,7 +190,7 @@ describe('SessionsService', () => {
     toolCalls.findOne.mockResolvedValue({
       name: 'run_command',
       arguments: { command: 'npm test' },
-    } as ToolCall);
+    } as unknown as ToolCall);
 
     const result = await service.get('owner-1', 'session-1');
 

@@ -44,3 +44,7 @@ npm run dev
 ```
 
 The web app runs at `http://127.0.0.1:5173` and proxies `/api` to the backend.
+
+Shell commands can be requested from the workspace **Runs** tab. Every command
+requires review before execution. Administrators manage Git, Node.js, Python,
+and custom command permissions from **Settings > Command permissions**.

@@ -19,11 +19,6 @@ describe('AgentService', () => {
   const session = { id: 'session-1', activeModelConfig: { id: 'config-1' } } as Session;
   const owner = { id: 'owner-1' } as User;
   const userMessage = messageFixture('message-user', MessageRole.User, 'Explain this project');
-  const assistantMessage = messageFixture(
-    'message-assistant',
-    MessageRole.Assistant,
-    'Final project summary',
-  );
 
   const plans = {
     findOne: jest.fn(),
@@ -45,6 +40,7 @@ describe('AgentService', () => {
   } as unknown as jest.Mocked<OpenAiCompatibleService>;
   const tools = {
     requestOrExecute: jest.fn(),
+    listAllowedCommands: jest.fn(),
   } as unknown as jest.Mocked<ToolsService>;
   const events = {
     publish: jest.fn(),
@@ -69,6 +65,7 @@ describe('AgentService', () => {
     sessions.latestSummary.mockResolvedValue(null);
     sessions.listMessages.mockResolvedValue([userMessage]);
     sessions.findPendingApprovalTool.mockResolvedValue(null);
+    tools.listAllowedCommands.mockResolvedValue([]);
     plans.findOne.mockResolvedValue(null);
     plans.save.mockImplementation(async (value) => value as Plan);
     modelConfigs.findRuntime.mockResolvedValue({

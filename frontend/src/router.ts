@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router';
 import { getAccessToken } from './api/http';
 import AuthView from './views/AuthView.vue';
 import AuditView from './views/AuditView.vue';
+import CommandsView from './views/CommandsView.vue';
 import ModelsView from './views/ModelsView.vue';
 import WorkspaceView from './views/WorkspaceView.vue';
 
@@ -16,6 +17,12 @@ export const router = createRouter({
       path: '/settings/models',
       name: 'models',
       component: ModelsView,
+      meta: { requiresAuth: true },
+    },
+    {
+      path: '/settings/commands',
+      name: 'commands',
+      component: CommandsView,
       meta: { requiresAuth: true },
     },
     {

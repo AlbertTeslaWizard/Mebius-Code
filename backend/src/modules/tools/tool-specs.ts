@@ -1,4 +1,4 @@
-export const CODING_TOOL_SPECS = [
+const BASE_CODING_TOOL_SPECS = [
   {
     type: 'function',
     function: {
@@ -81,7 +81,7 @@ export const CODING_TOOL_SPECS = [
     type: 'function',
     function: {
       name: 'run_command',
-      description: 'Run an allowlisted command in the project workspace. Requires user approval.',
+      description: 'Run a command in the project workspace. Requires user approval.',
       parameters: {
         type: 'object',
         required: ['command'],
@@ -94,3 +94,25 @@ export const CODING_TOOL_SPECS = [
     },
   },
 ];
+
+export function buildCodingToolSpecs(allowedCommands: string[]) {
+  const commandSummary =
+    allowedCommands.length > 0
+      ? ` Currently enabled command prefixes: ${allowedCommands.join(', ')}.`
+      : ' No command prefixes are currently enabled.';
+  return BASE_CODING_TOOL_SPECS.map((tool) =>
+    tool.function.name === 'run_command'
+      ? {
+          ...tool,
+          function: {
+            ...tool.function,
+            description:
+              `Run a command in the project workspace. Requires user approval.${commandSummary}` +
+              ' Prefer an enabled prefix; administrators can authorize other safe commands.',
+          },
+        }
+      : tool,
+  );
+}
+
+export const CODING_TOOL_SPECS = buildCodingToolSpecs([]);
