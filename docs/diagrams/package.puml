@@ -1,25 +1,52 @@
 @startuml
-package "auth" {}
-package "users" {}
-package "model-configs" {}
-package "projects" {}
-package "sessions" {}
-package "agent" {}
-package "tools" {}
-package "events" {}
-package "audit" {}
+package "frontend" {
+  [AuthView]
+  [WorkspaceView]
+  [ModelsView]
+  [CommandsView]
+  [AuditView]
+}
+
+package "backend" {
+  package "auth" as auth {}
+  package "users" as users {}
+  package "model-configs" as modelconfigs {}
+  package "projects" as projects {}
+  package "sessions" as sessions {}
+  package "agent" as agent {}
+  package "tools" as tools {}
+  package "events" as events {}
+  package "audit" as audit {}
+  package "common/security" as security {}
+}
+
+[WorkspaceView] ..> sessions
+[WorkspaceView] ..> projects
+[WorkspaceView] ..> agent
+[WorkspaceView] ..> tools
+[ModelsView] ..> modelconfigs
+[CommandsView] ..> tools
+[AuditView] ..> audit
 
 auth ..> users
-model-configs ..> users
+auth ..> security
+modelconfigs ..> users
+modelconfigs ..> security
 projects ..> users
+projects ..> audit
+projects ..> security
 sessions ..> users
 sessions ..> projects
+sessions ..> modelconfigs
+sessions ..> events
 agent ..> sessions
-agent ..> model-configs
+agent ..> modelconfigs
 agent ..> tools
 agent ..> events
+tools ..> sessions
 tools ..> projects
 tools ..> audit
-sessions ..> events
+tools ..> events
+tools ..> security
+audit ..> users
 @enduml
-
