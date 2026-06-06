@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { RouterLink, useRouter } from 'vue-router';
 import {
   Activity,
@@ -1023,6 +1023,32 @@ async function submitComposer() {
   await runTask(() =>
     composerMode.value === 'plan' ? workspace.createPlan(value) : workspace.submitText(value),
   );
+}
+
+async function handleComposerKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Enter' || event.isComposing) return;
+
+  if (event.ctrlKey && !event.altKey && !event.metaKey) {
+    event.preventDefault();
+    const target = event.target instanceof HTMLTextAreaElement ? event.target : null;
+    if (!target) {
+      composer.value += '\n';
+      return;
+    }
+    const start = target.selectionStart;
+    const end = target.selectionEnd;
+    composer.value = `${composer.value.slice(0, start)}\n${composer.value.slice(end)}`;
+    await nextTick();
+    target.setSelectionRange(start + 1, start + 1);
+    return;
+  }
+
+  if (event.shiftKey || event.altKey || event.metaKey) return;
+
+  event.preventDefault();
+  if (canSubmitComposer.value) {
+    await submitComposer();
+  }
 }
 
 async function approveActivePlan() {
@@ -2097,7 +2123,7 @@ function truncate(value: string, maxLength: number) {
                   :bordered="false"
                   :autosize="{ minRows: 2, maxRows: 5 }"
                   :placeholder="locale.t('askPlaceholder')"
-                  @keydown.ctrl.enter.prevent="submitComposer"
+                  @keydown="handleComposerKeydown"
                 />
                 <div class="flex flex-wrap items-center justify-between gap-2 border-t border-mebius-border px-3 py-2">
                   <div class="flex min-w-0 flex-wrap items-center gap-2">
