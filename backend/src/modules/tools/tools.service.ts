@@ -23,6 +23,7 @@ import { Session } from '../sessions/session.entity';
 import { SessionsService } from '../sessions/sessions.service';
 import { User } from '../users/user.entity';
 import { CommandRun } from './command-run.entity';
+import { resolveCommandRuntime } from './command-runtime';
 import { FilePatch } from './file-patch.entity';
 import {
   SESSION_SHELL_AUTORUN_GRANT,
@@ -1065,7 +1066,7 @@ export class ToolsService {
     cwd: string,
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     return new Promise((resolve) => {
-      const child = spawn(command, [], { cwd, shell: true });
+      const child = spawn(command, [], { cwd, shell: resolveCommandRuntime().shellExecutable });
       let stdout = '';
       let stderr = '';
       const killTimer = setTimeout(() => child.kill(), 30_000);

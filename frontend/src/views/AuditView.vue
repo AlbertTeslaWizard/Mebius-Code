@@ -4,6 +4,7 @@ import { RouterLink } from 'vue-router';
 import { ArrowLeft, RefreshCw } from 'lucide-vue-next';
 import { request } from '../api/http';
 import type { AuditLog, ListResponse } from '../api/types';
+import MebiusBrand from '../components/MebiusBrand.vue';
 import { useLocaleStore } from '../stores/locale';
 
 const logs = ref<AuditLog[]>([]);
@@ -44,6 +45,7 @@ onMounted(load);
               <template #icon><n-icon><ArrowLeft /></n-icon></template>
             </n-button>
           </RouterLink>
+          <MebiusBrand size="compact" :text="false" />
           <div>
             <h1 class="m-0 text-xl font-semibold">{{ locale.t('auditLogs') }}</h1>
             <p class="m-0 text-sm text-mebius-muted">{{ locale.t('recordsVisible', { total }) }}</p>

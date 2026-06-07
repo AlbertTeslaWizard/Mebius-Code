@@ -12,6 +12,7 @@ import { SessionsService } from '../sessions/sessions.service';
 import { User } from '../users/user.entity';
 import { ToolsService } from '../tools/tools.service';
 import { ToolCall } from '../tools/tool-call.entity';
+import { resolveCommandRuntime } from '../tools/command-runtime';
 import { buildCodingToolSpecs } from '../tools/tool-specs';
 import { PendingToolMessage, PendingToolResumeContext } from './agent-resume.types';
 import { CreatePlanDto } from './dto/create-plan.dto';
@@ -510,7 +511,8 @@ export class AgentService {
       {
         role: 'system',
         content:
-          'You are Mebius Code, an agentic coding assistant. Prefer Plan Mode for risky work. Use tools when you need project context. Mutating tools require approval.',
+          'You are Mebius Code, an agentic coding assistant. Prefer Plan Mode for risky work. Use tools when you need project context. Mutating tools require approval. ' +
+          resolveCommandRuntime().guidance,
       },
       ...(summary
         ? [

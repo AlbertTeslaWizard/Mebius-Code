@@ -2,7 +2,7 @@
 import { computed, reactive, ref } from 'vue';
 import { RouterLink, useRoute } from 'vue-router';
 import { useMessage } from 'naive-ui';
-import { Code2 } from 'lucide-vue-next';
+import MebiusBrand from '../components/MebiusBrand.vue';
 import { useAuthStore } from '../stores/auth';
 import { useLocaleStore } from '../stores/locale';
 
@@ -43,17 +43,13 @@ async function submit() {
 <template>
   <main class="flex min-h-screen items-center justify-center bg-mebius-bg px-6">
     <section class="w-full max-w-[420px] rounded border border-mebius-border bg-white p-7 shadow-sm">
-      <div class="mb-7 flex items-center gap-3">
-        <div class="flex h-10 w-10 items-center justify-center rounded bg-mebius-accent text-white">
-          <n-icon size="22"><Code2 /></n-icon>
-        </div>
-        <div>
-          <h1 class="m-0 text-xl font-semibold">Mebius Code</h1>
-          <p class="m-0 text-sm text-mebius-muted">
-            {{ isRegister ? locale.t('createWorkspaceAccount') : locale.t('signInWorkspace') }}
-          </p>
-        </div>
-        <n-button class="ml-auto" size="small" quaternary @click="locale.toggleLocale">
+      <div class="mb-7 flex items-start justify-between gap-3">
+        <MebiusBrand
+          class="min-w-0 flex-1"
+          size="hero"
+          :subtitle="isRegister ? locale.t('createWorkspaceAccount') : locale.t('signInWorkspace')"
+        />
+        <n-button class="shrink-0" size="small" quaternary @click="locale.toggleLocale">
           {{ locale.t('languageSwitch') }}
         </n-button>
       </div>

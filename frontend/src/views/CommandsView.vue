@@ -4,6 +4,7 @@ import { RouterLink } from 'vue-router';
 import { ArrowLeft, Check, RefreshCw, Save, ShieldCheck, Terminal } from 'lucide-vue-next';
 import { jsonBody, request } from '../api/http';
 import type { CommandPolicy } from '../api/types';
+import MebiusBrand from '../components/MebiusBrand.vue';
 import { useLocaleStore } from '../stores/locale';
 
 const locale = useLocaleStore();
@@ -78,6 +79,7 @@ onMounted(load);
               <template #icon><n-icon><ArrowLeft /></n-icon></template>
             </n-button>
           </RouterLink>
+          <MebiusBrand size="compact" :text="false" />
           <div class="min-w-0">
             <h1 class="m-0 text-xl font-semibold">{{ locale.t('commandPolicy') }}</h1>
             <p class="m-0 text-sm text-mebius-muted">{{ locale.t('commandPolicyHint') }}</p>

@@ -49,6 +49,7 @@ import type {
 import CodePreview from '../components/CodePreview.vue';
 import CodeEditor from '../components/CodeEditor.vue';
 import DiffPreview from '../components/DiffPreview.vue';
+import MebiusBrand from '../components/MebiusBrand.vue';
 import MessageContent from '../components/MessageContent.vue';
 import WorkspaceFileTree from '../components/WorkspaceFileTree.vue';
 import { useApprovalStore } from '../stores/approvals';
@@ -1710,10 +1711,7 @@ function truncate(value: string, maxLength: number) {
       >
         <header class="border-b border-mebius-border p-4">
           <div class="mb-3 flex items-center justify-between">
-            <div>
-              <h1 class="m-0 text-lg font-semibold">Mebius Code</h1>
-              <p class="m-0 text-xs text-mebius-muted">{{ auth.user?.email ?? locale.t('workspace') }}</p>
-            </div>
+            <MebiusBrand class="min-w-0" :subtitle="auth.user?.email ?? locale.t('workspace')" />
             <div class="flex items-center gap-1">
               <n-dropdown
                 trigger="click"
@@ -2147,8 +2145,9 @@ function truncate(value: string, maxLength: number) {
 
           <div class="flex min-h-0 flex-col">
             <div class="min-h-0 flex-1 overflow-y-auto p-4 scrollbar-thin">
-              <div v-if="workspace.messages.length === 0" class="rounded border border-dashed border-mebius-border bg-white p-6 text-sm text-mebius-muted">
-                {{ locale.t('createSessionHint') }}
+              <div v-if="workspace.messages.length === 0" class="chat-empty-state">
+                <MebiusBrand class="chat-empty-state__brand" size="hero" :text="false" />
+                <p>{{ locale.t('createSessionHint') }}</p>
               </div>
               <div
                 v-for="message in workspace.messages"
@@ -3067,6 +3066,36 @@ function truncate(value: string, maxLength: number) {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+}
+
+.chat-empty-state {
+  align-items: center;
+  background:
+    linear-gradient(180deg, #ffffff 0%, #fffaf2 100%),
+    linear-gradient(90deg, rgb(255 180 71 / 8%) 1px, transparent 1px) 0 0 / 28px 100%;
+  border: 1px dashed #d9dee7;
+  border-radius: 8px;
+  color: #667085;
+  display: flex;
+  flex-direction: column;
+  font-size: 14px;
+  gap: 0.9rem;
+  justify-content: center;
+  min-height: 220px;
+  overflow: hidden;
+  padding: 2rem;
+  text-align: center;
+}
+
+.chat-empty-state__brand {
+  filter: saturate(0.92);
+  opacity: 0.78;
+}
+
+.chat-empty-state p {
+  line-height: 1.6;
+  margin: 0;
+  max-width: 420px;
 }
 
 .workspace-content-resize-handle {

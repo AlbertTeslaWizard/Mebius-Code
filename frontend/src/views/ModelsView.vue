@@ -6,6 +6,7 @@ import { NButton, NPopconfirm, NSpace, NTag, useMessage } from 'naive-ui';
 import type { DataTableColumns } from 'naive-ui';
 import { jsonBody, request } from '../api/http';
 import type { ModelConfig, ModelConfigTestResult } from '../api/types';
+import MebiusBrand from '../components/MebiusBrand.vue';
 import { useLocaleStore } from '../stores/locale';
 
 const configs = ref<ModelConfig[]>([]);
@@ -243,6 +244,7 @@ onMounted(load);
               <template #icon><n-icon><ArrowLeft /></n-icon></template>
             </n-button>
           </RouterLink>
+          <MebiusBrand size="compact" :text="false" />
           <div>
             <h1 class="m-0 text-xl font-semibold">{{ locale.t('modelConfigs') }}</h1>
             <p class="m-0 text-sm text-mebius-muted">{{ locale.t('encryptedCredentials') }}</p>

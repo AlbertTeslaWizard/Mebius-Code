@@ -1,3 +1,5 @@
+import { CommandRuntimeInfo, resolveCommandRuntime } from './command-runtime';
+
 const BASE_CODING_TOOL_SPECS = [
   {
     type: 'function',
@@ -95,7 +97,10 @@ const BASE_CODING_TOOL_SPECS = [
   },
 ];
 
-export function buildCodingToolSpecs(allowedCommands: string[]) {
+export function buildCodingToolSpecs(
+  allowedCommands: string[],
+  commandRuntime: CommandRuntimeInfo = resolveCommandRuntime(),
+) {
   const commandSummary =
     allowedCommands.length > 0
       ? ` Currently enabled command prefixes: ${allowedCommands.join(', ')}.`
@@ -108,6 +113,7 @@ export function buildCodingToolSpecs(allowedCommands: string[]) {
             ...tool.function,
             description:
               `Run a command in the project workspace. Requires user approval.${commandSummary}` +
+              ` ${commandRuntime.guidance}` +
               ' Prefer an enabled prefix. Shell syntax or other commands can be reviewed by the user, and the user may trust the current session for automatic command execution.',
           },
         }

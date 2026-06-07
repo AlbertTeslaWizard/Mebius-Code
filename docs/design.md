@@ -79,7 +79,7 @@ External / Runtime Resources
 | Store | 状态与行为 |
 | --- | --- |
 | `auth` | 保存用户、Token、登录注册、退出、偏好更新 |
-| `workspace` | 保存项目、会话、消息、文件树、当前文件、计划、补丁、命令运行、可用命令、Git 状态和 SSE 状态 |
+| `workspace` | 保存项目、会话、消息、文件树、当前文件、计划、补丁、命令运行、可用命令、命令授权状态、Git 状态和 SSE 状态 |
 | `approvals` | 查询待审批工具调用，执行批准或拒绝 |
 | `locale` | 中英文界面文本 |
 
@@ -113,6 +113,7 @@ External / Runtime Resources
 | `CommandRun` | command、cwd、exitCode、stdout、stderr、status | 记录命令执行过程和结果 |
 | `CommandPolicyConfig` | enabledPresets、customCommands | 保存全局命令策略 |
 | `ProjectCommandPermission` | command | 保存管理员授权的项目级命令 |
+| `SessionCommandGrant` | grantType、createdBy | 保存当前会话的命令自动执行授权 |
 | `AuditLog` | action、resourceType、resourceId、metadata | 记录关键业务操作 |
 
 ## 5. API 设计
@@ -130,7 +131,7 @@ External / Runtime Resources
 | 会话 | `POST /projects/:projectId/sessions`、`GET /projects/:projectId/sessions`、`GET/DELETE /sessions/:id`、`GET/POST /sessions/:id/messages`、`POST /sessions/:id/commands` |
 | 事件 | `GET /sessions/:id/events?access_token=<jwt>` |
 | Agent | `POST /sessions/:id/plan`、`GET /sessions/:id/plans/latest`、`POST /plans/:id/approve`、`POST /sessions/:id/run` |
-| 审批与工具 | `GET /approvals/pending`、`POST /approvals/:id/approve`、`POST /approvals/:id/reject`、`GET /sessions/:id/patches`、`POST /patches/:id/revert`、`GET/POST /sessions/:id/command-runs` |
+| 审批与工具 | `GET /approvals/pending`、`POST /approvals/:id/approve`、`POST /approvals/:id/reject`、`GET /sessions/:id/patches`、`POST /patches/:id/revert`、`GET/POST /sessions/:id/command-runs`、`GET/DELETE /sessions/:id/command-authorization` |
 | 命令策略 | `GET /command-policy`、`PATCH /command-policy`、`GET /sessions/:id/allowed-commands` |
 | 审计 | `GET /audit-logs` |
 
@@ -163,11 +164,11 @@ External / Runtime Resources
 ### 6.4 Agent 执行与工具循环
 
 1. 用户发送消息或批准计划后，`AgentService` 读取会话摘要和最近消息，构造模型上下文。
-2. 系统将当前项目允许的命令前缀注入 `run_command` 工具描述。
+2. 系统将当前项目允许的命令前缀、后端运行平台和 shell 类型注入 system prompt 与 `run_command` 工具描述。
 3. `OpenAiCompatibleService` 流式调用模型，并通过 SSE 推送 token。
 4. 模型返回工具调用时，Agent 解析 JSON 参数并交给 `ToolsService`。
 5. 只读工具直接执行，结果作为 tool message 写入会话并继续模型回合。
-6. 写入补丁或命令执行会生成待审批记录，Agent 暂停并等待用户批准。
+6. 写入补丁或未授权命令执行会生成待审批记录，Agent 暂停并等待用户批准。
 7. 用户批准后，系统执行工具、记录结果，再由 Agent 恢复模型回合。
 8. 达到最大工具轮数仍未完成时，系统保存提示消息并标记计划失败。
 
@@ -182,13 +183,16 @@ External / Runtime Resources
 
 ### 6.6 命令执行与策略
 
-1. `CommandPolicyService` 将命令标准化，并拒绝管道、重定向、命令链、命令替换和换行。
-2. 系统先检查环境白名单、管理员启用的预设、自定义命令和项目级授权命令。
-3. `GET /sessions/:id/allowed-commands` 返回当前项目实际可用的命令前缀，工作区运行面板据此生成命令下拉选项。
-4. 运行面板的工作目录选项由项目文件树中的目录节点生成，空值代表项目根目录，后端仍通过路径沙箱做最终校验。
-5. 普通用户请求策略外命令时直接失败；前端默认不会向普通用户展示不可申请命令。
-6. 管理员可以单次批准策略外命令，或批准后记入项目级权限。
-7. 命令通过 `spawn` 在项目工作区执行，输出和退出码写入 `CommandRun`。
+1. `CommandPolicyService` 将命令标准化，硬性拒绝命令替换、反引号和换行。
+2. 命令链、管道和重定向被归类为 shell 执行模式，不再在审批前直接失败。
+3. 常规 argv 命令先检查环境白名单、管理员启用的预设、自定义命令和项目级授权命令。
+4. `GET /sessions/:id/allowed-commands` 返回当前项目实际可用的命令前缀，工作区运行面板据此生成命令下拉选项。
+5. 运行面板的工作目录选项由项目文件树中的目录节点生成，空值代表项目根目录，后端仍通过路径沙箱做最终校验。
+6. `GET /sessions/:id/command-authorization` 返回当前会话命令自动执行授权状态，`DELETE /sessions/:id/command-authorization` 用于撤销授权。
+7. Agent system prompt 和 `run_command` 工具描述通过 `resolveCommandRuntime` 注入后端平台和 shell 信息，Windows 指向 `cmd.exe`，Linux/macOS 指向 `/bin/sh`。
+8. 无会话授权时，策略外命令和 shell 命令进入审批；用户可仅运行本次，或信任当前会话并生成 `SessionCommandGrant`。
+9. 非 shell 命令可由管理员授权为项目级可复用命令；shell 命令不得保存为项目级前缀。
+10. 常规命令通过 `spawn` 的 argv 模式执行，shell 命令通过显式 shell 执行，输出和退出码写入 `CommandRun`。
 
 ### 6.7 Git 发布
 
@@ -205,8 +209,8 @@ External / Runtime Resources
 - 密钥安全：模型 API Key 使用主密钥派生的 AES-256-GCM 加密；响应中永不返回明文。
 - 路径安全：相对路径标准化后必须位于项目根目录内，拒绝绝对路径和 `..`。
 - 目录屏蔽：`.git`、`.env`、`node_modules`、`dist`、`coverage` 默认不可访问。
-- 命令安全：命令必须匹配策略前缀，不允许 shell 组合语法，并在工作区内执行。
-- 人工审批：补丁和命令执行均需要用户审批。
+- 命令安全：常规命令必须匹配策略前缀；策略外命令和 shell 命令需要审批或会话授权；命令替换、反引号和换行被硬性拒绝；所有命令都在工作区内执行。
+- 人工审批：补丁写入和未授权命令执行需要用户审批，会话级命令自动执行授权可撤销并写入审计。
 - 审计追踪：高风险和关键状态变更写入审计日志。
 
 ## 8. 部署设计

@@ -107,6 +107,14 @@ describe('AgentService', () => {
     const result = await service.run(owner, session.id, { message: 'Explain this project' });
 
     expect(llm.streamChat).toHaveBeenCalledTimes(2);
+    expect(llm.streamChat.mock.calls[0][0].messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'system',
+          content: expect.stringContaining(`Command runtime: platform ${process.platform}`),
+        }),
+      ]),
+    );
     expect(llm.streamChat.mock.calls[1][0].messages).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
