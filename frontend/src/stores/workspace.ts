@@ -23,7 +23,7 @@ import type {
 } from '../api/types';
 import { useLocaleStore } from './locale';
 
-type AgentActivityStatus = 'thinking' | 'using_tools' | 'waiting_for_approval' | 'failed';
+type AgentActivityStatus = 'thinking' | 'responding' | 'using_tools' | 'waiting_for_approval' | 'failed';
 type GitImportStatus = 'idle' | 'running' | 'success' | 'error';
 type GitPublishStatus = 'idle' | 'running' | 'success' | 'error';
 
@@ -753,7 +753,11 @@ export const useWorkspaceStore = defineStore('workspace', {
             const streamingMessage = this.getStreamingAssistantMessage();
             void this.loadMessages()
               .then(() => {
-                if (streamingMessage && !this.hasAssistantMessageContent(streamingMessage.content)) {
+                if (
+                  streamingMessage &&
+                  this.hasStreamingAssistantContent(streamingMessage) &&
+                  !this.hasAssistantMessageContent(streamingMessage.content)
+                ) {
                   this.messages.push({
                     ...streamingMessage,
                     streaming: false,
@@ -764,17 +768,22 @@ export const useWorkspaceStore = defineStore('workspace', {
                   });
                 }
                 this.streamingAssistantId = null;
-                this.agentActivity = null;
+                if (this.agentActivity?.status !== 'failed') {
+                  this.agentActivity = null;
+                }
               })
               .catch(() => {
                 if (
                   streamingMessage &&
+                  this.hasStreamingAssistantContent(streamingMessage) &&
                   !this.messages.some((message) => message.id === streamingMessage.id)
                 ) {
                   this.messages.push(streamingMessage);
                 }
                 this.streamingAssistantId = null;
-                this.agentActivity = null;
+                if (this.agentActivity?.status !== 'failed') {
+                  this.agentActivity = null;
+                }
               });
           }
         });
@@ -803,6 +812,10 @@ export const useWorkspaceStore = defineStore('workspace', {
         this.agentActivity = normalizeAgentActivity(data, this.agentActivity);
         return;
       }
+      if (status === 'responding') {
+        this.agentActivity = normalizeAgentActivity(data, this.agentActivity);
+        return;
+      }
       if (status === 'using_tools') {
         this.agentActivity = normalizeAgentActivity(data, this.agentActivity);
         return;
@@ -820,10 +833,16 @@ export const useWorkspaceStore = defineStore('workspace', {
       }
     },
     handleTokenEvent(data: SsePayload) {
-      this.agentActivity = null;
       const content = typeof data.content === 'string' ? data.content : undefined;
       const delta = typeof data.delta === 'string' ? data.delta : '';
       if (content === undefined && !delta) return;
+      if (content === '' && !delta) {
+        this.clearStreamingAssistant();
+        return;
+      }
+      if (this.agentActivity?.activity !== 'stream_fallback') {
+        this.agentActivity = { status: 'responding' };
+      }
 
       const existing = this.streamingAssistantId
         ? this.messages.find((message) => message.id === this.streamingAssistantId)
@@ -905,6 +924,9 @@ export const useWorkspaceStore = defineStore('workspace', {
       if (!this.streamingAssistantId) return null;
       return this.messages.find((message) => message.id === this.streamingAssistantId) ?? null;
     },
+    hasStreamingAssistantContent(message: Message | null) {
+      return Boolean(message?.content.trim());
+    },
     hasAssistantMessageContent(content: string) {
       return this.messages.some(
         (message) => message.role === 'assistant' && !message.streaming && message.content === content,
@@ -922,6 +944,12 @@ export const useWorkspaceStore = defineStore('workspace', {
       streamingMessage.content = content;
       streamingMessage.streaming = false;
       streamingMessage.metadata = {};
+    },
+    clearStreamingAssistant() {
+      if (!this.streamingAssistantId) return;
+      const streamingAssistantId = this.streamingAssistantId;
+      this.messages = this.messages.filter((message) => message.id !== streamingAssistantId);
+      this.streamingAssistantId = null;
     },
     disconnectEvents() {
       if (this.eventSource) {
@@ -994,7 +1022,13 @@ function normalizeAgentActivity(value: unknown, previous: AgentActivity | null):
 }
 
 function isAgentActivityStatus(value: string): value is AgentActivityStatus {
-  return value === 'thinking' || value === 'using_tools' || value === 'waiting_for_approval' || value === 'failed';
+  return (
+    value === 'thinking' ||
+    value === 'responding' ||
+    value === 'using_tools' ||
+    value === 'waiting_for_approval' ||
+    value === 'failed'
+  );
 }
 
 function inferEventToolName(type: string, data: SsePayload, previous: AgentActivity | null): string | undefined {

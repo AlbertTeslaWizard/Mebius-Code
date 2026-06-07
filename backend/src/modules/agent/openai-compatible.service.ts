@@ -36,6 +36,17 @@ interface ChatInput {
   temperature?: number;
 }
 
+export type ModelStreamFallbackReason = 'stream_rejected' | 'missing_body' | 'interrupted' | 'timeout';
+
+export interface ModelStreamFallbackEvent {
+  reason: ModelStreamFallbackReason;
+}
+
+export interface StreamChatOptions {
+  idleTimeoutMs?: number;
+  onStreamFallback?: (event: ModelStreamFallbackEvent) => void;
+}
+
 interface StreamToolCallDelta {
   index?: number;
   id?: string;
@@ -44,6 +55,15 @@ interface StreamToolCallDelta {
     name?: string;
     arguments?: string;
   };
+}
+
+const MODEL_STREAM_IDLE_TIMEOUT_MS = 60_000;
+
+class ModelStreamTimeoutError extends Error {
+  constructor() {
+    super('Model stream timed out. Please retry.');
+    this.name = 'ModelStreamTimeoutError';
+  }
 }
 
 @Injectable()
@@ -77,6 +97,7 @@ export class OpenAiCompatibleService {
   async streamChat(
     input: ChatInput,
     onToken: (event: LlmTokenEvent) => void,
+    options: StreamChatOptions = {},
   ): Promise<LlmAssistantMessage> {
     const response = await fetch(`${input.config.baseUrl}/chat/completions`, {
       method: 'POST',
@@ -91,23 +112,40 @@ export class OpenAiCompatibleService {
 
     if (!response.ok) {
       if ([400, 404, 422].includes(response.status)) {
-        return this.chatWithTokenFallback(input, onToken);
+        return this.chatWithTokenFallback(input, onToken, options, 'stream_rejected');
       }
       throw new BadGatewayException(await this.readErrorResponse(response));
     }
 
     if (!response.body) {
-      return this.chatWithTokenFallback(input, onToken);
+      return this.chatWithTokenFallback(input, onToken, options, 'missing_body');
     }
 
-    return this.parseStream(response.body, onToken);
+    try {
+      return await this.parseStream(
+        response.body,
+        onToken,
+        options.idleTimeoutMs ?? MODEL_STREAM_IDLE_TIMEOUT_MS,
+      );
+    } catch (error) {
+      const interrupted = this.modelStreamInterrupted(error);
+      const reason = interrupted.message.includes('timed out') ? 'timeout' : 'interrupted';
+      return this.chatWithTokenFallback(input, onToken, options, reason, true);
+    }
   }
 
   private async chatWithTokenFallback(
     input: ChatInput,
     onToken: (event: LlmTokenEvent) => void,
+    options: StreamChatOptions = {},
+    reason: ModelStreamFallbackReason,
+    resetStreamingContent = false,
   ): Promise<LlmAssistantMessage> {
+    options.onStreamFallback?.({ reason });
     const message = await this.chat(input);
+    if (resetStreamingContent) {
+      onToken({ delta: '', content: '' });
+    }
     if (message.content) {
       onToken({ delta: message.content, content: message.content });
     }
@@ -127,6 +165,7 @@ export class OpenAiCompatibleService {
   private async parseStream(
     body: ReadableStream<Uint8Array>,
     onToken: (event: LlmTokenEvent) => void,
+    idleTimeoutMs: number,
   ): Promise<LlmAssistantMessage> {
     const reader = body.getReader();
     const decoder = new TextDecoder();
@@ -135,14 +174,34 @@ export class OpenAiCompatibleService {
     let content = '';
     let reasoningContent = '';
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split(/\r?\n/);
-      buffer = lines.pop() ?? '';
+    try {
+      while (true) {
+        const { done, value } = await this.readStreamChunk(reader, idleTimeoutMs);
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() ?? '';
 
-      for (const line of lines) {
+        for (const line of lines) {
+          const doneReading = this.consumeStreamLine(
+            line,
+            toolCalls,
+            (delta) => {
+              content += delta;
+              onToken({ delta, content });
+            },
+            (delta) => {
+              reasoningContent += delta;
+            },
+          );
+          if (doneReading) {
+            return this.streamResult(content, reasoningContent, toolCalls);
+          }
+        }
+      }
+
+      buffer += decoder.decode();
+      for (const line of buffer.split(/\r?\n/)) {
         const doneReading = this.consumeStreamLine(
           line,
           toolCalls,
@@ -154,29 +213,47 @@ export class OpenAiCompatibleService {
             reasoningContent += delta;
           },
         );
-        if (doneReading) {
-          return this.streamResult(content, reasoningContent, toolCalls);
-        }
+        if (doneReading) break;
       }
-    }
-
-    buffer += decoder.decode();
-    for (const line of buffer.split(/\r?\n/)) {
-      const doneReading = this.consumeStreamLine(
-        line,
-        toolCalls,
-        (delta) => {
-          content += delta;
-          onToken({ delta, content });
-        },
-        (delta) => {
-          reasoningContent += delta;
-        },
-      );
-      if (doneReading) break;
+    } catch (error) {
+      void reader.cancel().catch(() => undefined);
+      throw this.modelStreamInterrupted(error);
     }
 
     return this.streamResult(content, reasoningContent, toolCalls);
+  }
+
+  private async readStreamChunk(
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    idleTimeoutMs: number,
+  ): Promise<ReadableStreamReadResult<Uint8Array>> {
+    if (idleTimeoutMs <= 0) {
+      return reader.read();
+    }
+
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        reader.read(),
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => reject(new ModelStreamTimeoutError()), idleTimeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+    }
+  }
+
+  private modelStreamInterrupted(error: unknown): BadGatewayException {
+    if (error instanceof BadGatewayException) {
+      return error;
+    }
+    if (error instanceof ModelStreamTimeoutError) {
+      return new BadGatewayException(error.message);
+    }
+    return new BadGatewayException('Model stream was interrupted. Please retry.');
   }
 
   private consumeStreamLine(

@@ -371,6 +371,8 @@ const agentActivityText = computed(() => {
     return locale.t('agentRunningCommand', { command: truncate(activity.command, 64) });
   }
   if (activity.status === 'thinking') return locale.t('agentThinking');
+  if (activity.activity === 'stream_fallback') return locale.t('agentStreamFallback');
+  if (activity.status === 'responding') return locale.t('agentResponding');
   if (activity.status === 'using_tools') {
     return activity.toolName
       ? locale.t('agentUsingTool', { tool: activity.toolName })
@@ -394,7 +396,14 @@ const agentActivityIcon = computed(() => {
   return RefreshCw;
 });
 const agentActivitySpins = computed(
-  () => workspace.agentActivity?.status === 'thinking' || !workspace.agentActivity?.toolName,
+  () => {
+    const activity = workspace.agentActivity;
+    return (
+      activity?.status === 'thinking' ||
+      activity?.status === 'responding' ||
+      (activity?.status === 'using_tools' && !activity.toolName)
+    );
+  },
 );
 const agentActivityToneClass = computed(() => {
   if (workspace.agentActivity?.status === 'failed') return 'border-red-200 bg-red-50 text-red-700';
@@ -2104,13 +2113,18 @@ function truncate(value: string, maxLength: number) {
 
               <div
                 v-if="agentActivityText"
-                class="mb-3 flex items-center gap-2 rounded border p-3 text-sm"
+                class="mb-3 rounded border p-3"
                 :class="agentActivityToneClass"
+                role="status"
+                aria-live="polite"
               >
-                <n-icon class="shrink-0" :class="{ 'animate-spin': agentActivitySpins }">
-                  <component :is="agentActivityIcon" />
-                </n-icon>
-                <span>{{ agentActivityText }}</span>
+                <div class="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide">
+                  <n-icon class="shrink-0" :class="{ 'animate-spin': agentActivitySpins }">
+                    <component :is="agentActivityIcon" />
+                  </n-icon>
+                  <span>{{ locale.t('agentStatusLabel') }}</span>
+                </div>
+                <p class="m-0 text-sm leading-6">{{ agentActivityText }}</p>
               </div>
 
             </div>

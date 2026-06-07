@@ -1,3 +1,4 @@
+import { BadGatewayException } from '@nestjs/common';
 import { Repository } from 'typeorm';
 import { MessageRole } from '../../common/enums/message-role.enum';
 import { ApprovalStatus, ToolCallStatus } from '../../common/enums/tool-status.enum';
@@ -182,6 +183,52 @@ describe('AgentService', () => {
     expect(JSON.stringify(diagnosticEvents)).not.toContain('sk-test');
   });
 
+  it('publishes a responding status when the model call falls back from streaming', async () => {
+    llm.streamChat.mockImplementationOnce(async (_input, _onToken, options) => {
+      options?.onStreamFallback?.({ reason: 'interrupted' });
+      return { content: 'Recovered with non-streaming chat' };
+    });
+
+    await service.run(owner, session.id, { message: 'Write a file' });
+
+    expect(events.publish).toHaveBeenCalledWith(session.id, 'agent_status', {
+      status: 'responding',
+      activity: 'stream_fallback',
+      reason: 'interrupted',
+    });
+    expect(sessions.addMessage).toHaveBeenLastCalledWith(
+      session,
+      'assistant',
+      'Recovered with non-streaming chat',
+      {},
+    );
+  });
+
+  it('publishes failed status and completes the event stream when the model stream is interrupted', async () => {
+    llm.streamChat.mockRejectedValueOnce(
+      new BadGatewayException('Model stream was interrupted. Please retry.'),
+    );
+
+    await expect(service.run(owner, session.id, { message: 'Write a file' })).rejects.toThrow(
+      'Model stream was interrupted. Please retry.',
+    );
+
+    expect(events.publish).toHaveBeenCalledWith(
+      session.id,
+      'model_call_failed',
+      expect.objectContaining({
+        mode: 'chat',
+        turn: 0,
+        message: 'Model stream was interrupted. Please retry.',
+      }),
+    );
+    expect(events.publish).toHaveBeenCalledWith(session.id, 'agent_status', {
+      status: 'failed',
+      message: 'Model stream was interrupted. Please retry.',
+    });
+    expect(events.complete).toHaveBeenCalledWith(session.id);
+  });
+
   it('stops visibly when a tool call requires approval', async () => {
     const assistantToolTurnMessage = messageFixture(
       'message-assistant-tool-turn',
@@ -356,6 +403,45 @@ describe('AgentService', () => {
       {},
     );
     expect(events.publish).toHaveBeenCalledWith(session.id, 'agent_status', { status: 'completed' });
+    expect(events.complete).toHaveBeenCalledWith(session.id);
+  });
+
+  it('publishes failed status when the resumed model turn is interrupted', async () => {
+    llm.streamChat.mockRejectedValueOnce(
+      new BadGatewayException('Model stream was interrupted. Please retry.'),
+    );
+    const approvedToolCall = toolCallFixture({
+      id: 'tool-approved',
+      name: 'create_patch',
+      status: ToolCallStatus.Succeeded,
+      resultText: 'Patch applied to demo.py.',
+    });
+    approvedToolCall.session = session;
+    const resumeContext: PendingToolResumeContext = {
+      assistantContent: '',
+      assistantReasoningContent: 'Need to create the file before summarizing.',
+      assistantToolCalls: [
+        {
+          id: 'call-patch',
+          type: 'function',
+          function: {
+            name: 'create_patch',
+            arguments: '{"path":"demo.py","content":"print(1)"}',
+          },
+        },
+      ],
+      priorToolMessages: [],
+      approvedToolCallId: 'call-patch',
+    };
+
+    await expect(service.resumeAfterToolApproval(owner, approvedToolCall, resumeContext)).rejects.toThrow(
+      'Model stream was interrupted. Please retry.',
+    );
+
+    expect(events.publish).toHaveBeenCalledWith(session.id, 'agent_status', {
+      status: 'failed',
+      message: 'Model stream was interrupted. Please retry.',
+    });
     expect(events.complete).toHaveBeenCalledWith(session.id);
   });
 

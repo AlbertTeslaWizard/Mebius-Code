@@ -241,7 +241,17 @@ export class AgentService {
       });
     }
 
-    await this.continueRun(owner, session, config, messages, [approvedToolCall], 'using_tools');
+    try {
+      await this.continueRun(owner, session, config, messages, [approvedToolCall], 'using_tools');
+    } catch (error) {
+      await this.markLatestRunningPlanFailed(session.id);
+      this.events.publish(session.id, 'agent_status', {
+        status: 'failed',
+        message: error instanceof Error ? error.message : 'Agent run failed.',
+      });
+      this.events.complete(session.id);
+      throw error;
+    }
   }
 
   private async continueRun(
@@ -276,6 +286,15 @@ export class AgentService {
             },
             ({ delta, content }) => {
               this.events.publish(session.id, 'token', { delta, content });
+            },
+            {
+              onStreamFallback: ({ reason }) => {
+                this.events.publish(session.id, 'agent_status', {
+                  status: 'responding',
+                  activity: 'stream_fallback',
+                  reason,
+                });
+              },
             },
           ),
       );

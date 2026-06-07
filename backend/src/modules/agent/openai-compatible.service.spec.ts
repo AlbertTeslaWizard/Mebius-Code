@@ -165,6 +165,125 @@ describe('OpenAiCompatibleService', () => {
       'Model provider returned invalid JSON. not json',
     );
   });
+
+  it('falls back to non-streaming chat when a streamed response is interrupted', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        body: interruptedStream(new TypeError('terminated')),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        text: () =>
+          Promise.resolve(
+            JSON.stringify({
+              choices: [{ message: { content: 'fallback after interrupt' } }],
+            }),
+          ),
+      });
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const onToken = jest.fn();
+    const onStreamFallback = jest.fn();
+
+    const result = await service.streamChat(baseInput(), onToken, { onStreamFallback });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(onStreamFallback).toHaveBeenCalledWith({ reason: 'interrupted' });
+    expect(onToken).toHaveBeenCalledWith({ delta: '', content: '' });
+    expect(onToken).toHaveBeenCalledWith({
+      delta: 'fallback after interrupt',
+      content: 'fallback after interrupt',
+    });
+    expect(result).toEqual({ content: 'fallback after interrupt' });
+  });
+
+  it('clears partial streamed text when fallback returns only tool calls', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        body: streamFromThenError(
+          ['data: {"choices":[{"delta":{"content":"I will write the file now."}}]}\n\n'],
+          new TypeError('terminated'),
+        ),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        text: () =>
+          Promise.resolve(
+            JSON.stringify({
+              choices: [
+                {
+                  message: {
+                    tool_calls: [
+                      {
+                        id: 'call-1',
+                        type: 'function',
+                        function: {
+                          name: 'create_patch',
+                          arguments: '{"path":"demo.py","content":"print(1)"}',
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            }),
+          ),
+      });
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const onToken = jest.fn();
+
+    const result = await service.streamChat(baseInput(), onToken);
+
+    expect(onToken).toHaveBeenNthCalledWith(1, {
+      delta: 'I will write the file now.',
+      content: 'I will write the file now.',
+    });
+    expect(onToken).toHaveBeenNthCalledWith(2, { delta: '', content: '' });
+    expect(result).toEqual({
+      tool_calls: [
+        {
+          id: 'call-1',
+          type: 'function',
+          function: {
+            name: 'create_patch',
+            arguments: '{"path":"demo.py","content":"print(1)"}',
+          },
+        },
+      ],
+    });
+  });
+
+  it('falls back to non-streaming chat when a stream stops producing chunks', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        body: stalledStream(),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        text: () =>
+          Promise.resolve(
+            JSON.stringify({
+              choices: [{ message: { content: 'fallback after timeout' } }],
+            }),
+          ),
+      });
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const onStreamFallback = jest.fn();
+
+    const result = await service.streamChat(baseInput(), jest.fn(), {
+      idleTimeoutMs: 1,
+      onStreamFallback,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(onStreamFallback).toHaveBeenCalledWith({ reason: 'timeout' });
+    expect(result).toEqual({ content: 'fallback after timeout' });
+  });
 });
 
 function baseInput(): Parameters<OpenAiCompatibleService['chat']>[0] {
@@ -186,6 +305,37 @@ function streamFrom(chunks: string[]): ReadableStream<Uint8Array> {
       const encoder = new TextEncoder();
       chunks.forEach((chunk) => controller.enqueue(encoder.encode(chunk)));
       controller.close();
+    },
+  });
+}
+
+function interruptedStream(error: Error): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    pull() {
+      throw error;
+    },
+  });
+}
+
+function streamFromThenError(chunks: string[], error: Error): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  let index = 0;
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (index < chunks.length) {
+        controller.enqueue(encoder.encode(chunks[index]));
+        index += 1;
+        return;
+      }
+      throw error;
+    },
+  });
+}
+
+function stalledStream(): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    pull() {
+      return new Promise<void>(() => undefined);
     },
   });
 }
