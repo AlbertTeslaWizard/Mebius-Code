@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
 import { apiUrl, getAccessToken, jsonBody, request } from '../api/http';
 import type {
+  CommandAuthorization,
   CommandRunView,
   ConnectResult,
   DeleteProjectFileResult,
@@ -66,6 +67,8 @@ interface WorkspaceState {
   commandRuns: CommandRunView[];
   allowedCommands: string[];
   allowedCommandsLoading: boolean;
+  commandAuthorization: CommandAuthorization | null;
+  commandAuthorizationLoading: boolean;
   loading: boolean;
   eventStatus: 'idle' | 'connecting' | 'open' | 'closed';
   eventSource: EventSource | null;
@@ -97,6 +100,8 @@ export const useWorkspaceStore = defineStore('workspace', {
     commandRuns: [],
     allowedCommands: [],
     allowedCommandsLoading: false,
+    commandAuthorization: null,
+    commandAuthorizationLoading: false,
     loading: false,
     eventStatus: 'idle',
     eventSource: null,
@@ -151,6 +156,8 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.commandRuns = [];
       this.allowedCommands = [];
       this.allowedCommandsLoading = false;
+      this.commandAuthorization = null;
+      this.commandAuthorizationLoading = false;
       this.streamingAssistantId = null;
       this.agentActivity = null;
       this.gitStatus = null;
@@ -231,6 +238,8 @@ export const useWorkspaceStore = defineStore('workspace', {
         this.commandRuns = [];
         this.allowedCommands = [];
         this.allowedCommandsLoading = false;
+        this.commandAuthorization = null;
+        this.commandAuthorizationLoading = false;
         this.streamingAssistantId = null;
         this.agentActivity = null;
         this.disconnectEvents();
@@ -408,6 +417,8 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.commandRuns = [];
       this.allowedCommands = [];
       this.allowedCommandsLoading = false;
+      this.commandAuthorization = null;
+      this.commandAuthorizationLoading = false;
       this.streamingAssistantId = null;
       this.agentActivity = null;
 
@@ -546,6 +557,30 @@ export const useWorkspaceStore = defineStore('workspace', {
         this.allowedCommandsLoading = false;
       }
     },
+    async loadCommandAuthorization() {
+      if (!this.currentSession) {
+        this.commandAuthorization = null;
+        this.commandAuthorizationLoading = false;
+        return null;
+      }
+      this.commandAuthorizationLoading = true;
+      try {
+        this.commandAuthorization = await request<CommandAuthorization>(
+          `/sessions/${this.currentSession.id}/command-authorization`,
+        );
+        return this.commandAuthorization;
+      } finally {
+        this.commandAuthorizationLoading = false;
+      }
+    },
+    async revokeCommandAuthorization() {
+      if (!this.currentSession) return null;
+      this.commandAuthorization = await request<CommandAuthorization>(
+        `/sessions/${this.currentSession.id}/command-authorization`,
+        { method: 'DELETE' },
+      );
+      return this.commandAuthorization;
+    },
     async requestCommand(input: { command: string; cwd?: string }) {
       if (!this.currentSession) return null;
       const toolCall = await request<{ id: string; status: string }>(
@@ -563,7 +598,13 @@ export const useWorkspaceStore = defineStore('workspace', {
       await Promise.all([this.loadPatches(), this.loadTree(), this.loadGitStatus()]);
     },
     async refreshReviewData() {
-      await Promise.all([this.loadLatestPlan(), this.loadPatches(), this.loadCommandRuns(), this.loadAllowedCommands()]);
+      await Promise.all([
+        this.loadLatestPlan(),
+        this.loadPatches(),
+        this.loadCommandRuns(),
+        this.loadAllowedCommands(),
+        this.loadCommandAuthorization(),
+      ]);
     },
     async loadTree(path = '.', depth = 3) {
       if (!this.currentProject) return;

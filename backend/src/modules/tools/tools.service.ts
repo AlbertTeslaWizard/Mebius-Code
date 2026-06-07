@@ -12,22 +12,28 @@ import {
   ToolCallStatus,
 } from '../../common/enums/tool-status.enum';
 import { UserRole } from '../../common/enums/user-role.enum';
-import { CommandPolicyService } from '../../common/security/command-policy.service';
+import { CommandInspection, CommandPolicyService } from '../../common/security/command-policy.service';
 import { PathSandboxService } from '../../common/security/path-sandbox.service';
 import { AuditService } from '../audit/audit.service';
 import { PendingToolResumeContext } from '../agent/agent-resume.types';
 import { AgentService } from '../agent/agent.service';
 import { EventsService } from '../events/events.service';
 import { Project } from '../projects/project.entity';
+import { Session } from '../sessions/session.entity';
 import { SessionsService } from '../sessions/sessions.service';
 import { User } from '../users/user.entity';
 import { CommandRun } from './command-run.entity';
 import { FilePatch } from './file-patch.entity';
+import {
+  SESSION_SHELL_AUTORUN_GRANT,
+  SessionCommandGrant,
+} from './session-command-grant.entity';
 import { ToolApproval } from './tool-approval.entity';
 import { ToolCall } from './tool-call.entity';
 
-const APPROVAL_REQUIRED_TOOLS = new Set(['create_patch', 'run_command']);
+const APPROVAL_REQUIRED_TOOLS = new Set(['create_patch']);
 const DIFF_PREVIEW_LIMIT = 20_000;
+type ApprovalMode = 'once' | 'project' | 'session_auto';
 
 type ApprovalPreview =
   | {
@@ -52,12 +58,23 @@ type ApprovalPreview =
       cwd?: string;
       policyAllowed: boolean;
       policySource?: 'environment' | 'preset' | 'custom' | 'project';
+      executionMode: CommandInspection['executionMode'];
+      shellTokens: string[];
+      sessionAutoRunActive: boolean;
+      canGrantSessionAutoRun: boolean;
       truncated: false;
     };
 
 type PendingApprovalResponse = ToolApproval & {
   preview?: ApprovalPreview;
 };
+
+export interface CommandAuthorizationView {
+  shellAutoRun: boolean;
+  canGrantShellAutoRun: boolean;
+  grantedAt?: Date;
+  grantedById?: string;
+}
 
 interface PatchInputFile {
   path: string;
@@ -77,6 +94,8 @@ export class ToolsService {
     private readonly patches: Repository<FilePatch>,
     @InjectRepository(CommandRun)
     private readonly commandRuns: Repository<CommandRun>,
+    @InjectRepository(SessionCommandGrant)
+    private readonly sessionCommandGrants: Repository<SessionCommandGrant>,
     private readonly sessions: SessionsService,
     private readonly paths: PathSandboxService,
     private readonly commandPolicy: CommandPolicyService,
@@ -94,19 +113,16 @@ export class ToolsService {
     resumeContext?: PendingToolResumeContext;
   }): Promise<ToolCall> {
     const session = await this.sessions.findOwned(input.owner.id, input.sessionId);
+    let commandAuthorized = false;
     if (input.name === 'run_command') {
       if (typeof input.args.command !== 'string') {
         throw new BadRequestException('run_command requires command.');
       }
       const project = session.project as Project;
-      const inspection = await this.commandPolicy.inspect(input.args.command, project.id);
-      if (!inspection.allowed && input.owner.role !== UserRole.Admin) {
-        throw new BadRequestException(
-          'Command is not enabled for this project. Ask an administrator to enable a command preset.',
-        );
-      }
+      await this.commandPolicy.inspect(input.args.command, project.id);
+      commandAuthorized = await this.hasSessionShellAutoRunGrant(session.id);
     }
-    const requiresApproval = APPROVAL_REQUIRED_TOOLS.has(input.name);
+    const requiresApproval = input.name === 'run_command' ? !commandAuthorized : APPROVAL_REQUIRED_TOOLS.has(input.name);
     const toolCall = await this.toolCalls.save(
       this.toolCalls.create({
         session,
@@ -145,7 +161,9 @@ export class ToolsService {
       return toolCall;
     }
 
-    const result = await this.executeTool(toolCall, input.owner);
+    const result = await this.executeTool(toolCall, input.owner, {
+      commandAuthorized,
+    });
     toolCall.status = ToolCallStatus.Succeeded;
     toolCall.resultText = result;
     const saved = await this.toolCalls.save(toolCall);
@@ -238,11 +256,33 @@ export class ToolsService {
     return this.listAllowedCommands(project.id);
   }
 
-  async approve(owner: User, approvalId: string, mode: 'once' | 'project' = 'once'): Promise<ToolCall> {
+  async getSessionCommandAuthorization(ownerId: string, sessionId: string): Promise<CommandAuthorizationView> {
+    const session = await this.sessions.findOwned(ownerId, sessionId);
+    return this.buildSessionCommandAuthorizationView(session.id);
+  }
+
+  async revokeSessionCommandAuthorization(owner: User, sessionId: string): Promise<CommandAuthorizationView> {
+    const session = await this.sessions.findOwned(owner.id, sessionId);
+    const grant = await this.findSessionShellAutoRunGrant(session.id);
+    if (grant) {
+      await this.sessionCommandGrants.remove(grant);
+      await this.audit.record({
+        actor: owner,
+        action: 'command_policy.session_shell_autorun_revoked',
+        resourceType: 'session',
+        resourceId: session.id,
+        metadata: {},
+      });
+    }
+    return this.buildSessionCommandAuthorizationView(session.id);
+  }
+
+  async approve(owner: User, approvalId: string, mode: ApprovalMode = 'once'): Promise<ToolCall> {
     const approval = await this.findPendingApproval(owner.id, approvalId);
     const toolCall = approval.toolCall;
     const resumeContext = this.decodeResumeContext(toolCall.resultText);
     let projectCommandToRemember: { project: Project; command: string; normalized: string } | null = null;
+    let sessionAutoRunGrantCreated = false;
     if (toolCall.name === 'run_command') {
       const project = toolCall.session.project as Project;
       const command = toolCall.arguments.command;
@@ -250,11 +290,27 @@ export class ToolsService {
         throw new BadRequestException('run_command requires command.');
       }
       const inspection = await this.commandPolicy.inspect(command, project.id);
-      if (!inspection.allowed && owner.role !== UserRole.Admin) {
-        throw new BadRequestException('Only administrators can authorize a command outside the enabled policy.');
-      }
       if (mode === 'project') {
+        if (inspection.executionMode === 'shell') {
+          throw new BadRequestException('Shell commands cannot be enabled for a project.');
+        }
+        if (!inspection.allowed && owner.role !== UserRole.Admin) {
+          throw new BadRequestException('Only administrators can authorize a command outside the enabled policy.');
+        }
         projectCommandToRemember = { project, command, normalized: inspection.normalized };
+      }
+      if (mode === 'session_auto') {
+        await this.sessions.findOwned(owner.id, toolCall.session.id);
+        sessionAutoRunGrantCreated = await this.ensureSessionShellAutoRunGrant(toolCall.session, owner);
+        if (sessionAutoRunGrantCreated) {
+          await this.audit.record({
+            actor: owner,
+            action: 'command_policy.session_shell_autorun_granted',
+            resourceType: 'session',
+            resourceId: toolCall.session.id,
+            metadata: { command },
+          });
+        }
       }
     }
     approval.status = ApprovalStatus.Approved;
@@ -589,7 +645,10 @@ export class ToolsService {
     );
     this.events.publish(toolCall.session.id, 'command_started', this.serializeCommandRun(run));
 
-    const result = await this.spawnCommand(parsed.command, parsed.args, cwd);
+    const result =
+      parsed.executionMode === 'shell'
+        ? await this.spawnShellCommand(parsed.command, cwd)
+        : await this.spawnCommand(parsed.command, parsed.args, cwd);
     run.exitCode = result.exitCode;
     run.stdout = result.stdout;
     run.stderr = result.stderr;
@@ -643,8 +702,54 @@ export class ToolsService {
             name: run.toolCall.name,
             status: run.toolCall.status,
           }
-        : undefined,
+      : undefined,
     };
+  }
+
+  private async buildSessionCommandAuthorizationView(sessionId: string): Promise<CommandAuthorizationView> {
+    const grant = await this.findSessionShellAutoRunGrant(sessionId);
+    const createdBy = grant?.createdBy as User | undefined;
+    return {
+      shellAutoRun: Boolean(grant),
+      canGrantShellAutoRun: !grant,
+      grantedAt: grant?.createdAt,
+      grantedById: createdBy?.id,
+    };
+  }
+
+  private async findSessionShellAutoRunGrant(sessionId: string): Promise<SessionCommandGrant | null> {
+    return this.sessionCommandGrants.findOne({
+      where: {
+        session: { id: sessionId },
+        grantType: SESSION_SHELL_AUTORUN_GRANT,
+      },
+      relations: { createdBy: true },
+    });
+  }
+
+  private async hasSessionShellAutoRunGrant(sessionId: string): Promise<boolean> {
+    const grant = await this.sessionCommandGrants.findOne({
+      where: {
+        session: { id: sessionId },
+        grantType: SESSION_SHELL_AUTORUN_GRANT,
+      },
+    });
+    return Boolean(grant);
+  }
+
+  private async ensureSessionShellAutoRunGrant(session: Session, owner: User): Promise<boolean> {
+    const existing = await this.findSessionShellAutoRunGrant(session.id);
+    if (existing) {
+      return false;
+    }
+    await this.sessionCommandGrants.save(
+      this.sessionCommandGrants.create({
+        session,
+        createdBy: owner,
+        grantType: SESSION_SHELL_AUTORUN_GRANT,
+      }),
+    );
+    return true;
   }
 
   private buildToolActivityPayload(
@@ -821,12 +926,17 @@ export class ToolsService {
     if (toolCall.name === 'run_command' && typeof toolCall.arguments.command === 'string') {
       const project = toolCall.session.project as Project;
       const inspection = await this.commandPolicy.inspect(toolCall.arguments.command, project.id);
+      const sessionAutoRunActive = await this.hasSessionShellAutoRunGrant(toolCall.session.id);
       return {
         kind: 'command',
         command: toolCall.arguments.command,
         cwd: typeof toolCall.arguments.cwd === 'string' ? toolCall.arguments.cwd : undefined,
         policyAllowed: inspection.allowed,
         policySource: inspection.source,
+        executionMode: inspection.executionMode,
+        shellTokens: inspection.shellTokens,
+        sessionAutoRunActive,
+        canGrantSessionAutoRun: !sessionAutoRunActive,
         truncated: false,
       };
     }
@@ -926,6 +1036,36 @@ export class ToolsService {
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     return new Promise((resolve) => {
       const child = spawn(command, args, { cwd, shell: false });
+      let stdout = '';
+      let stderr = '';
+      const killTimer = setTimeout(() => child.kill(), 30_000);
+      child.stdout.on('data', (chunk: Buffer) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+      child.on('error', (error) => {
+        clearTimeout(killTimer);
+        resolve({ exitCode: 1, stdout, stderr: stderr + error.message });
+      });
+      child.on('close', (code) => {
+        clearTimeout(killTimer);
+        resolve({
+          exitCode: code ?? 1,
+          stdout: stdout.slice(-20_000),
+          stderr: stderr.slice(-20_000),
+        });
+      });
+    });
+  }
+
+  private spawnShellCommand(
+    command: string,
+    cwd: string,
+  ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    return new Promise((resolve) => {
+      const child = spawn(command, [], { cwd, shell: true });
       let stdout = '';
       let stderr = '';
       const killTimer = setTimeout(() => child.kill(), 30_000);

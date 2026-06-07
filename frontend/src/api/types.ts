@@ -204,6 +204,13 @@ export interface CommandRunView {
   };
 }
 
+export interface CommandAuthorization {
+  shellAutoRun: boolean;
+  canGrantShellAutoRun: boolean;
+  grantedAt?: string;
+  grantedById?: string;
+}
+
 export interface CommandPolicyPreset {
   id: string;
   label: string;
@@ -245,6 +252,10 @@ export type ApprovalPreview =
       cwd?: string;
       policyAllowed: boolean;
       policySource?: 'environment' | 'preset' | 'custom' | 'project';
+      executionMode: 'argv' | 'shell';
+      shellTokens: string[];
+      sessionAutoRunActive: boolean;
+      canGrantSessionAutoRun: boolean;
       truncated: false;
     };
 

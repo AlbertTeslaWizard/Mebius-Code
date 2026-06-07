@@ -108,5 +108,5 @@ not embedded in the command string.
 - `create_patch` and `run_command` require approval.
 - `MEBIUS_CODE_COMMAND_ALLOWLIST` remains the immutable environment baseline.
 - Administrators can enable Git, Node.js, and Python presets or add command prefixes through **Settings > Command permissions**.
-- Safe commands outside the active policy are rejected before approval for regular users. Administrators may run one once or enable the exact command for the current project.
-- Shell chaining, redirection, command substitution, and paths outside the project workspace remain blocked.
+- Commands outside the active policy enter approval instead of failing before review. Administrators may enable non-shell commands for the current project.
+- Shell chaining and redirection require explicit review. A project owner can trust the current session for automatic command execution; command substitution and paths outside the project workspace remain blocked.

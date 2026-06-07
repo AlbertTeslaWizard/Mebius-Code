@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Req, UseGuards } from '@nestjs/common';
 import { RequestWithUser } from '../../common/types/request-with-user';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { UsersService } from '../users/users.service';
@@ -53,6 +53,17 @@ export class ToolsReadController {
   @Get('sessions/:sessionId/allowed-commands')
   allowedCommands(@Req() request: RequestWithUser, @Param('sessionId') sessionId: string) {
     return this.tools.listSessionAllowedCommands(request.user.sub, sessionId);
+  }
+
+  @Get('sessions/:sessionId/command-authorization')
+  commandAuthorization(@Req() request: RequestWithUser, @Param('sessionId') sessionId: string) {
+    return this.tools.getSessionCommandAuthorization(request.user.sub, sessionId);
+  }
+
+  @Delete('sessions/:sessionId/command-authorization')
+  async revokeCommandAuthorization(@Req() request: RequestWithUser, @Param('sessionId') sessionId: string) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.tools.revokeSessionCommandAuthorization(owner, sessionId);
   }
 
   @Post('sessions/:sessionId/command-runs')

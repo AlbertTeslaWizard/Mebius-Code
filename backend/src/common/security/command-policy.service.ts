@@ -7,7 +7,8 @@ import { User } from '../../modules/users/user.entity';
 import { CommandPolicyConfig } from './command-policy-config.entity';
 import { ProjectCommandPermission } from './project-command-permission.entity';
 
-const FORBIDDEN_TOKENS = ['&&', '||', ';', '|', '>', '<', '`', '$(', '\n', '\r'];
+const HARD_FORBIDDEN_TOKENS = ['`', '$(', '\n', '\r'];
+const SHELL_TOKENS = ['&&', '||', ';', '|', '>', '<'];
 const GLOBAL_CONFIG_ID = 'global';
 
 export interface CommandPreset {
@@ -59,6 +60,8 @@ export interface CommandInspection {
   args: string[];
   allowed: boolean;
   source?: 'environment' | 'preset' | 'custom' | 'project';
+  executionMode: 'argv' | 'shell';
+  shellTokens: string[];
 }
 
 @Injectable()
@@ -78,6 +81,9 @@ export class CommandPolicyService {
 
   async inspect(command: string, projectId?: string): Promise<CommandInspection> {
     const parsed = this.parseSyntax(command);
+    if (parsed.executionMode === 'shell') {
+      return { ...parsed, allowed: false };
+    }
     const policy = await this.getConfig();
     const presetCommands = COMMAND_PRESETS.filter((preset) => policy.enabledPresets.includes(preset.id)).flatMap(
       (preset) => preset.commands,
@@ -106,19 +112,27 @@ export class CommandPolicyService {
     return { ...parsed, allowed: false };
   }
 
-  async parse(command: string, projectId?: string): Promise<{ command: string; args: string[] }> {
+  async parse(command: string, projectId?: string): Promise<{
+    command: string;
+    args: string[];
+    executionMode: CommandInspection['executionMode'];
+  }> {
     const inspection = await this.inspect(command, projectId);
     if (!inspection.allowed) {
       throw new BadRequestException(
         'Command is not enabled. Ask an administrator to enable a preset or add this command.',
       );
     }
-    return { command: inspection.command, args: inspection.args };
+    return { command: inspection.command, args: inspection.args, executionMode: inspection.executionMode };
   }
 
-  parseAuthorized(command: string): { command: string; args: string[] } {
+  parseAuthorized(command: string): {
+    command: string;
+    args: string[];
+    executionMode: CommandInspection['executionMode'];
+  } {
     const inspection = this.parseSyntax(command);
-    return { command: inspection.command, args: inspection.args };
+    return { command: inspection.command, args: inspection.args, executionMode: inspection.executionMode };
   }
 
   async listAllowedCommands(projectId?: string): Promise<string[]> {
@@ -166,7 +180,7 @@ export class CommandPolicyService {
     }
 
     const customCommands = this.normalizeCommands(input.customCommands);
-    customCommands.forEach((command) => this.parseSyntax(command));
+    customCommands.forEach((command) => this.parsePolicyCommand(command));
     await this.configs.save(
       this.configs.create({
         id: GLOBAL_CONFIG_ID,
@@ -177,7 +191,7 @@ export class CommandPolicyService {
   }
 
   async rememberProjectCommand(project: Project, owner: User, command: string): Promise<void> {
-    const parsed = this.parseSyntax(command);
+    const parsed = this.parsePolicyCommand(command);
     const existing = await this.projectPermissions.findOne({
       where: { project: { id: project.id }, command: parsed.normalized },
     });
@@ -205,14 +219,26 @@ export class CommandPolicyService {
   }
 
   private parseSyntax(command: string): Omit<CommandInspection, 'allowed' | 'source'> {
-    const normalized = command.trim().replace(/\s+/g, ' ');
+    const trimmed = command.trim();
+    const hardForbidden = HARD_FORBIDDEN_TOKENS.find((token) => trimmed.includes(token));
+    if (hardForbidden) {
+      throw new BadRequestException(`Command contains forbidden token: ${hardForbidden}`);
+    }
+
+    const normalized = trimmed.replace(/\s+/g, ' ');
     if (!normalized) {
       throw new BadRequestException('Command cannot be empty.');
     }
 
-    const forbidden = FORBIDDEN_TOKENS.find((token) => normalized.includes(token));
-    if (forbidden) {
-      throw new BadRequestException(`Command contains forbidden token: ${forbidden}`);
+    const shellTokens = this.findShellTokens(normalized);
+    if (shellTokens.length > 0) {
+      return {
+        normalized,
+        command: normalized,
+        args: [],
+        executionMode: 'shell',
+        shellTokens,
+      };
     }
 
     const parts = normalized.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
@@ -220,7 +246,19 @@ export class CommandPolicyService {
     if (!executable) {
       throw new BadRequestException('Command cannot be empty.');
     }
-    return { normalized, command: executable, args };
+    return { normalized, command: executable, args, executionMode: 'argv', shellTokens };
+  }
+
+  private parsePolicyCommand(command: string): Omit<CommandInspection, 'allowed' | 'source'> {
+    const parsed = this.parseSyntax(command);
+    if (parsed.executionMode === 'shell') {
+      throw new BadRequestException('Shell syntax cannot be enabled as a command policy prefix.');
+    }
+    return parsed;
+  }
+
+  private findShellTokens(command: string): string[] {
+    return SHELL_TOKENS.filter((token) => command.includes(token));
   }
 
   private matchesPrefix(command: string, rule: string): boolean {

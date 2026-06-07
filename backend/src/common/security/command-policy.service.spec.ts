@@ -38,6 +38,7 @@ describe('CommandPolicyService', () => {
     await expect(service.parse('npm run build')).resolves.toEqual({
       command: 'npm',
       args: ['run', 'build'],
+      executionMode: 'argv',
     });
   });
 
@@ -61,9 +62,20 @@ describe('CommandPolicyService', () => {
     await expect(service.parse('rm -rf .')).rejects.toThrow(BadRequestException);
   });
 
-  it('rejects command chaining before policy lookup', async () => {
-    await expect(service.inspect('npm test && rm -rf .')).rejects.toThrow(
-      'Command contains forbidden token: &&',
+  it('classifies command chaining as shell execution requiring authorization', async () => {
+    await expect(service.inspect('npm test && npm run build')).resolves.toMatchObject({
+      normalized: 'npm test && npm run build',
+      command: 'npm test && npm run build',
+      args: [],
+      allowed: false,
+      executionMode: 'shell',
+      shellTokens: ['&&'],
+    });
+  });
+
+  it('keeps command substitution blocked as a hard syntax error', async () => {
+    await expect(service.inspect('npm test $(whoami)')).rejects.toThrow(
+      'Command contains forbidden token: $(',
     );
   });
 

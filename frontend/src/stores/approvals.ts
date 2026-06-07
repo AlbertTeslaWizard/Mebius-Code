@@ -22,7 +22,7 @@ export const useApprovalStore = defineStore('approvals', {
         this.loading = false;
       }
     },
-    async approve(id: string, mode: 'once' | 'project' = 'once') {
+    async approve(id: string, mode: 'once' | 'project' | 'session_auto' = 'once') {
       const workspace = useWorkspaceStore();
       await request(`/approvals/${id}/approve`, { method: 'POST', body: jsonBody({ mode }) });
       await this.loadPending();

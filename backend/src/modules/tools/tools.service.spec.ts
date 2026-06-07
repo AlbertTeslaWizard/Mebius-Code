@@ -20,6 +20,7 @@ import { SessionsService } from '../sessions/sessions.service';
 import { User } from '../users/user.entity';
 import { CommandRun } from './command-run.entity';
 import { FilePatch } from './file-patch.entity';
+import { SessionCommandGrant } from './session-command-grant.entity';
 import { ToolApproval } from './tool-approval.entity';
 import { ToolCall } from './tool-call.entity';
 import { ToolsService } from './tools.service';
@@ -78,6 +79,12 @@ describe('ToolsService', () => {
     find: jest.fn(),
     save: jest.fn(async (value) => value),
   } as unknown as jest.Mocked<Repository<CommandRun>>;
+  const sessionCommandGrants = {
+    create: jest.fn((value) => value),
+    findOne: jest.fn(),
+    remove: jest.fn(async (value) => value),
+    save: jest.fn(async (value) => value),
+  } as unknown as jest.Mocked<Repository<SessionCommandGrant>>;
   const sessions = {
     findOwned: jest.fn(),
   } as unknown as jest.Mocked<SessionsService>;
@@ -109,6 +116,7 @@ describe('ToolsService', () => {
     approvals,
     patches,
     commandRuns,
+    sessionCommandGrants,
     sessions,
     paths,
     commandPolicy,
@@ -145,10 +153,13 @@ describe('ToolsService', () => {
       args: ['test'],
       allowed: true,
       source: 'environment',
+      executionMode: 'argv',
+      shellTokens: [],
     });
-    commandPolicy.parse.mockResolvedValue({ command: 'npm', args: ['test'] });
-    commandPolicy.parseAuthorized.mockReturnValue({ command: 'npm', args: ['test'] });
+    commandPolicy.parse.mockResolvedValue({ command: 'npm', args: ['test'], executionMode: 'argv' });
+    commandPolicy.parseAuthorized.mockReturnValue({ command: 'npm', args: ['test'], executionMode: 'argv' });
     commandPolicy.listAllowedCommands.mockResolvedValue(['npm test']);
+    sessionCommandGrants.findOne.mockResolvedValue(null);
     commandRuns.save.mockImplementation(async (value: any) => ({
       id: 'run-1',
       stdout: '',
@@ -191,22 +202,33 @@ describe('ToolsService', () => {
     );
   });
 
-  it('rejects a non-enabled command before creating an approval for a regular user', async () => {
+  it('creates an approval for a non-enabled command instead of failing before review', async () => {
     commandPolicy.inspect.mockResolvedValueOnce({
       normalized: 'python --version',
       command: 'python',
       args: ['--version'],
       allowed: false,
+      executionMode: 'argv',
+      shellTokens: [],
     });
 
-    await expect(
-      service.requestOrExecute({
-        owner: { ...owner, role: UserRole.User },
-        sessionId: session.id,
+    const result = await service.requestOrExecute({
+      owner: { ...owner, role: UserRole.User },
+      sessionId: session.id,
+      name: 'run_command',
+      args: { command: 'python --version' },
+    });
+
+    expect(result.status).toBe(ToolCallStatus.PendingApproval);
+    expect(approvals.save).toHaveBeenCalled();
+    expect(events.publish).toHaveBeenCalledWith(
+      session.id,
+      'tool_call_requested',
+      expect.objectContaining({
         name: 'run_command',
-        args: { command: 'python --version' },
+        command: 'python --version',
       }),
-    ).rejects.toThrow('Command is not enabled for this project');
+    );
   });
 
   it('remembers an administrator-authorized command only after successful execution', async () => {
@@ -228,6 +250,8 @@ describe('ToolsService', () => {
       command: 'python',
       args: ['--version'],
       allowed: false,
+      executionMode: 'argv',
+      shellTokens: [],
     });
     jest.spyOn(service as any, 'executeTool').mockResolvedValueOnce('Command exited with 0.');
 
@@ -239,6 +263,72 @@ describe('ToolsService', () => {
       session.project,
       admin,
       'python --version',
+    );
+  });
+
+  it('grants session command auto-run when approving with session_auto', async () => {
+    const commandToolCall = {
+      id: 'tool-command-approval',
+      session,
+      name: 'run_command',
+      arguments: { command: 'npm test && npm run build' },
+      requiresApproval: true,
+      status: ToolCallStatus.PendingApproval,
+    } as unknown as ToolCall;
+    approvals.findOne.mockResolvedValueOnce({
+      id: 'approval-command',
+      status: ApprovalStatus.Pending,
+      toolCall: commandToolCall,
+    } as ToolApproval);
+    commandPolicy.inspect.mockResolvedValueOnce({
+      normalized: 'npm test && npm run build',
+      command: 'npm test && npm run build',
+      args: [],
+      allowed: false,
+      executionMode: 'shell',
+      shellTokens: ['&&'],
+    });
+    jest.spyOn(service as any, 'executeTool').mockResolvedValueOnce('Command exited with 0.');
+
+    const result = await service.approve(owner, 'approval-command', 'session_auto');
+
+    expect(result.status).toBe(ToolCallStatus.Succeeded);
+    expect(sessionCommandGrants.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        session,
+        createdBy: owner,
+        grantType: 'shell_autorun',
+      }),
+    );
+    expect(audit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'command_policy.session_shell_autorun_granted',
+        resourceType: 'session',
+        resourceId: session.id,
+      }),
+    );
+  });
+
+  it('auto-executes run_command when the session has a shell autorun grant', async () => {
+    sessionCommandGrants.findOne.mockResolvedValue({
+      id: 'grant-1',
+      grantType: 'shell_autorun',
+    } as SessionCommandGrant);
+    jest.spyOn(service as any, 'executeTool').mockResolvedValueOnce('Command exited with 0.');
+
+    const result = await service.requestOrExecute({
+      owner,
+      sessionId: session.id,
+      name: 'run_command',
+      args: { command: 'npm test && npm run build' },
+    });
+
+    expect(result.status).toBe(ToolCallStatus.Succeeded);
+    expect(approvals.save).not.toHaveBeenCalled();
+    expect((service as any).executeTool).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'run_command' }),
+      owner,
+      { commandAuthorized: true },
     );
   });
 
@@ -407,6 +497,28 @@ describe('ToolsService', () => {
         stdout: 'passed',
       }),
     );
+  });
+
+  it('uses shell execution for authorized shell commands', async () => {
+    commandPolicy.parseAuthorized.mockReturnValueOnce({
+      command: 'npm test && npm run build',
+      args: [],
+      executionMode: 'shell',
+    });
+    jest
+      .spyOn(service as any, 'spawnShellCommand')
+      .mockResolvedValue({ exitCode: 0, stdout: 'passed', stderr: '' });
+    const toolCall = {
+      id: 'tool-command',
+      session,
+      name: 'run_command',
+      arguments: { command: 'npm test && npm run build' },
+    } as unknown as ToolCall;
+
+    const result = await (service as any).runCommand(toolCall, owner, session.project, toolCall.arguments, true);
+
+    expect(result).toContain('Command exited with 0');
+    expect((service as any).spawnShellCommand).toHaveBeenCalledWith('npm test && npm run build', 'D:/workspace');
   });
 
   it('applies a multi-file patch set after validating snapshots', async () => {

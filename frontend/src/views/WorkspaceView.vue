@@ -175,6 +175,7 @@ const commandOptions = computed(() =>
     value: command,
   })),
 );
+const hasSessionCommandAutoRun = computed(() => workspace.commandAuthorization?.shellAutoRun === true);
 const commandDirectoryOptions = computed(() => [
   { label: locale.t('commandCwdRoot'), value: '' },
   ...collectDirectoryOptions(workspace.fileTree),
@@ -184,10 +185,15 @@ const canSubmitManualCommand = computed(
     Boolean(workspace.currentSession) &&
     Boolean(manualCommand.value.trim()) &&
     !busy.value &&
-    !workspace.allowedCommandsLoading,
+    !workspace.allowedCommandsLoading &&
+    !workspace.commandAuthorizationLoading,
 );
 const showNoAllowedCommands = computed(
-  () => Boolean(workspace.currentSession) && !workspace.allowedCommandsLoading && workspace.allowedCommands.length === 0,
+  () =>
+    Boolean(workspace.currentSession) &&
+    !hasSessionCommandAutoRun.value &&
+    !workspace.allowedCommandsLoading &&
+    workspace.allowedCommands.length === 0,
 );
 const noAllowedCommandsHint = computed(() =>
   auth.user?.role === 'admin' ? locale.t('noAllowedCommandsAdmin') : locale.t('noAllowedCommandsUser'),
@@ -518,6 +524,7 @@ watch(
 watch(
   () => workspace.allowedCommands,
   (commands) => {
+    if (hasSessionCommandAutoRun.value) return;
     if (manualCommand.value && !commands.includes(manualCommand.value)) {
       manualCommand.value = '';
     }
@@ -1083,13 +1090,20 @@ async function submitManualCommand() {
   const command = manualCommand.value.trim();
   if (!command || !canSubmitManualCommand.value) return;
   await runTask(async () => {
-    await workspace.requestCommand({
+    const result = await workspace.requestCommand({
       command,
       ...(manualCommandCwd.value.trim() ? { cwd: manualCommandCwd.value.trim() } : {}),
     });
     manualCommand.value = '';
     await approvals.loadPending();
-    activeWorkbenchTab.value = 'review';
+    activeWorkbenchTab.value = result?.status === 'pending_approval' ? 'review' : 'runs';
+  });
+}
+
+async function revokeCommandAuthorization() {
+  await runTask(async () => {
+    await workspace.revokeCommandAuthorization();
+    await workspace.refreshReviewData();
   });
 }
 
@@ -1474,6 +1488,42 @@ function isPatchApproval(approval: Approval) {
 
 function approvalApproveLabel(approval: Approval) {
   return isPatchApproval(approval) ? locale.t('applyPatchApproval') : locale.t('approve');
+}
+
+function canEnableProjectCommand(approval: Approval) {
+  return (
+    approval.toolCall.name === 'run_command' &&
+    approval.preview?.kind === 'command' &&
+    approval.preview.executionMode !== 'shell' &&
+    !approval.preview.policyAllowed
+  );
+}
+
+function canGrantSessionCommandAutoRun(approval: Approval) {
+  return (
+    approval.toolCall.name === 'run_command' &&
+    approval.preview?.kind === 'command' &&
+    approval.preview.canGrantSessionAutoRun &&
+    !approval.preview.sessionAutoRunActive
+  );
+}
+
+function commandPolicyText(approval: Approval) {
+  const preview = approval.preview;
+  if (preview?.kind !== 'command') return '';
+  if (preview.sessionAutoRunActive) return locale.t('commandSessionAutoRunActive');
+  if (preview.executionMode === 'shell') {
+    return locale.t('commandShellAuthorizationRequired', {
+      tokens: preview.shellTokens.join(' '),
+    });
+  }
+  return preview.policyAllowed ? locale.t('commandPolicyAllowed') : locale.t('commandPolicyNeedsAuthorization');
+}
+
+function commandExecutionModeLabel(approval: Approval) {
+  const preview = approval.preview;
+  if (preview?.kind !== 'command') return '';
+  return preview.executionMode === 'shell' ? locale.t('commandExecutionShell') : locale.t('commandExecutionArgv');
 }
 
 function eventToneClass(type: string) {
@@ -2453,11 +2503,16 @@ function truncate(value: string, maxLength: number) {
                             {{ locale.t('runOnce') }}
                           </n-button>
                           <n-button
-                            v-if="
-                              approval.toolCall.name === 'run_command' &&
-                              approval.preview?.kind === 'command' &&
-                              !approval.preview.policyAllowed
-                            "
+                            v-if="canGrantSessionCommandAutoRun(approval)"
+                            size="small"
+                            secondary
+                            @click="approvals.approve(approval.id, 'session_auto')"
+                          >
+                            <template #icon><n-icon><ShieldCheck /></n-icon></template>
+                            {{ locale.t('trustSessionCommands') }}
+                          </n-button>
+                          <n-button
+                            v-if="canEnableProjectCommand(approval)"
                             size="small"
                             secondary
                             @click="approvals.approve(approval.id, 'project')"
@@ -2501,15 +2556,12 @@ function truncate(value: string, maxLength: number) {
                         <div class="command-preview__label">{{ locale.t('commandPreview') }}</div>
                         <code>{{ approval.preview.command }}</code>
                         <span v-if="approval.preview.cwd">{{ approval.preview.cwd }}</span>
+                        <span class="command-preview__mode">{{ commandExecutionModeLabel(approval) }}</span>
                         <span
                           class="command-preview__policy"
-                          :class="{ 'is-warning': !approval.preview.policyAllowed }"
+                          :class="{ 'is-warning': !approval.preview.policyAllowed || approval.preview.executionMode === 'shell' }"
                         >
-                          {{
-                            approval.preview.policyAllowed
-                              ? locale.t('commandPolicyAllowed')
-                              : locale.t('commandPolicyNeedsAuthorization')
-                          }}
+                          {{ commandPolicyText(approval) }}
                         </span>
                       </div>
                     </div>
@@ -2579,7 +2631,15 @@ function truncate(value: string, maxLength: number) {
 
                 <div class="command-request">
                   <div class="command-request__main">
+                    <n-input
+                      v-if="hasSessionCommandAutoRun"
+                      v-model:value="manualCommand"
+                      class="command-request__select"
+                      :placeholder="locale.t('shellCommandInputPlaceholder')"
+                      :disabled="!workspace.currentSession || busy"
+                    />
                     <n-select
+                      v-else
                       v-model:value="manualCommand"
                       class="command-request__select"
                       :options="commandOptions"
@@ -2601,6 +2661,15 @@ function truncate(value: string, maxLength: number) {
                   </div>
                   <div class="command-request__actions">
                     <n-button
+                      v-if="hasSessionCommandAutoRun"
+                      secondary
+                      :loading="workspace.commandAuthorizationLoading"
+                      @click="revokeCommandAuthorization"
+                    >
+                      <template #icon><n-icon><X /></n-icon></template>
+                      {{ locale.t('revokeSessionCommandTrust') }}
+                    </n-button>
+                    <n-button
                       v-if="showNoAllowedCommands && auth.user?.role === 'admin'"
                       secondary
                       @click="openSettings('commands')"
@@ -2618,7 +2687,11 @@ function truncate(value: string, maxLength: number) {
                       {{ locale.t('requestRun') }}
                     </n-button>
                   </div>
-                  <div v-if="showNoAllowedCommands" class="command-request__notice">
+                  <div v-if="hasSessionCommandAutoRun" class="command-request__notice is-trusted">
+                    <n-icon><ShieldCheck /></n-icon>
+                    <span>{{ locale.t('sessionCommandTrustActive') }}</span>
+                  </div>
+                  <div v-else-if="showNoAllowedCommands" class="command-request__notice">
                     <n-icon><Info /></n-icon>
                     <span>{{ noAllowedCommandsHint }}</span>
                   </div>
@@ -3572,6 +3645,10 @@ function truncate(value: string, maxLength: number) {
   font-size: 11px;
 }
 
+.command-preview__mode {
+  font-weight: 700;
+}
+
 .command-preview__policy {
   border-left: 3px solid #10b981;
   padding-left: 0.5rem;
@@ -3625,6 +3702,10 @@ function truncate(value: string, maxLength: number) {
 
 .command-request__notice .n-icon {
   flex: 0 0 auto;
+}
+
+.command-request__notice.is-trusted {
+  color: #047857;
 }
 
 .runs-list {

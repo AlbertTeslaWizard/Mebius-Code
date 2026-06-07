@@ -9,6 +9,7 @@ import { UsersModule } from '../users/users.module';
 import { CommandRun } from './command-run.entity';
 import { CommandPolicyController } from './command-policy.controller';
 import { FilePatch } from './file-patch.entity';
+import { SessionCommandGrant } from './session-command-grant.entity';
 import { ToolApproval } from './tool-approval.entity';
 import { ToolCall } from './tool-call.entity';
 import { ToolsController, ToolsReadController } from './tools.controller';
@@ -16,7 +17,7 @@ import { ToolsService } from './tools.service';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([ToolCall, ToolApproval, FilePatch, CommandRun]),
+    TypeOrmModule.forFeature([ToolCall, ToolApproval, FilePatch, CommandRun, SessionCommandGrant]),
     CommonModule,
     forwardRef(() => AgentModule),
     AuditModule,

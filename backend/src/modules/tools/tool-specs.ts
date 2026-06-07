@@ -108,7 +108,7 @@ export function buildCodingToolSpecs(allowedCommands: string[]) {
             ...tool.function,
             description:
               `Run a command in the project workspace. Requires user approval.${commandSummary}` +
-              ' Prefer an enabled prefix; administrators can authorize other safe commands.',
+              ' Prefer an enabled prefix. Shell syntax or other commands can be reviewed by the user, and the user may trust the current session for automatic command execution.',
           },
         }
       : tool,
