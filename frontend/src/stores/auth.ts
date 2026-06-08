@@ -50,7 +50,13 @@ export const useAuthStore = defineStore('auth', {
         this.loading = false;
       }
     },
-    async register(input: { email: string; name: string; password: string; adminInviteCode?: string }) {
+    async register(input: {
+      email: string;
+      name: string;
+      password: string;
+      verificationCode: string;
+      adminInviteCode?: string;
+    }) {
       this.loading = true;
       try {
         const result = await register(input);

@@ -28,6 +28,12 @@ export interface AuthResponse {
   accessToken: string;
 }
 
+export interface RegisterVerificationCodeResponse {
+  sent: true;
+  expiresInSeconds: number;
+  resendAfterSeconds: number;
+}
+
 export interface ModelConfig {
   id: string;
   providerId?: string | null;

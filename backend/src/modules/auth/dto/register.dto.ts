@@ -1,4 +1,11 @@
-import { IsEmail, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import {
+  IsEmail,
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
 
 export class RegisterDto {
   @IsEmail()
@@ -13,8 +20,11 @@ export class RegisterDto {
   @MinLength(6)
   password: string;
 
+  @IsString()
+  @Matches(/^\d{6}$/, { message: 'verificationCode must be a 6-digit code' })
+  verificationCode: string;
+
   @IsOptional()
   @IsString()
   adminInviteCode?: string;
 }
-

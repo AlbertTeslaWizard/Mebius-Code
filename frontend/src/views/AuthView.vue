@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue';
+import { computed, onUnmounted, reactive, ref } from 'vue';
 import { RouterLink, useRoute } from 'vue-router';
 import { useMessage } from 'naive-ui';
+import { sendRegisterVerificationCode } from '../api/http';
 import MebiusBrand from '../components/MebiusBrand.vue';
 import { useAuthStore } from '../stores/auth';
 import { useLocaleStore } from '../stores/locale';
@@ -16,8 +17,38 @@ const form = reactive({
   email: '',
   name: '',
   password: '',
+  verificationCode: '',
   adminInviteCode: '',
 });
+const codeSending = ref(false);
+const resendAfter = ref(0);
+let countdownTimer: ReturnType<typeof setInterval> | undefined;
+
+const canSubmit = computed(
+  () =>
+    !!form.email &&
+    !!form.password &&
+    (!isRegister.value || (!!form.name && /^\d{6}$/.test(form.verificationCode))),
+);
+const canSendVerificationCode = computed(
+  () => isRegister.value && !!form.email && !codeSending.value && resendAfter.value <= 0,
+);
+
+async function sendVerificationCode() {
+  if (!canSendVerificationCode.value) return;
+
+  error.value = '';
+  codeSending.value = true;
+  try {
+    const result = await sendRegisterVerificationCode(form.email);
+    startResendCountdown(result.resendAfterSeconds);
+    message.success(locale.t('verificationCodeSent'));
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : locale.t('authFailed');
+  } finally {
+    codeSending.value = false;
+  }
+}
 
 async function submit() {
   error.value = '';
@@ -27,6 +58,7 @@ async function submit() {
         email: form.email,
         name: form.name,
         password: form.password,
+        verificationCode: form.verificationCode,
         adminInviteCode: form.adminInviteCode || undefined,
       });
       message.success(locale.t('accountCreated'));
@@ -38,6 +70,29 @@ async function submit() {
     error.value = err instanceof Error ? err.message : locale.t('authFailed');
   }
 }
+
+function startResendCountdown(seconds: number) {
+  clearCountdown();
+  resendAfter.value = seconds;
+  countdownTimer = setInterval(() => {
+    resendAfter.value -= 1;
+    if (resendAfter.value <= 0) {
+      clearCountdown();
+    }
+  }, 1000);
+}
+
+function clearCountdown() {
+  if (countdownTimer) {
+    clearInterval(countdownTimer);
+    countdownTimer = undefined;
+  }
+  if (resendAfter.value < 0) {
+    resendAfter.value = 0;
+  }
+}
+
+onUnmounted(clearCountdown);
 </script>
 
 <template>
@@ -63,7 +118,27 @@ async function submit() {
           <n-input v-model:value="form.name" :placeholder="locale.t('yourName')" autocomplete="name" />
         </n-form-item>
         <n-form-item :label="locale.t('email')">
-          <n-input v-model:value="form.email" :placeholder="locale.t('emailPlaceholder')" autocomplete="email" />
+          <div class="flex w-full gap-2">
+            <n-input
+              v-model:value="form.email"
+              class="min-w-0 flex-1"
+              :placeholder="locale.t('emailPlaceholder')"
+              autocomplete="email"
+            />
+            <n-button
+              v-if="isRegister"
+              class="w-[132px] shrink-0"
+              :loading="codeSending"
+              :disabled="!canSendVerificationCode"
+              @click="sendVerificationCode"
+            >
+              {{
+                resendAfter > 0
+                  ? locale.t('resendVerificationCodeIn', { seconds: resendAfter })
+                  : locale.t('sendVerificationCode')
+              }}
+            </n-button>
+          </div>
         </n-form-item>
         <n-form-item :label="locale.t('password')">
           <n-input
@@ -71,7 +146,15 @@ async function submit() {
             :placeholder="locale.t('password')"
             type="password"
             show-password-on="mousedown"
-            autocomplete="current-password"
+            :autocomplete="isRegister ? 'new-password' : 'current-password'"
+          />
+        </n-form-item>
+        <n-form-item v-if="isRegister" :label="locale.t('verificationCode')">
+          <n-input
+            v-model:value="form.verificationCode"
+            :placeholder="locale.t('verificationCodePlaceholder')"
+            autocomplete="one-time-code"
+            :maxlength="6"
           />
         </n-form-item>
         <n-form-item v-if="isRegister" :label="locale.t('adminInviteCode')">
@@ -83,7 +166,7 @@ async function submit() {
           block
           type="primary"
           :loading="auth.loading"
-          :disabled="!form.email || !form.password || (isRegister && !form.name)"
+          :disabled="!canSubmit"
         >
           {{ isRegister ? locale.t('createAccount') : locale.t('signIn') }}
         </n-button>

@@ -13,6 +13,8 @@ import {
 import { UsersService } from '../users/users.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
+import { SendRegisterVerificationCodeDto } from './dto/send-register-verification-code.dto';
+import { EmailVerificationService } from './email-verification.service';
 
 export interface PublicUser {
   id: string;
@@ -30,9 +32,19 @@ export class AuthService {
     private readonly users: UsersService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    private readonly verification: EmailVerificationService,
   ) {}
 
+  async sendRegisterVerificationCode(dto: SendRegisterVerificationCodeDto): Promise<{
+    sent: true;
+    expiresInSeconds: number;
+    resendAfterSeconds: number;
+  }> {
+    return this.verification.sendRegisterCode(dto.email);
+  }
+
   async register(dto: RegisterDto): Promise<{ user: PublicUser; accessToken: string }> {
+    await this.verification.verifyAndConsumeRegisterCode(dto.email, dto.verificationCode);
     const passwordHash = await hash(dto.password, 12);
     const adminInviteCode = this.config.get<string>('ADMIN_INVITE_CODE');
     const role =

@@ -21,6 +21,14 @@ services:
       DATABASE_SYNCHRONIZE: "true"
       JWT_SECRET: replace-with-a-long-random-production-secret
       JWT_EXPIRES_IN: 7d
+      MAIL_ENABLED: "false"
+      MAIL_APP_NAME: Mebius Code
+      MAIL_FROM: "Mebius Code <no-reply@example.com>"
+      SMTP_HOST: smtp-relay.brevo.com
+      SMTP_PORT: 587
+      SMTP_SECURE: "false"
+      SMTP_USER: replace-with-brevo-smtp-login
+      SMTP_PASS: replace-with-brevo-smtp-key
       MEBIUS_CODE_MASTER_KEY: replace-with-a-32-byte-or-longer-production-secret
       MEBIUS_CODE_WORKSPACE_ROOT: /app/workspaces
       MEBIUS_CODE_COMMAND_ALLOWLIST: git status,git diff,git log,npm test,npm run test,npm run build,npm run lint,node --version,npm --version

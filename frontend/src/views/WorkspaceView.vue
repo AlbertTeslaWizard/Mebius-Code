@@ -67,6 +67,7 @@ type WorkbenchTab = 'files' | 'review' | 'runs' | 'events';
 
 const mainWorkspaceMinWidth = 360;
 const sidebarResizeStep = 16;
+const chatFollowThreshold = 96;
 const sidebarWidthLimits = {
   left: { min: 240, max: 560, defaultValue: 320 },
   right: { min: 360, max: 1200, defaultValue: 560 },
@@ -118,6 +119,8 @@ const connectSelected = ref<ConnectProvider | null>(null);
 const connectFields = ref<ConnectField[]>([]);
 const connectForm = reactive<Record<string, string>>({});
 const lastConnectCommandQuery = ref<string | null>(null);
+const chatScrollContainer = ref<HTMLElement | null>(null);
+const shouldFollowChat = ref(true);
 const isCompactViewport = ref(false);
 const leftOverlayOpen = ref(false);
 const rightOverlayOpen = ref(false);
@@ -135,6 +138,8 @@ const activeResizeSide = ref<SidebarSide | null>(null);
 const activeWorkspaceResizeTarget = ref<WorkspaceResizeTarget | null>(null);
 let compactViewportQuery: MediaQueryList | null = null;
 let filePreviewRequest = 0;
+let chatScrollQueued = false;
+let chatScrollFrame: number | null = null;
 let sidebarResizeState: { side: SidebarSide; startX: number; startWidth: number } | null = null;
 let sessionResizeState: { startX: number; startWidth: number } | null = null;
 let fileTreeResizeState: { startY: number; startHeight: number } | null = null;
@@ -443,6 +448,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  cancelScheduledChatScroll();
   cancelSidebarResize();
   cancelSessionResize();
   cancelFileTreeResize();
@@ -483,6 +489,35 @@ watch(composer, (value) => {
   lastConnectCommandQuery.value = query;
   void openConnect(query);
 });
+
+watch(
+  () => workspace.currentSession?.id,
+  () => {
+    shouldFollowChat.value = true;
+    scheduleChatScrollToBottom();
+  },
+);
+
+watch(
+  () => {
+    const lastMessage = workspace.messages[workspace.messages.length - 1];
+    return [
+      workspace.currentSession?.id ?? '',
+      workspace.messages.length,
+      lastMessage?.id ?? '',
+      lastMessage?.content.length ?? 0,
+      lastMessage?.streaming === true,
+      agentActivityText.value,
+    ] as const;
+  },
+  () => {
+    if (!shouldFollowChat.value && isChatNearBottom()) {
+      shouldFollowChat.value = true;
+    }
+    scheduleChatScrollToBottom();
+  },
+  { flush: 'post' },
+);
 
 watch(
   () => workspace.currentProject?.id,
@@ -926,6 +961,47 @@ function canUnstageFile(file: GitStatusFile) {
   return file.indexStatus !== ' ' && file.indexStatus !== '?';
 }
 
+function handleChatScroll() {
+  shouldFollowChat.value = isChatNearBottom();
+}
+
+function isChatNearBottom() {
+  const container = chatScrollContainer.value;
+  if (!container) return true;
+  const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+  return distanceFromBottom <= chatFollowThreshold;
+}
+
+function scheduleChatScrollToBottom() {
+  if (!shouldFollowChat.value || chatScrollQueued) return;
+  chatScrollQueued = true;
+  void nextTick(() => {
+    if (!chatScrollQueued) return;
+    if (typeof window === 'undefined') {
+      runScheduledChatScroll();
+      return;
+    }
+    chatScrollFrame = window.requestAnimationFrame(runScheduledChatScroll);
+  });
+}
+
+function runScheduledChatScroll() {
+  chatScrollQueued = false;
+  chatScrollFrame = null;
+  if (!shouldFollowChat.value) return;
+  const container = chatScrollContainer.value;
+  if (!container) return;
+  container.scrollTop = container.scrollHeight;
+}
+
+function cancelScheduledChatScroll() {
+  if (chatScrollFrame !== null && typeof window !== 'undefined') {
+    window.cancelAnimationFrame(chatScrollFrame);
+  }
+  chatScrollQueued = false;
+  chatScrollFrame = null;
+}
+
 async function createProject() {
   await runTask(async () => {
     await workspace.createProject({
@@ -1037,6 +1113,8 @@ async function submitComposer() {
     return;
   }
   composer.value = '';
+  shouldFollowChat.value = true;
+  scheduleChatScrollToBottom();
   await runTask(() =>
     composerMode.value === 'plan' ? workspace.createPlan(value) : workspace.submitText(value),
   );
@@ -2144,7 +2222,11 @@ function truncate(value: string, maxLength: number) {
           />
 
           <div class="flex min-h-0 flex-col">
-            <div class="min-h-0 flex-1 overflow-y-auto p-4 scrollbar-thin">
+            <div
+              ref="chatScrollContainer"
+              class="min-h-0 flex-1 overflow-y-auto p-4 scrollbar-thin"
+              @scroll="handleChatScroll"
+            >
               <div v-if="workspace.messages.length === 0" class="chat-empty-state">
                 <MebiusBrand class="chat-empty-state__brand" size="hero" :text="false" />
                 <p>{{ locale.t('createSessionHint') }}</p>

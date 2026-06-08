@@ -2,16 +2,21 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
+import { TypeOrmModule } from '@nestjs/typeorm';
 import { UsersModule } from '../users/users.module';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
+import { EmailVerificationCode } from './email-verification-code.entity';
+import { EmailVerificationService } from './email-verification.service';
 import { JwtStrategy } from './jwt.strategy';
+import { MailService } from './mail.service';
 import { SseJwtGuard } from './sse-jwt.guard';
 
 @Module({
   imports: [
     UsersModule,
     PassportModule,
+    TypeOrmModule.forFeature([EmailVerificationCode]),
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -24,8 +29,7 @@ import { SseJwtGuard } from './sse-jwt.guard';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy, SseJwtGuard],
+  providers: [AuthService, EmailVerificationService, MailService, JwtStrategy, SseJwtGuard],
   exports: [AuthService, JwtModule, SseJwtGuard],
 })
 export class AuthModule {}
-

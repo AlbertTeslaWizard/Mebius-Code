@@ -3,12 +3,18 @@ import { RequestWithUser } from '../../common/types/request-with-user';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
+import { SendRegisterVerificationCodeDto } from './dto/send-register-verification-code.dto';
 import { UpdateUserPreferencesDto } from './dto/update-user-preferences.dto';
 import { JwtAuthGuard } from './jwt-auth.guard';
 
 @Controller('auth')
 export class AuthController {
   constructor(private readonly auth: AuthService) {}
+
+  @Post('register/verification-code')
+  sendRegisterVerificationCode(@Body() dto: SendRegisterVerificationCodeDto) {
+    return this.auth.sendRegisterVerificationCode(dto);
+  }
 
   @Post('register')
   register(@Body() dto: RegisterDto) {

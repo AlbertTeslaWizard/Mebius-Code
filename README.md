@@ -29,6 +29,10 @@ API base URL:
 http://localhost:3000/api
 ```
 
+Email verification for registration uses SMTP. For Brevo's free SMTP relay,
+set `MAIL_ENABLED=true`, `MAIL_FROM`, `SMTP_USER`, and `SMTP_PASS` in
+`backend/.env` after creating a Brevo transactional sender and SMTP key.
+
 SSE session events:
 
 ```text

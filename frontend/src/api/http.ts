@@ -1,4 +1,4 @@
-import type { AuthResponse } from './types';
+import type { AuthResponse, RegisterVerificationCodeResponse } from './types';
 
 const tokenKey = 'mebius.accessToken';
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? '/api';
@@ -78,11 +78,21 @@ export async function register(input: {
   email: string;
   name: string;
   password: string;
+  verificationCode: string;
   adminInviteCode?: string;
 }): Promise<AuthResponse> {
   return request<AuthResponse>('/auth/register', {
     method: 'POST',
     body: jsonBody(input),
+  });
+}
+
+export async function sendRegisterVerificationCode(
+  email: string,
+): Promise<RegisterVerificationCodeResponse> {
+  return request<RegisterVerificationCodeResponse>('/auth/register/verification-code', {
+    method: 'POST',
+    body: jsonBody({ email }),
   });
 }
 
