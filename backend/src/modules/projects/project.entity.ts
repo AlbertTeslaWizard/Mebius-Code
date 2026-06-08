@@ -14,6 +14,17 @@ export enum ProjectSourceType {
   Manual = 'manual',
   Git = 'git',
   Archive = 'archive',
+  Local = 'local',
+}
+
+export enum ProjectWorkspaceMode {
+  Managed = 'managed',
+  Attached = 'attached',
+}
+
+export enum ProjectDeletePolicy {
+  DeleteManagedFilesAllowed = 'delete_managed_files_allowed',
+  DbRecordOnly = 'db_record_only',
 }
 
 @Entity('projects')
@@ -33,6 +44,22 @@ export class Project {
 
   @Column({ type: 'enum', enum: ProjectSourceType, name: 'source_type', default: ProjectSourceType.Manual })
   sourceType: ProjectSourceType;
+
+  @Column({
+    type: 'enum',
+    enum: ProjectWorkspaceMode,
+    name: 'workspace_mode',
+    default: ProjectWorkspaceMode.Managed,
+  })
+  workspaceMode: ProjectWorkspaceMode;
+
+  @Column({
+    type: 'enum',
+    enum: ProjectDeletePolicy,
+    name: 'delete_policy',
+    default: ProjectDeletePolicy.DeleteManagedFilesAllowed,
+  })
+  deletePolicy: ProjectDeletePolicy;
 
   @Column({ type: 'varchar', name: 'git_url', nullable: true })
   gitUrl?: string | null;

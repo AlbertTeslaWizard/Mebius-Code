@@ -39,6 +39,8 @@ This starts:
 ## Core API Surface
 
 ```text
+GET /api/system/capabilities
+
 POST /api/auth/register
 POST /api/auth/login
 GET  /api/auth/me
@@ -51,6 +53,7 @@ POST   /api/model-configs/:id/test
 
 GET  /api/projects
 POST /api/projects
+POST /api/projects/local
 POST /api/projects/:id/import/git
 GET  /api/projects/:id/tree
 GET  /api/projects/:id/file?path=src/main.ts
@@ -105,6 +108,9 @@ not embedded in the command string.
 - Model API keys are encrypted with `MEBIUS_CODE_MASTER_KEY`.
 - File tools are restricted to the project workspace root.
 - `.git`, `.env`, `node_modules`, `dist`, and `coverage` are blocked by default.
+- Attached local workspaces are disabled by default. Set
+  `MEBIUS_CODE_LOCAL_WORKSPACES_ENABLED=true` outside production mode and use
+  an administrator account to create them.
 - `create_patch` and `run_command` require approval.
 - `MEBIUS_CODE_COMMAND_ALLOWLIST` remains the immutable environment baseline.
 - Administrators can enable Git, Node.js, and Python presets or add command prefixes through **Settings > Command permissions**.

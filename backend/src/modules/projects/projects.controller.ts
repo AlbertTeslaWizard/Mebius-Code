@@ -15,8 +15,10 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { RequestWithUser } from '../../common/types/request-with-user';
+import { LocalWorkspaceGuard } from '../../common/security/local-workspace.guard';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { UsersService } from '../users/users.service';
+import { CreateLocalProjectDto } from './dto/create-local-project.dto';
 import { CreateProjectDto } from './dto/create-project.dto';
 import { GitCommitDto } from './dto/git-commit.dto';
 import { GitPathDto } from './dto/git-path.dto';
@@ -42,6 +44,13 @@ export class ProjectsController {
   async create(@Req() request: RequestWithUser, @Body() dto: CreateProjectDto) {
     const owner = await this.users.findById(request.user.sub);
     return this.projects.create(owner, dto);
+  }
+
+  @Post('local')
+  @UseGuards(LocalWorkspaceGuard)
+  async createLocal(@Req() request: RequestWithUser, @Body() dto: CreateLocalProjectDto) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.projects.createOrGetLocal(owner, dto);
   }
 
   @Post(':id/import/git')

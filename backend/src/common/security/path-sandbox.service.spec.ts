@@ -1,6 +1,8 @@
 import { BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { join } from 'path';
+import { mkdir, mkdtemp, symlink, writeFile, rm } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join, resolve } from 'path';
 import { PathSandboxService } from './path-sandbox.service';
 
 describe('PathSandboxService', () => {
@@ -40,4 +42,64 @@ describe('PathSandboxService', () => {
       BadRequestException,
     );
   });
+
+  it('normalizes local workspace roots through realpath and rejects relative paths', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mebius-sandbox-local-'));
+    try {
+      await expect(service.normalizeLocalWorkspaceRoot('relative/path')).rejects.toThrow(
+        'Local workspace path must be absolute.',
+      );
+
+      await expect(service.normalizeLocalWorkspaceRoot(root)).resolves.toBe(
+        service.normalizeWorkspaceRootForStorage(resolve(root)),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects symlink escapes for existing paths', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mebius-sandbox-root-'));
+    const outside = await mkdtemp(join(tmpdir(), 'mebius-sandbox-outside-'));
+    try {
+      await writeFile(join(outside, 'secret.txt'), 'secret');
+      if (!(await trySymlink(join(outside, 'secret.txt'), join(root, 'secret-link.txt')))) {
+        return;
+      }
+
+      await expect(service.resolveExistingProjectPath(root, 'secret-link.txt')).rejects.toThrow(
+        'Path escapes the project workspace.',
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects new file targets whose nearest existing parent is a symlink escape', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mebius-sandbox-root-'));
+    const outside = await mkdtemp(join(tmpdir(), 'mebius-sandbox-outside-'));
+    try {
+      await mkdir(join(outside, 'nested'), { recursive: true });
+      if (!(await trySymlink(join(outside, 'nested'), join(root, 'escaped-dir'), 'dir'))) {
+        return;
+      }
+
+      await expect(service.resolveNewProjectPath(root, 'escaped-dir/new.txt')).rejects.toThrow(
+        'Path escapes the project workspace.',
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
 });
+
+async function trySymlink(target: string, path: string, type?: 'dir'): Promise<boolean> {
+  try {
+    await symlink(target, path, type);
+    return true;
+  } catch {
+    return false;
+  }
+}

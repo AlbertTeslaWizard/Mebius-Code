@@ -9,9 +9,10 @@ import { inflateRawSync } from 'zlib';
 import { PathSandboxService } from '../../common/security/path-sandbox.service';
 import { AuditService } from '../audit/audit.service';
 import { User } from '../users/user.entity';
+import { CreateLocalProjectDto } from './dto/create-local-project.dto';
 import { CreateProjectDto } from './dto/create-project.dto';
 import { ImportGitDto } from './dto/import-git.dto';
-import { Project, ProjectSourceType } from './project.entity';
+import { Project, ProjectDeletePolicy, ProjectSourceType, ProjectWorkspaceMode } from './project.entity';
 
 export const PROJECT_ARCHIVE_MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 
@@ -119,6 +120,8 @@ export class ProjectsService {
         name: dto.name,
         description: dto.description,
         sourceType: ProjectSourceType.Manual,
+        workspaceMode: ProjectWorkspaceMode.Managed,
+        deletePolicy: ProjectDeletePolicy.DeleteManagedFilesAllowed,
         workspacePath: '',
       }),
     );
@@ -133,11 +136,47 @@ export class ProjectsService {
     return saved;
   }
 
+  async createOrGetLocal(owner: User, dto: CreateLocalProjectDto): Promise<Project> {
+    const workspacePath = await this.paths.normalizeLocalWorkspaceRoot(dto.path);
+    const existing = await this.projects.findOne({
+      where: {
+        owner: { id: owner.id },
+        sourceType: ProjectSourceType.Local,
+        workspacePath,
+      },
+      relations: { owner: true },
+    });
+    if (existing) {
+      return this.withProjectDefaults(existing);
+    }
+
+    const project = await this.projects.save(
+      this.projects.create({
+        owner,
+        name: dto.name?.trim() || basename(workspacePath) || 'Local workspace',
+        description: 'Attached local workspace.',
+        sourceType: ProjectSourceType.Local,
+        workspaceMode: ProjectWorkspaceMode.Attached,
+        deletePolicy: ProjectDeletePolicy.DbRecordOnly,
+        workspacePath,
+      }),
+    );
+    await this.audit.record({
+      actor: owner,
+      action: 'project.local_attached',
+      resourceType: 'project',
+      resourceId: project.id,
+      metadata: { workspacePath },
+    });
+    return project;
+  }
+
   async list(ownerId: string): Promise<Project[]> {
-    return this.projects.find({
+    const projects = await this.projects.find({
       where: { owner: { id: ownerId } },
       order: { createdAt: 'DESC' },
     });
+    return projects.map((project) => this.withProjectDefaults(project));
   }
 
   async findOwned(ownerId: string, projectId: string): Promise<Project> {
@@ -148,11 +187,12 @@ export class ProjectsService {
     if (!project) {
       throw new NotFoundException('Project not found.');
     }
-    return project;
+    return this.withProjectDefaults(project);
   }
 
   async importGit(owner: User, projectId: string, dto: ImportGitDto): Promise<Project> {
     const project = await this.findOwned(owner.id, projectId);
+    this.assertManagedWorkspace(project);
     const workspacePath = await this.ensureCurrentWorkspacePath(project);
     const existingFiles = await readdir(workspacePath);
     if (existingFiles.length > 0) {
@@ -175,6 +215,7 @@ export class ProjectsService {
 
   async importArchive(owner: User, projectId: string, file: ArchiveUploadFile): Promise<Project> {
     const project = await this.findOwned(owner.id, projectId);
+    this.assertManagedWorkspace(project);
     const workspacePath = await this.ensureCurrentWorkspacePath(project);
     const existingFiles = await readdir(workspacePath);
     if (existingFiles.length > 0) {
@@ -188,7 +229,7 @@ export class ProjectsService {
     }
 
     for (const entry of extractedFiles) {
-      const absolutePath = this.paths.resolveProjectPath(workspacePath, entry.path);
+      const absolutePath = await this.paths.resolveNewProjectPath(workspacePath, entry.path);
       await mkdir(dirname(absolutePath), { recursive: true });
       await writeFile(absolutePath, entry.content);
     }
@@ -212,6 +253,23 @@ export class ProjectsService {
 
   async remove(owner: User, projectId: string): Promise<{ deleted: true }> {
     const project = await this.findOwned(owner.id, projectId);
+    this.withProjectDefaults(project);
+    if (project.workspaceMode === ProjectWorkspaceMode.Attached || project.deletePolicy === ProjectDeletePolicy.DbRecordOnly) {
+      await this.audit.record({
+        actor: owner,
+        action: 'project.deleted',
+        resourceType: 'project',
+        resourceId: project.id,
+        metadata: {
+          workspacePath: project.workspacePath,
+          persistedWorkspacePath: project.workspacePath,
+          deletePolicy: project.deletePolicy,
+        },
+      });
+      await this.projects.remove(project);
+      return { deleted: true };
+    }
+
     const workspacePath = this.paths.assertExactProjectRoot(
       project.id,
       this.paths.getProjectRoot(project.id),
@@ -236,7 +294,7 @@ export class ProjectsService {
   async readProjectFile(ownerId: string, projectId: string, relativePath: string): Promise<ProjectFileView> {
     const project = await this.findOwned(ownerId, projectId);
     const projectRoot = await this.ensureCurrentWorkspacePath(project);
-    const absolutePath = this.paths.resolveProjectPath(projectRoot, relativePath);
+    const absolutePath = await this.paths.resolveExistingProjectPath(projectRoot, relativePath);
     const info = await this.assertReadableTextFile(absolutePath);
     return {
       path: this.toRelative(projectRoot, absolutePath),
@@ -253,7 +311,7 @@ export class ProjectsService {
   ): Promise<ProjectFileView> {
     const project = await this.findOwned(owner.id, projectId);
     const projectRoot = await this.ensureCurrentWorkspacePath(project);
-    const absolutePath = this.paths.resolveProjectPath(projectRoot, relativePath);
+    const absolutePath = await this.paths.resolveExistingProjectPath(projectRoot, relativePath);
     await this.assertReadableTextFile(absolutePath);
 
     const byteLength = Buffer.byteLength(content, 'utf8');
@@ -287,7 +345,7 @@ export class ProjectsService {
   ): Promise<ProjectFileView> {
     const project = await this.findOwned(owner.id, projectId);
     const projectRoot = await this.ensureCurrentWorkspacePath(project);
-    const absolutePath = this.paths.resolveProjectPath(projectRoot, relativePath);
+    const absolutePath = await this.paths.resolveNewProjectPath(projectRoot, relativePath);
     if (absolutePath === projectRoot) {
       throw new BadRequestException('Path is not a file.');
     }
@@ -328,7 +386,7 @@ export class ProjectsService {
   ): Promise<{ deleted: true; path: string }> {
     const project = await this.findOwned(owner.id, projectId);
     const projectRoot = await this.ensureCurrentWorkspacePath(project);
-    const absolutePath = this.paths.resolveProjectPath(projectRoot, relativePath);
+    const absolutePath = await this.paths.resolveExistingProjectPath(projectRoot, relativePath);
     await this.assertReadableTextFile(absolutePath);
     const safePath = this.toRelative(projectRoot, absolutePath);
 
@@ -352,10 +410,10 @@ export class ProjectsService {
   ): Promise<ProjectFileView> {
     const project = await this.findOwned(owner.id, projectId);
     const projectRoot = await this.ensureCurrentWorkspacePath(project);
-    const sourcePath = this.paths.resolveProjectPath(projectRoot, relativePath);
+    const sourcePath = await this.paths.resolveExistingProjectPath(projectRoot, relativePath);
     await this.assertReadableTextFile(sourcePath);
 
-    const targetPath = this.paths.resolveProjectPath(projectRoot, newRelativePath);
+    const targetPath = await this.paths.resolveNewProjectPath(projectRoot, newRelativePath);
     if (targetPath === projectRoot) {
       throw new BadRequestException('Path is not a file.');
     }
@@ -387,7 +445,7 @@ export class ProjectsService {
   async buildTree(ownerId: string, projectId: string, relativePath = '.', depth = 3): Promise<TreeNode[]> {
     const project = await this.findOwned(ownerId, projectId);
     const projectRoot = await this.ensureCurrentWorkspacePath(project);
-    const root = this.paths.resolveProjectPath(projectRoot, relativePath);
+    const root = await this.paths.resolveExistingDirectory(projectRoot, relativePath);
     return this.readTree(projectRoot, root, depth);
   }
 
@@ -557,6 +615,16 @@ export class ProjectsService {
   }
 
   private async ensureCurrentWorkspacePath(project: Project): Promise<string> {
+    this.withProjectDefaults(project);
+    if (project.workspaceMode === ProjectWorkspaceMode.Attached || project.sourceType === ProjectSourceType.Local) {
+      const workspacePath = await this.paths.normalizeLocalWorkspaceRoot(project.workspacePath);
+      if (project.workspacePath !== workspacePath) {
+        project.workspacePath = workspacePath;
+        await this.projects.save(project);
+      }
+      return workspacePath;
+    }
+
     const workspacePath = await this.paths.ensureProjectRoot(project.id);
 
     if (resolve(project.workspacePath) !== workspacePath) {
@@ -601,12 +669,30 @@ export class ProjectsService {
   }
 
   private isHiddenOrBlocked(entry: Dirent): boolean {
-    return ['.git', '.env', 'node_modules', 'dist', 'coverage'].includes(entry.name);
+    return entry.isDirectory()
+      ? this.paths.shouldIgnoreDirectory(entry.name)
+      : ['.env'].includes(entry.name);
   }
 
   private toRelative(projectRoot: string, absolutePath: string): string {
     const value = relative(projectRoot, absolutePath).replaceAll('\\', '/');
     return value || basename(projectRoot);
+  }
+
+  private withProjectDefaults(project: Project): Project {
+    project.workspaceMode ??= project.sourceType === ProjectSourceType.Local
+      ? ProjectWorkspaceMode.Attached
+      : ProjectWorkspaceMode.Managed;
+    project.deletePolicy ??= project.workspaceMode === ProjectWorkspaceMode.Attached
+      ? ProjectDeletePolicy.DbRecordOnly
+      : ProjectDeletePolicy.DeleteManagedFilesAllowed;
+    return project;
+  }
+
+  private assertManagedWorkspace(project: Project): void {
+    if (project.workspaceMode === ProjectWorkspaceMode.Attached || project.sourceType === ProjectSourceType.Local) {
+      throw new BadRequestException('Import is only supported for managed workspaces.');
+    }
   }
 
   private cloneRepository(gitUrl: string, targetPath: string, branch?: string): Promise<void> {

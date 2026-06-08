@@ -64,7 +64,9 @@ export interface Project {
   id: string;
   name: string;
   description?: string;
-  sourceType: string;
+  sourceType: 'manual' | 'git' | 'archive' | 'local' | string;
+  workspaceMode?: 'managed' | 'attached';
+  deletePolicy?: 'delete_managed_files_allowed' | 'db_record_only';
   gitUrl?: string | null;
   workspacePath: string;
   createdAt: string;

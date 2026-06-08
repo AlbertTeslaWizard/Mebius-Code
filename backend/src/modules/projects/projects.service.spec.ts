@@ -1,12 +1,12 @@
 import { ConfigService } from '@nestjs/config';
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { join, resolve } from 'path';
 import { Repository } from 'typeorm';
 import { PathSandboxService } from '../../common/security/path-sandbox.service';
 import { AuditService } from '../audit/audit.service';
 import { User } from '../users/user.entity';
-import { Project, ProjectSourceType } from './project.entity';
+import { Project, ProjectDeletePolicy, ProjectSourceType, ProjectWorkspaceMode } from './project.entity';
 import { ProjectsService } from './projects.service';
 
 describe('ProjectsService', () => {
@@ -15,7 +15,9 @@ describe('ProjectsService', () => {
   let service: ProjectsService;
 
   const projects = {
+    create: jest.fn((project: Partial<Project>) => project as Project),
     findOne: jest.fn(),
+    find: jest.fn(),
     remove: jest.fn((project: Project) => Promise.resolve(project)),
     save: jest.fn((project: Project) => Promise.resolve(project)),
   } as unknown as jest.Mocked<Repository<Project>>;
@@ -62,6 +64,105 @@ describe('ProjectsService', () => {
     expect(projects.remove).toHaveBeenCalledWith(project);
     await expect(access(project.workspacePath)).rejects.toThrow();
     expect(result).toEqual({ deleted: true });
+  });
+
+  it('creates a local project from an absolute directory path', async () => {
+    const localRoot = await mkdtemp(join(tmpdir(), 'mebius-local-'));
+    try {
+      projects.findOne.mockResolvedValue(null);
+
+      const result = await service.createOrGetLocal(owner, { path: localRoot });
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          sourceType: ProjectSourceType.Local,
+          workspaceMode: ProjectWorkspaceMode.Attached,
+          deletePolicy: ProjectDeletePolicy.DbRecordOnly,
+          workspacePath: paths.normalizeWorkspaceRootForStorage(resolve(localRoot)),
+        }),
+      );
+      expect(projects.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sourceType: ProjectSourceType.Local,
+          workspaceMode: ProjectWorkspaceMode.Attached,
+          deletePolicy: ProjectDeletePolicy.DbRecordOnly,
+        }),
+      );
+      expect(audit.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'project.local_attached',
+          metadata: { workspacePath: paths.normalizeWorkspaceRootForStorage(resolve(localRoot)) },
+        }),
+      );
+    } finally {
+      await rm(localRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('returns an existing local project for the same owner and normalized realpath', async () => {
+    const localRoot = await mkdtemp(join(tmpdir(), 'mebius-local-existing-'));
+    try {
+      const existing = {
+        ...projectFixture(paths.normalizeWorkspaceRootForStorage(resolve(localRoot))),
+        sourceType: ProjectSourceType.Local,
+        workspaceMode: ProjectWorkspaceMode.Attached,
+        deletePolicy: ProjectDeletePolicy.DbRecordOnly,
+      } as Project;
+      projects.findOne.mockResolvedValue(existing);
+
+      const result = await service.createOrGetLocal(owner, { path: localRoot });
+
+      expect(result).toBe(existing);
+      expect(projects.save).not.toHaveBeenCalled();
+    } finally {
+      await rm(localRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects invalid local project paths', async () => {
+    const fileRoot = await mkdtemp(join(tmpdir(), 'mebius-local-file-'));
+    const filePath = join(fileRoot, 'not-a-dir.txt');
+    await writeFile(filePath, 'content');
+    try {
+      await expect(service.createOrGetLocal(owner, { path: 'relative/path' })).rejects.toThrow(
+        'Local workspace path must be absolute.',
+      );
+      await expect(service.createOrGetLocal(owner, { path: join(fileRoot, 'missing') })).rejects.toThrow(
+        'Local workspace path does not exist.',
+      );
+      await expect(service.createOrGetLocal(owner, { path: filePath })).rejects.toThrow(
+        'Local workspace path must be a directory.',
+      );
+    } finally {
+      await rm(fileRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('deletes only the database record for local projects', async () => {
+    const localRoot = await mkdtemp(join(tmpdir(), 'mebius-local-delete-'));
+    const project = {
+      ...projectFixture(paths.normalizeWorkspaceRootForStorage(resolve(localRoot))),
+      sourceType: ProjectSourceType.Local,
+      workspaceMode: ProjectWorkspaceMode.Attached,
+      deletePolicy: ProjectDeletePolicy.DbRecordOnly,
+    } as Project;
+    projects.findOne.mockResolvedValue(project);
+
+    try {
+      const result = await service.remove(owner, project.id);
+
+      expect(result).toEqual({ deleted: true });
+      expect(projects.remove).toHaveBeenCalledWith(project);
+      await expect(access(localRoot)).resolves.toBeUndefined();
+      expect(audit.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'project.deleted',
+          metadata: expect.objectContaining({ deletePolicy: ProjectDeletePolicy.DbRecordOnly }),
+        }),
+      );
+    } finally {
+      await rm(localRoot, { recursive: true, force: true });
+    }
   });
 
   it('repairs legacy workspace paths and returns an empty tree when the current workspace directory is missing', async () => {
@@ -795,6 +896,8 @@ function projectFixture(workspacePath: string): Project {
     name: 'Feature project',
     description: 'Project under test',
     sourceType: ProjectSourceType.Manual,
+    workspaceMode: ProjectWorkspaceMode.Managed,
+    deletePolicy: ProjectDeletePolicy.DeleteManagedFilesAllowed,
     workspacePath,
     createdAt,
     updatedAt: createdAt,

@@ -9,6 +9,7 @@ The visible product name is **Mebius Code**. Engineering identifiers use lowerca
 ```text
 backend/                 NestJS backend service
 frontend/                Vue 3 + TypeScript web workspace
+tui/                     Bun + OpenTUI terminal workspace
 docs/                    Markdown source documents for final DOCX deliverables
 面向对象技术与方法结课设计.docx  Original course requirement document
 ```
@@ -52,3 +53,17 @@ The web app runs at `http://127.0.0.1:5173` and proxies `/api` to the backend.
 Shell commands can be requested from the workspace **Runs** tab. Every command
 requires review before execution. Administrators manage Git, Node.js, Python,
 and custom command permissions from **Settings > Command permissions**.
+
+## TUI Quick Start
+
+The TUI connects to an already running backend API. It does not start the
+backend in the MVP.
+
+```bash
+cd tui
+bun install
+bun run start
+```
+
+The installed CLI command is `mebius`. Use `mebius login --api http://localhost:3000/api`
+to persist credentials and API configuration.

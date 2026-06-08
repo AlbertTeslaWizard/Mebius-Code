@@ -1768,6 +1768,13 @@ function truncate(value: string, maxLength: number) {
   if (value.length <= maxLength) return value;
   return `${value.slice(0, maxLength - 1)}...`;
 }
+
+function projectDescription(project: { description?: string; sourceType: string; workspaceMode?: string }) {
+  const mode = project.sourceType === 'local' || project.workspaceMode === 'attached'
+    ? 'server local workspace'
+    : project.sourceType;
+  return [project.description, mode].filter(Boolean).join(' · ');
+}
 </script>
 
 <template>
@@ -1855,7 +1862,7 @@ function truncate(value: string, maxLength: number) {
               @click="workspace.selectProject(project)"
             >
               <div class="flex items-center justify-between gap-2">
-                <n-thing class="min-w-0" :title="project.name" :description="project.description || project.sourceType" />
+                <n-thing class="min-w-0" :title="project.name" :description="projectDescription(project)" />
                 <n-popconfirm @positive-click="deleteProject(project.id)">
                   <template #trigger>
                     <n-button

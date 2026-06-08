@@ -454,7 +454,7 @@ export class ToolsService {
     }
 
     const project = patch.project as Project;
-    const target = this.paths.resolveProjectPath(project.workspacePath, patch.relativePath);
+    const target = await this.paths.resolveNewProjectPath(project.workspacePath, patch.relativePath);
     const currentContent = existsSync(target) ? await readFile(target, 'utf8') : null;
     if (currentContent !== patch.patchedContent) {
       throw new BadRequestException('Patch cannot be reverted because the file changed after it was applied.');
@@ -511,7 +511,7 @@ export class ToolsService {
   private async listFiles(project: Project, args: Record<string, unknown>): Promise<string> {
     const relativePath = typeof args.path === 'string' ? args.path : '.';
     const maxDepth = typeof args.maxDepth === 'number' ? args.maxDepth : 2;
-    const target = this.paths.resolveProjectPath(project.workspacePath, relativePath);
+    const target = await this.paths.resolveExistingDirectory(project.workspacePath, relativePath);
     const tree = await this.scanFiles(project.workspacePath, target, maxDepth);
     return JSON.stringify(tree, null, 2);
   }
@@ -520,7 +520,7 @@ export class ToolsService {
     if (typeof args.path !== 'string') {
       throw new BadRequestException('read_file requires path.');
     }
-    const target = this.paths.resolveProjectPath(project.workspacePath, args.path);
+    const target = await this.paths.resolveExistingProjectPath(project.workspacePath, args.path);
     const info = await stat(target);
     if (!info.isFile() || info.size > 512 * 1024) {
       throw new BadRequestException('File is not readable through this tool.');
@@ -534,20 +534,21 @@ export class ToolsService {
     }
     const relativePath = typeof args.path === 'string' ? args.path : '.';
     const maxResults = typeof args.maxResults === 'number' ? args.maxResults : 50;
-    const target = this.paths.resolveProjectPath(project.workspacePath, relativePath);
+    const target = await this.paths.resolveExistingProjectPath(project.workspacePath, relativePath);
     const files = await this.collectFiles(target, 5);
     const results: Array<{ path: string; line: number; text: string }> = [];
 
     for (const file of files) {
       if (results.length >= maxResults) break;
-      const info = await stat(file);
+      const safeFile = await this.paths.assertExistingAbsolutePathInsideRoot(project.workspacePath, file);
+      const info = await stat(safeFile);
       if (info.size > 512 * 1024) continue;
-      const content = await readFile(file, 'utf8').catch(() => '');
+      const content = await readFile(safeFile, 'utf8').catch(() => '');
       const lines = content.split(/\r?\n/);
       lines.forEach((line, index) => {
         if (results.length < maxResults && line.includes(args.query as string)) {
           results.push({
-            path: file.replace(project.workspacePath, '').replaceAll('\\', '/').replace(/^\//, ''),
+            path: safeFile.replace(project.workspacePath, '').replaceAll('\\', '/').replace(/^\//, ''),
             line: index + 1,
             text: line,
           });
@@ -571,7 +572,7 @@ export class ToolsService {
     const conflicts: FilePatch[] = [];
 
     for (const patch of proposed) {
-      const target = this.paths.resolveProjectPath(project.workspacePath, patch.relativePath);
+      const target = await this.paths.resolveNewProjectPath(project.workspacePath, patch.relativePath);
       const currentContent = existsSync(target) ? await readFile(target, 'utf8') : null;
       const originalContent = patch.originalContent ?? null;
       if (currentContent !== originalContent) {
@@ -592,7 +593,7 @@ export class ToolsService {
     }
 
     for (const patch of proposed) {
-      const target = this.paths.resolveProjectPath(project.workspacePath, patch.relativePath);
+      const target = await this.paths.resolveNewProjectPath(project.workspacePath, patch.relativePath);
       await mkdir(dirname(target), { recursive: true });
       await writeFile(target, patch.patchedContent, 'utf8');
       patch.status = FilePatchStatus.Applied;
@@ -628,8 +629,8 @@ export class ToolsService {
     }
     const cwd =
       typeof args.cwd === 'string'
-        ? this.paths.resolveProjectPath(project.workspacePath, args.cwd)
-        : project.workspacePath;
+        ? await this.paths.resolveExistingDirectory(project.workspacePath, args.cwd)
+        : await this.paths.resolveExistingDirectory(project.workspacePath, '.');
     const parsed = commandAuthorized
       ? this.commandPolicy.parseAuthorized(args.command)
       : await this.commandPolicy.parse(args.command, project.id);
@@ -825,7 +826,7 @@ export class ToolsService {
     const patches: FilePatch[] = [];
 
     for (const file of files) {
-      const target = this.paths.resolveProjectPath(project.workspacePath, file.path);
+      const target = await this.paths.resolveNewProjectPath(project.workspacePath, file.path);
       const originalContent = existsSync(target) ? await readFile(target, 'utf8') : null;
       const diff = this.makeDiff(file.path, originalContent ?? '', file.content);
       patches.push(
@@ -887,7 +888,7 @@ export class ToolsService {
   private async scanFiles(projectRoot: string, currentPath: string, depth: number): Promise<unknown[]> {
     const entries = await readdir(currentPath, { withFileTypes: true });
     const nodes: unknown[] = [];
-    for (const entry of entries.filter((item) => !this.isBlockedName(item.name)).slice(0, 200)) {
+    for (const entry of entries.filter((item) => !this.isBlockedEntry(item)).slice(0, 200)) {
       const absolute = join(currentPath, entry.name);
       const node: Record<string, unknown> = {
         name: entry.name,
@@ -912,14 +913,14 @@ export class ToolsService {
     }
     const entries = await readdir(currentPath, { withFileTypes: true });
     const files: string[] = [];
-    for (const entry of entries.filter((item) => !this.isBlockedName(item.name)).slice(0, 200)) {
+    for (const entry of entries.filter((item) => !this.isBlockedEntry(item)).slice(0, 200)) {
       files.push(...(await this.collectFiles(join(currentPath, entry.name), depth - 1)));
     }
     return files;
   }
 
-  private isBlockedName(name: string): boolean {
-    return ['.git', '.env', 'node_modules', 'dist', 'coverage'].includes(name);
+  private isBlockedEntry(entry: { name: string; isDirectory(): boolean }): boolean {
+    return entry.isDirectory() ? this.paths.shouldIgnoreDirectory(entry.name) : entry.name === '.env';
   }
 
   private async buildApprovalPreview(approval: ToolApproval): Promise<ApprovalPreview | undefined> {

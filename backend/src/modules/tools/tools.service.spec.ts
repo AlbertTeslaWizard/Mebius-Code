@@ -90,7 +90,12 @@ describe('ToolsService', () => {
   } as unknown as jest.Mocked<SessionsService>;
   const paths = {
     resolveProjectPath: jest.fn(),
+    resolveExistingProjectPath: jest.fn(),
+    resolveNewProjectPath: jest.fn(),
+    resolveExistingDirectory: jest.fn(),
+    assertExistingAbsolutePathInsideRoot: jest.fn(),
     normalizeRelativePath: jest.fn(),
+    shouldIgnoreDirectory: jest.fn(),
   } as unknown as jest.Mocked<PathSandboxService>;
   const commandPolicy = {
     inspect: jest.fn(),
@@ -132,7 +137,20 @@ describe('ToolsService', () => {
     approvals.findOne.mockResolvedValue(approval);
     sessions.findOwned.mockResolvedValue(session);
     paths.resolveProjectPath.mockImplementation((_root, path) => `D:/workspace/${path}`);
+    paths.resolveExistingProjectPath.mockImplementation((root, path = '.') =>
+      Promise.resolve(path === '.' ? root : `${root}/${path}`),
+    );
+    paths.resolveNewProjectPath.mockImplementation((root, path = '.') =>
+      Promise.resolve(path === '.' ? root : `${root}/${path}`),
+    );
+    paths.resolveExistingDirectory.mockImplementation((root, path = '.') =>
+      Promise.resolve(path === '.' ? root : `${root}/${path}`),
+    );
+    paths.assertExistingAbsolutePathInsideRoot.mockImplementation((_root, path) => Promise.resolve(path));
     paths.normalizeRelativePath.mockImplementation((path = '.') => path);
+    paths.shouldIgnoreDirectory.mockImplementation((name) =>
+      ['.git', 'node_modules', 'dist', 'build', 'datasets', 'models', 'checkpoints'].includes(name),
+    );
     patches.find.mockResolvedValue([
       {
         id: 'patch-1',
@@ -525,7 +543,7 @@ describe('ToolsService', () => {
     const workspace = await mkdtemp(join(tmpdir(), 'mebius-patch-'));
     try {
       await writeFile(join(workspace, 'existing.ts'), 'old', 'utf8');
-      paths.resolveProjectPath.mockImplementation((root, path = '.') => resolve(root, path));
+      paths.resolveNewProjectPath.mockImplementation((root, path = '.') => Promise.resolve(resolve(root, path)));
       patches.find.mockResolvedValueOnce([]);
       patches.create.mockImplementation((value) => value as FilePatch);
       patches.save.mockImplementation(async (value: any) => {
@@ -566,7 +584,7 @@ describe('ToolsService', () => {
     const workspace = await mkdtemp(join(tmpdir(), 'mebius-conflict-'));
     try {
       await writeFile(join(workspace, 'demo.ts'), 'changed', 'utf8');
-      paths.resolveProjectPath.mockImplementation((root, path = '.') => resolve(root, path));
+      paths.resolveNewProjectPath.mockImplementation((root, path = '.') => Promise.resolve(resolve(root, path)));
       const proposedPatch = {
         id: 'patch-conflict',
         project: { id: 'project-1', workspacePath: workspace },
@@ -596,7 +614,7 @@ describe('ToolsService', () => {
     const workspace = await mkdtemp(join(tmpdir(), 'mebius-revert-'));
     try {
       await writeFile(join(workspace, 'demo.ts'), 'new', 'utf8');
-      paths.resolveProjectPath.mockImplementation((root, path = '.') => resolve(root, path));
+      paths.resolveNewProjectPath.mockImplementation((root, path = '.') => Promise.resolve(resolve(root, path)));
       const patch = {
         id: 'patch-revert',
         project: { id: 'project-1', workspacePath: workspace },
