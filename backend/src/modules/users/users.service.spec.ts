@@ -38,6 +38,9 @@ describe('UsersService', () => {
             leftSidebarWidth: 310,
             rightSidebarWidth: 640,
           },
+          theme: {
+            mode: 'dark',
+          },
         },
       }),
     );
@@ -59,6 +62,9 @@ describe('UsersService', () => {
         rightSidebarCollapsed: false,
         leftSidebarWidth: 280,
         rightSidebarWidth: 420,
+      },
+      theme: {
+        mode: 'dark',
       },
     });
   });
@@ -82,6 +88,40 @@ describe('UsersService', () => {
         rightSidebarCollapsed: true,
         leftSidebarWidth: 280,
         rightSidebarWidth: 820,
+      },
+      theme: {
+        mode: 'dark',
+      },
+    });
+  });
+
+  it('merges theme preference updates without resetting layout', async () => {
+    const user = userFixture({
+      layout: {
+        leftSidebarCollapsed: true,
+        rightSidebarCollapsed: false,
+        leftSidebarWidth: 300,
+        rightSidebarWidth: 620,
+      },
+      theme: {
+        mode: 'light',
+      },
+    });
+    users.findOne.mockResolvedValue(user);
+
+    const result = await service.updatePreferences(user.id, {
+      theme: { mode: 'dark' },
+    });
+
+    expect(result.preferences).toEqual({
+      layout: {
+        leftSidebarCollapsed: true,
+        rightSidebarCollapsed: false,
+        leftSidebarWidth: 300,
+        rightSidebarWidth: 620,
+      },
+      theme: {
+        mode: 'dark',
       },
     });
   });

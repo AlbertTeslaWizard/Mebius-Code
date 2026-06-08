@@ -304,8 +304,8 @@ function escapeHtml(value: string) {
           <n-icon><Code2 /></n-icon>
         </span>
         <div class="min-w-0">
-          <div class="truncate text-sm font-semibold text-slate-950" :title="path">{{ fileName }}</div>
-          <div class="truncate text-[11px] text-slate-500" :title="path">{{ path }}</div>
+          <div class="truncate text-sm font-semibold text-mebius-ink" :title="path">{{ fileName }}</div>
+          <div class="truncate text-[11px] text-mebius-muted" :title="path">{{ path }}</div>
         </div>
       </div>
       <div class="flex shrink-0 items-center gap-2">
@@ -350,11 +350,12 @@ function escapeHtml(value: string) {
 <style scoped>
 .code-preview {
   background:
-    linear-gradient(180deg, rgb(255 255 255 / 92%), rgb(248 250 252 / 96%)),
+    linear-gradient(180deg, var(--workspace-card-bg, #ffffff), var(--workspace-card-bg, #ffffff)),
     radial-gradient(circle at top right, rgb(20 184 166 / 10%), transparent 38%);
-  border: 1px solid #d8dee8;
+  border: 1px solid var(--workspace-card-border, #d1d5db);
   border-radius: 8px;
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 72%);
+  color: var(--workspace-message-text, #111827);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   min-height: 0;
@@ -363,8 +364,8 @@ function escapeHtml(value: string) {
 
 .code-preview__header {
   align-items: center;
-  background: #f8fafc;
-  border-bottom: 1px solid #d8dee8;
+  background: var(--workspace-card-subtle, #f9fafb);
+  border-bottom: 1px solid var(--workspace-card-border, #d1d5db);
   display: flex;
   gap: 0.75rem;
   justify-content: space-between;
@@ -385,10 +386,10 @@ function escapeHtml(value: string) {
 }
 
 .code-preview__chip {
-  background: #eef2f7;
-  border: 1px solid #dce3ed;
+  background: var(--mebius-code-bg, #f3f4f6);
+  border: 1px solid var(--workspace-card-border, #d1d5db);
   border-radius: 999px;
-  color: #475569;
+  color: var(--workspace-message-muted, #4b5563);
   font-size: 11px;
   line-height: 1;
   padding: 0.32rem 0.48rem;
@@ -397,7 +398,7 @@ function escapeHtml(value: string) {
 
 .code-preview__state {
   align-items: center;
-  color: #64748b;
+  color: var(--workspace-message-muted, #4b5563);
   display: flex;
   gap: 0.5rem;
   justify-content: center;
@@ -411,13 +412,13 @@ function escapeHtml(value: string) {
 }
 
 .code-preview__scroller {
-  background: #ffffff;
+  background: var(--workspace-card-bg, #ffffff);
   min-height: 0;
   overflow: auto;
 }
 
 .code-preview__scroller :deep(.shiki) {
-  background: #ffffff !important;
+  background: var(--workspace-card-bg, #ffffff) !important;
   border: 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 12px;
@@ -443,8 +444,8 @@ function escapeHtml(value: string) {
 }
 
 .code-preview__scroller :deep(.shiki .line)::before {
-  border-right: 1px solid #e2e8f0;
-  color: #94a3b8;
+  border-right: 1px solid var(--workspace-card-border, #d1d5db);
+  color: var(--workspace-icon-muted, #6b7280);
   content: counter(code-line);
   font-variant-numeric: tabular-nums;
   left: 0;
@@ -456,6 +457,6 @@ function escapeHtml(value: string) {
 }
 
 .code-preview__scroller :deep(.shiki .line:hover) {
-  background: #f8fafc;
+  background: var(--workspace-hover-bg, #e5f3f1);
 }
 </style>

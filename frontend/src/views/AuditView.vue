@@ -5,6 +5,7 @@ import { ArrowLeft, RefreshCw } from 'lucide-vue-next';
 import { request } from '../api/http';
 import type { AuditLog, ListResponse } from '../api/types';
 import MebiusBrand from '../components/MebiusBrand.vue';
+import ThemeToggle from '../components/ThemeToggle.vue';
 import { useLocaleStore } from '../stores/locale';
 
 const logs = ref<AuditLog[]>([]);
@@ -36,9 +37,9 @@ onMounted(load);
 </script>
 
 <template>
-  <main class="min-h-screen bg-mebius-bg p-6">
-    <div class="mx-auto max-w-6xl">
-      <div class="mb-5 flex items-center justify-between">
+  <main class="settings-shell min-h-screen p-4 md:p-6">
+    <div class="settings-frame mx-auto max-w-6xl">
+      <div class="settings-header mb-5 flex flex-wrap items-center justify-between gap-3">
         <div class="flex items-center gap-3">
           <RouterLink to="/app">
             <n-button quaternary circle :title="locale.t('backToWorkspace')">
@@ -47,11 +48,12 @@ onMounted(load);
           </RouterLink>
           <MebiusBrand size="compact" :text="false" />
           <div>
-            <h1 class="m-0 text-xl font-semibold">{{ locale.t('auditLogs') }}</h1>
+            <h1 class="settings-title m-0 text-xl font-semibold">{{ locale.t('auditLogs') }}</h1>
             <p class="m-0 text-sm text-mebius-muted">{{ locale.t('recordsVisible', { total }) }}</p>
           </div>
         </div>
         <n-space>
+          <ThemeToggle />
           <n-button size="small" quaternary @click="locale.toggleLocale">
             {{ locale.t('languageSwitch') }}
           </n-button>
@@ -62,7 +64,7 @@ onMounted(load);
         </n-space>
       </div>
 
-      <section class="mb-4 rounded border border-mebius-border bg-white p-4">
+      <section class="settings-panel settings-panel--padded mb-4">
         <div class="grid gap-3 md:grid-cols-4">
           <n-input v-model:value="filters.action" :placeholder="locale.t('action')" />
           <n-input v-model:value="filters.resourceType" :placeholder="locale.t('resourceType')" />
@@ -71,7 +73,7 @@ onMounted(load);
         </div>
       </section>
 
-      <section class="rounded border border-mebius-border bg-white">
+      <section class="settings-panel">
         <n-data-table
             :loading="loading"
             :columns="[

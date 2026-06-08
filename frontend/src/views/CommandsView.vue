@@ -5,6 +5,7 @@ import { ArrowLeft, Check, RefreshCw, Save, ShieldCheck, Terminal } from 'lucide
 import { jsonBody, request } from '../api/http';
 import type { CommandPolicy } from '../api/types';
 import MebiusBrand from '../components/MebiusBrand.vue';
+import ThemeToggle from '../components/ThemeToggle.vue';
 import { useLocaleStore } from '../stores/locale';
 
 const locale = useLocaleStore();
@@ -70,9 +71,9 @@ onMounted(load);
 </script>
 
 <template>
-  <main class="min-h-screen bg-mebius-bg p-4 md:p-6">
-    <div class="mx-auto max-w-6xl">
-      <header class="mb-5 flex flex-wrap items-center justify-between gap-3">
+  <main class="settings-shell min-h-screen p-4 md:p-6">
+    <div class="settings-frame mx-auto max-w-6xl">
+      <header class="settings-header mb-5 flex flex-wrap items-center justify-between gap-3">
         <div class="flex min-w-0 items-center gap-3">
           <RouterLink to="/app">
             <n-button quaternary circle :title="locale.t('backToWorkspace')">
@@ -81,11 +82,12 @@ onMounted(load);
           </RouterLink>
           <MebiusBrand size="compact" :text="false" />
           <div class="min-w-0">
-            <h1 class="m-0 text-xl font-semibold">{{ locale.t('commandPolicy') }}</h1>
+            <h1 class="settings-title m-0 text-xl font-semibold">{{ locale.t('commandPolicy') }}</h1>
             <p class="m-0 text-sm text-mebius-muted">{{ locale.t('commandPolicyHint') }}</p>
           </div>
         </div>
         <div class="flex items-center gap-2">
+          <ThemeToggle />
           <n-button size="small" quaternary @click="locale.toggleLocale">
             {{ locale.t('languageSwitch') }}
           </n-button>
@@ -115,7 +117,7 @@ onMounted(load);
 
       <div v-if="policy" class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div class="space-y-4">
-          <section class="border border-mebius-border bg-white">
+          <section class="settings-panel">
             <header class="flex items-center gap-3 border-b border-mebius-border px-4 py-3">
               <n-icon class="text-emerald-600"><ShieldCheck /></n-icon>
               <div>
@@ -156,7 +158,7 @@ onMounted(load);
             </div>
           </section>
 
-          <section class="border border-mebius-border bg-white p-4">
+          <section class="settings-panel settings-panel--padded">
             <div class="mb-3 flex items-center gap-3">
               <n-icon class="text-slate-600"><Terminal /></n-icon>
               <div>
@@ -174,7 +176,7 @@ onMounted(load);
           </section>
         </div>
 
-        <aside class="border border-mebius-border bg-white">
+        <aside class="settings-panel">
           <header class="border-b border-mebius-border px-4 py-3">
             <h2 class="m-0 text-sm font-semibold">{{ locale.t('effectiveCommands') }}</h2>
             <p class="m-0 text-xs text-mebius-muted">

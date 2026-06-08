@@ -29,7 +29,7 @@ const renderedMarkdown = computed(() => DOMPurify.sanitize(markdown.render(props
 
 <style scoped>
 .markdown-body {
-  color: #1f2937;
+  color: var(--workspace-message-text, var(--mebius-ink));
   overflow-wrap: anywhere;
 }
 
@@ -46,6 +46,7 @@ const renderedMarkdown = computed(() => DOMPurify.sanitize(markdown.render(props
 }
 
 .markdown-body :deep(p) {
+  color: var(--workspace-message-text, var(--mebius-ink));
   margin: 0 0 0.75rem;
 }
 
@@ -53,7 +54,7 @@ const renderedMarkdown = computed(() => DOMPurify.sanitize(markdown.render(props
 .markdown-body :deep(h2),
 .markdown-body :deep(h3),
 .markdown-body :deep(h4) {
-  color: #111827;
+  color: var(--workspace-message-text, var(--mebius-ink));
   font-weight: 650;
   line-height: 1.35;
   margin: 1rem 0 0.5rem;
@@ -79,35 +80,37 @@ const renderedMarkdown = computed(() => DOMPurify.sanitize(markdown.render(props
 }
 
 .markdown-body :deep(li) {
+  color: var(--workspace-message-text, var(--mebius-ink));
   margin: 0.25rem 0;
 }
 
 .markdown-body :deep(hr) {
   border: 0;
-  border-top: 1px solid #d9dee7;
+  border-top: 1px solid var(--workspace-card-border, var(--mebius-border));
   margin: 1rem 0;
 }
 
 .markdown-body :deep(blockquote) {
-  border-left: 3px solid #d9dee7;
-  color: #4b5563;
+  border-left: 3px solid var(--mebius-accent);
+  color: var(--workspace-message-text, var(--mebius-ink));
   margin: 0 0 0.75rem;
   padding-left: 0.85rem;
 }
 
 .markdown-body :deep(code) {
-  background: #f1f5f9;
+  background: color-mix(in srgb, var(--workspace-card-subtle, var(--mebius-code-bg)) 86%, var(--mebius-accent) 14%);
   border-radius: 4px;
-  color: #0f172a;
+  color: var(--workspace-message-text, var(--mebius-ink));
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 0.92em;
   padding: 0.12rem 0.28rem;
 }
 
 .markdown-body :deep(pre) {
-  background: #0f172a;
+  background: var(--mebius-code-bg);
+  border: 1px solid var(--workspace-card-border, var(--mebius-border));
   border-radius: 6px;
-  color: #e5e7eb;
+  color: var(--workspace-message-text, var(--mebius-ink));
   margin: 0 0 0.85rem;
   overflow-x: auto;
   padding: 0.85rem;
@@ -131,14 +134,24 @@ const renderedMarkdown = computed(() => DOMPurify.sanitize(markdown.render(props
 
 .markdown-body :deep(th),
 .markdown-body :deep(td) {
-  border: 1px solid #d9dee7;
+  border: 1px solid var(--workspace-card-border, var(--mebius-border));
+  color: var(--workspace-message-text, var(--mebius-ink));
   padding: 0.35rem 0.5rem;
   text-align: left;
 }
 
+.markdown-body :deep(th) {
+  background: var(--workspace-card-subtle, var(--mebius-code-bg));
+  font-weight: 700;
+}
+
 .markdown-body :deep(a) {
-  color: #0f766e;
+  color: var(--mebius-accent);
   text-decoration: underline;
   text-underline-offset: 2px;
+}
+
+pre {
+  color: var(--workspace-message-text, var(--mebius-ink));
 }
 </style>

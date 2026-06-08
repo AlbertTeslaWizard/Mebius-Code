@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsBoolean, IsInt, IsOptional, Max, Min, ValidateNested } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsOptional, Max, Min, ValidateNested } from 'class-validator';
 
 export class UpdateLayoutPreferencesDto {
   @IsOptional()
@@ -23,9 +23,20 @@ export class UpdateLayoutPreferencesDto {
   rightSidebarWidth?: number;
 }
 
+export class UpdateThemePreferencesDto {
+  @IsOptional()
+  @IsIn(['dark', 'light'])
+  mode?: 'dark' | 'light';
+}
+
 export class UpdateUserPreferencesDto {
   @IsOptional()
   @ValidateNested()
   @Type(() => UpdateLayoutPreferencesDto)
   layout?: UpdateLayoutPreferencesDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => UpdateThemePreferencesDto)
+  theme?: UpdateThemePreferencesDto;
 }

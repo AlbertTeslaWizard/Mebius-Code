@@ -37,12 +37,14 @@ withDefaults(
 
 .mebius-brand__mark {
   aspect-ratio: 1672 / 941;
-  background: #140603;
-  border: 1px solid rgb(255 179 71 / 45%);
+  background:
+    linear-gradient(145deg, rgb(255 159 67 / 20%), transparent 44%),
+    #140603;
+  border: 1px solid rgb(255 179 71 / 56%);
   border-radius: 7px;
   box-shadow:
-    0 0 0 1px rgb(15 23 42 / 4%),
-    0 8px 22px rgb(234 88 12 / 16%);
+    0 0 0 1px rgb(255 255 255 / 9%),
+    0 10px 28px rgb(255 159 67 / 22%);
   flex: 0 0 auto;
   overflow: hidden;
   position: relative;
@@ -50,7 +52,9 @@ withDefaults(
 }
 
 .mebius-brand__mark::after {
-  background: linear-gradient(110deg, rgb(255 255 255 / 18%), transparent 36%, rgb(255 255 255 / 10%));
+  background:
+    linear-gradient(110deg, rgb(255 255 255 / 24%), transparent 36%, rgb(255 255 255 / 10%)),
+    radial-gradient(circle at 18% 18%, rgb(255 191 115 / 26%), transparent 34%);
   content: "";
   inset: 0;
   pointer-events: none;
@@ -69,15 +73,15 @@ withDefaults(
 }
 
 .mebius-brand__name {
-  color: #0f172a;
+  color: var(--mebius-ink);
   font-size: 18px;
-  font-weight: 700;
+  font-weight: 800;
   line-height: 1.15;
   margin: 0;
 }
 
 .mebius-brand__subtitle {
-  color: #667085;
+  color: var(--mebius-muted);
   font-size: 12px;
   line-height: 1.35;
   margin: 0.2rem 0 0;
@@ -111,13 +115,20 @@ withDefaults(
 .mebius-brand--hero .mebius-brand__mark {
   border-radius: 8px;
   box-shadow:
-    0 0 0 1px rgb(15 23 42 / 5%),
-    0 18px 42px rgb(234 88 12 / 22%);
+    0 0 0 1px rgb(255 255 255 / 10%),
+    0 22px 58px rgb(255 159 67 / 28%);
   width: 104px;
 }
 
 .mebius-brand--hero .mebius-brand__name {
   font-size: 24px;
+}
+
+:global(:root[data-theme="light"]) .mebius-brand__mark {
+  box-shadow:
+    0 0 0 1px rgb(255 255 255 / 70%),
+    0 12px 34px rgb(15 118 110 / 14%),
+    0 10px 30px rgb(255 159 67 / 13%);
 }
 
 .mebius-brand--hero .mebius-brand__subtitle {

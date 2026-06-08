@@ -4,6 +4,7 @@ import { RouterLink, useRoute } from 'vue-router';
 import { useMessage } from 'naive-ui';
 import { sendRegisterVerificationCode } from '../api/http';
 import MebiusBrand from '../components/MebiusBrand.vue';
+import ThemeToggle from '../components/ThemeToggle.vue';
 import { useAuthStore } from '../stores/auth';
 import { useLocaleStore } from '../stores/locale';
 
@@ -96,17 +97,20 @@ onUnmounted(clearCountdown);
 </script>
 
 <template>
-  <main class="flex min-h-screen items-center justify-center bg-mebius-bg px-6">
-    <section class="w-full max-w-[420px] rounded border border-mebius-border bg-white p-7 shadow-sm">
+  <main class="auth-shell mebius-app-bg flex min-h-screen items-center justify-center px-5 py-8">
+    <section class="auth-card mebius-surface mebius-focus-ring w-full max-w-[440px] rounded-lg p-7">
       <div class="mb-7 flex items-start justify-between gap-3">
         <MebiusBrand
           class="min-w-0 flex-1"
           size="hero"
           :subtitle="isRegister ? locale.t('createWorkspaceAccount') : locale.t('signInWorkspace')"
         />
-        <n-button class="shrink-0" size="small" quaternary @click="locale.toggleLocale">
-          {{ locale.t('languageSwitch') }}
-        </n-button>
+        <div class="flex shrink-0 items-center gap-1">
+          <ThemeToggle />
+          <n-button size="small" quaternary @click="locale.toggleLocale">
+            {{ locale.t('languageSwitch') }}
+          </n-button>
+        </div>
       </div>
 
       <n-alert v-if="error" class="mb-4" type="error" :show-icon="false">
@@ -185,3 +189,56 @@ onUnmounted(clearCountdown);
     </section>
   </main>
 </template>
+
+<style scoped>
+.auth-shell {
+  overflow: hidden;
+  position: relative;
+}
+
+.auth-shell::before,
+.auth-shell::after {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+}
+
+.auth-shell::before {
+  background:
+    linear-gradient(90deg, rgb(255 255 255 / 7%) 1px, transparent 1px),
+    linear-gradient(0deg, rgb(255 255 255 / 5%) 1px, transparent 1px);
+  inset: 0;
+  mask-image: radial-gradient(circle at 50% 42%, black 0%, transparent 68%);
+  opacity: 0.5;
+  background-size: 44px 44px;
+}
+
+.auth-shell::after {
+  background:
+    radial-gradient(circle, rgb(255 159 67 / 28%), transparent 52%),
+    radial-gradient(circle at 68% 42%, rgb(34 211 238 / 18%), transparent 48%);
+  filter: blur(8px);
+  height: min(68vw, 760px);
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(82vw, 940px);
+}
+
+.auth-card {
+  position: relative;
+  z-index: 1;
+}
+
+:global(:root[data-theme="light"]) .auth-shell::before {
+  background:
+    linear-gradient(90deg, rgb(15 118 110 / 9%) 1px, transparent 1px),
+    linear-gradient(0deg, rgb(15 118 110 / 7%) 1px, transparent 1px);
+}
+
+:global(:root[data-theme="light"]) .auth-shell::after {
+  background:
+    radial-gradient(circle, rgb(15 118 110 / 14%), transparent 52%),
+    radial-gradient(circle at 68% 42%, rgb(255 159 67 / 16%), transparent 48%);
+}
+</style>

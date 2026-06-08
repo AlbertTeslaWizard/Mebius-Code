@@ -51,7 +51,9 @@ import CodeEditor from '../components/CodeEditor.vue';
 import DiffPreview from '../components/DiffPreview.vue';
 import MebiusBrand from '../components/MebiusBrand.vue';
 import MessageContent from '../components/MessageContent.vue';
+import ThemeToggle from '../components/ThemeToggle.vue';
 import WorkspaceFileTree from '../components/WorkspaceFileTree.vue';
+import { getAccessToken } from '../api/http';
 import { useApprovalStore } from '../stores/approvals';
 import { defaultUserPreferences, useAuthStore } from '../stores/auth';
 import { useLocaleStore } from '../stores/locale';
@@ -443,8 +445,15 @@ onMounted(async () => {
   setupCompactViewportQuery();
   window.addEventListener('resize', handleWindowResize);
   window.addEventListener('beforeunload', handleBeforeUnload);
-  await Promise.all([auth.fetchMe(), approvals.loadPending()]);
-  await workspace.bootstrap();
+  try {
+    await Promise.all([auth.fetchMe(), approvals.loadPending()]);
+    await workspace.bootstrap();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : locale.t('operationFailed');
+    if (!getAccessToken()) {
+      await router.replace({ name: 'login' });
+    }
+  }
 });
 
 onBeforeUnmount(() => {
@@ -1762,7 +1771,7 @@ function truncate(value: string, maxLength: number) {
 </script>
 
 <template>
-  <main class="h-screen overflow-hidden bg-mebius-bg text-mebius-ink">
+  <main class="workspace-root mebius-app-bg h-screen overflow-hidden text-mebius-ink">
     <div
       class="workspace-shell"
       :class="{
@@ -1787,7 +1796,7 @@ function truncate(value: string, maxLength: number) {
         :inert="leftSidebarInert"
         :aria-hidden="leftSidebarInert"
       >
-        <header class="border-b border-mebius-border p-4">
+        <header class="workspace-panel-header border-b border-mebius-border p-4">
           <div class="mb-3 flex items-center justify-between">
             <MebiusBrand class="min-w-0" :subtitle="auth.user?.email ?? locale.t('workspace')" />
             <div class="flex items-center gap-1">
@@ -2116,7 +2125,7 @@ function truncate(value: string, maxLength: number) {
       </aside>
 
       <section class="workspace-main flex min-h-0 min-w-0 flex-col">
-        <header class="flex items-center justify-between border-b border-mebius-border bg-white px-4 py-3">
+        <header class="workspace-topbar flex items-center justify-between border-b border-mebius-border bg-white px-4 py-3">
           <div class="flex min-w-0 items-center gap-2">
             <n-button
               circle
@@ -2143,6 +2152,7 @@ function truncate(value: string, maxLength: number) {
               <template #icon><n-icon><Cable /></n-icon></template>
               {{ locale.t('connect') }}
             </n-button>
+            <ThemeToggle />
             <n-button size="small" quaternary @click="locale.toggleLocale">
               {{ locale.t('languageSwitch') }}
             </n-button>
@@ -2224,7 +2234,7 @@ function truncate(value: string, maxLength: number) {
           <div class="flex min-h-0 flex-col">
             <div
               ref="chatScrollContainer"
-              class="min-h-0 flex-1 overflow-y-auto p-4 scrollbar-thin"
+              class="chat-scroll min-h-0 flex-1 overflow-y-auto p-4 scrollbar-thin"
               @scroll="handleChatScroll"
             >
               <div v-if="workspace.messages.length === 0" class="chat-empty-state">
@@ -2234,7 +2244,8 @@ function truncate(value: string, maxLength: number) {
               <div
                 v-for="message in workspace.messages"
                 :key="message.id"
-                class="mb-3 rounded border border-mebius-border bg-white p-3"
+                class="chat-message mb-3 rounded border border-mebius-border bg-white p-3"
+                :class="`chat-message--${message.role}`"
               >
                 <div class="mb-2 text-xs font-semibold uppercase tracking-wide text-mebius-muted">
                   {{ message.role }}
@@ -2260,8 +2271,8 @@ function truncate(value: string, maxLength: number) {
 
             </div>
 
-            <footer class="border-t border-mebius-border bg-white p-3">
-              <div class="rounded-2xl border border-mebius-border bg-white shadow-sm">
+            <footer class="composer-footer border-t border-mebius-border bg-white p-3">
+              <div class="composer-shell rounded-2xl border border-mebius-border bg-white shadow-sm">
                 <n-input
                   v-model:value="composer"
                   type="textarea"
@@ -3007,8 +3018,8 @@ function truncate(value: string, maxLength: number) {
             <button
               v-for="provider in connectProviders"
               :key="provider.id"
-              class="w-full rounded border border-mebius-border p-3 text-left hover:bg-slate-50"
-              :class="connectSelected?.id === provider.id ? 'border-mebius-accent bg-teal-50' : ''"
+              class="connect-provider-card w-full rounded border border-mebius-border p-3 text-left hover:bg-slate-50"
+              :class="{ 'is-selected border-mebius-accent bg-teal-50': connectSelected?.id === provider.id }"
               @click="chooseProvider(provider)"
             >
               <div class="font-medium">{{ provider.displayName }}</div>
@@ -4272,5 +4283,964 @@ function truncate(value: string, maxLength: number) {
     box-shadow: 0 24px 80px rgb(15 23 42 / 18%);
     transform: translateX(0);
   }
+}
+
+.workspace-root {
+  position: relative;
+}
+
+.workspace-root::before {
+  background:
+    linear-gradient(90deg, rgb(255 255 255 / 5%) 1px, transparent 1px),
+    linear-gradient(0deg, rgb(255 255 255 / 4%) 1px, transparent 1px);
+  background-size: 38px 38px;
+  content: "";
+  inset: 0;
+  mask-image: radial-gradient(circle at 48% 32%, black 0%, transparent 70%);
+  opacity: 0.44;
+  pointer-events: none;
+  position: absolute;
+}
+
+.workspace-root > .workspace-shell {
+  position: relative;
+  z-index: 1;
+}
+
+.workspace-side-panel,
+.workspace-topbar,
+.session-pane,
+.composer-footer {
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 7%), transparent 32%),
+    var(--mebius-panel) !important;
+  backdrop-filter: blur(22px);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 6%);
+}
+
+.workspace-main {
+  background:
+    radial-gradient(circle at 55% -10%, rgb(255 159 67 / 10%), transparent 30rem),
+    rgb(7 10 18 / 46%);
+}
+
+.workspace-topbar {
+  box-shadow: 0 12px 42px rgb(0 0 0 / 18%);
+}
+
+.left-sidebar-card,
+.session-pane {
+  color: var(--mebius-ink-soft);
+}
+
+.left-sidebar-disclosure {
+  background: transparent;
+  color: var(--mebius-ink);
+}
+
+.left-sidebar-disclosure:hover,
+.left-sidebar-disclosure:focus-visible {
+  background: rgb(255 255 255 / 6%);
+}
+
+.left-sidebar-disclosure__chevron {
+  color: var(--mebius-muted);
+}
+
+.workspace-side-panel :deep(.n-list),
+.workspace-side-panel :deep(.n-list-item) {
+  background: transparent;
+  color: var(--mebius-ink-soft);
+}
+
+.workspace-side-panel :deep(.n-list-item:hover),
+.workspace-side-panel :deep(.n-list-item.bg-slate-100),
+.session-pane :deep(.n-list-item.bg-slate-100) {
+  background:
+    linear-gradient(90deg, rgb(255 159 67 / 14%), transparent 90%),
+    rgb(255 255 255 / 6%) !important;
+  color: var(--mebius-ink);
+}
+
+.workspace-side-panel :deep(.n-thing-main__content),
+.workspace-side-panel :deep(.n-thing-header__title),
+.workspace-side-panel :deep(.n-thing-main__description),
+.session-pane :deep(.n-thing-main__content),
+.session-pane :deep(.n-thing-header__title),
+.session-pane :deep(.n-thing-main__description) {
+  color: inherit;
+}
+
+.chat-scroll {
+  background:
+    radial-gradient(circle at 30% 0%, rgb(34 211 238 / 7%), transparent 24rem),
+    radial-gradient(circle at 82% 12%, rgb(255 159 67 / 8%), transparent 28rem);
+}
+
+.chat-empty-state {
+  background:
+    radial-gradient(circle at 50% -20%, rgb(255 159 67 / 18%), transparent 48%),
+    linear-gradient(180deg, rgb(255 255 255 / 7%) 0%, rgb(255 255 255 / 3%) 100%),
+    linear-gradient(90deg, rgb(255 159 67 / 10%) 1px, transparent 1px) 0 0 / 28px 100%;
+  border-color: var(--mebius-border);
+  color: var(--mebius-muted);
+}
+
+.chat-empty-state__brand {
+  filter: saturate(1.08);
+  opacity: 0.92;
+}
+
+.chat-message {
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 7%), transparent 72%),
+    rgb(13 20 32 / 78%) !important;
+  border-color: var(--mebius-border) !important;
+  box-shadow: 0 14px 36px rgb(0 0 0 / 16%);
+  margin-left: 0;
+  max-width: min(880px, 100%);
+}
+
+.chat-message--user {
+  background:
+    linear-gradient(180deg, rgb(255 159 67 / 18%), transparent 80%),
+    rgb(22 20 22 / 86%) !important;
+  border-color: rgb(255 159 67 / 28%) !important;
+  margin-left: auto;
+}
+
+.chat-message--assistant {
+  border-color: rgb(34 211 238 / 22%) !important;
+}
+
+.composer-shell {
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 9%), transparent 80%),
+    rgb(11 17 29 / 90%) !important;
+  border-color: rgb(255 159 67 / 24%) !important;
+  box-shadow:
+    0 18px 56px rgb(0 0 0 / 28%),
+    0 0 0 1px rgb(255 255 255 / 4%);
+  overflow: hidden;
+}
+
+.composer-shell:focus-within {
+  border-color: rgb(255 159 67 / 54%) !important;
+  box-shadow:
+    0 22px 70px rgb(0 0 0 / 34%),
+    0 0 0 3px rgb(255 159 67 / 12%);
+}
+
+.workspace-content-resize-handle::before,
+.sidebar-resize-handle::before,
+.file-pane-resize-handle::before {
+  background: var(--mebius-border);
+}
+
+.workspace-content-resize-handle::after,
+.sidebar-resize-handle::after,
+.file-pane-resize-handle::after {
+  background: var(--mebius-accent);
+  box-shadow: 0 0 0 3px rgb(255 159 67 / 14%);
+}
+
+.workspace-content-resize-handle:hover::before,
+.workspace-content-resize-handle:focus-visible::before,
+.workspace-content-resize-handle.is-active::before,
+.sidebar-resize-handle:hover::before,
+.sidebar-resize-handle:focus-visible::before,
+.sidebar-resize-handle.is-active::before,
+.file-pane-resize-handle:hover::before,
+.file-pane-resize-handle:focus-visible::before,
+.file-pane-resize-handle.is-active::before {
+  background: var(--mebius-accent);
+}
+
+.workbench-tabs {
+  background: transparent;
+}
+
+.workbench-tabs :deep(.n-tabs-nav) {
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 7%), transparent),
+    rgb(9 15 26 / 76%);
+  border-bottom-color: var(--mebius-border);
+}
+
+.workbench-tabs :deep(.n-tabs-tab.n-tabs-tab--active) {
+  color: var(--mebius-accent);
+}
+
+.workbench-section,
+.review-card,
+.approval-card,
+.run-card,
+.event-item__body,
+.diagnostics-card {
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 7%) 0%, rgb(255 255 255 / 3%) 100%),
+    radial-gradient(circle at top right, rgb(255 159 67 / 12%), transparent 42%),
+    var(--mebius-panel) !important;
+  border-color: var(--mebius-border) !important;
+  box-shadow: var(--mebius-shadow-soft);
+  backdrop-filter: blur(18px);
+}
+
+.workbench-section__header,
+.review-card__header,
+.run-card__body,
+.diagnostics-strip,
+.event-item__payload,
+.approval-card__payload {
+  border-color: var(--mebius-border) !important;
+}
+
+.workbench-section__title,
+.review-card__title,
+.approval-card__title,
+.run-card__command,
+.event-item__type,
+.diagnostics-card__title {
+  color: var(--mebius-ink);
+}
+
+.workbench-section__title .n-icon,
+.diagnostics-card__icon,
+.event-item__dot {
+  color: var(--mebius-accent);
+}
+
+.workbench-section__subtitle,
+.review-card__meta,
+.review-plan-summary,
+.review-plan-steps__detail,
+.review-plan-steps__status,
+.approval-card__meta,
+.run-card__meta,
+.run-card__cwd,
+.event-item__summary,
+.diagnostics-card__summary,
+.diagnostics-card__meta {
+  color: var(--mebius-muted);
+}
+
+.workbench-tree-shell {
+  background:
+    linear-gradient(90deg, rgb(148 163 184 / 13%) 1px, transparent 1px) 18px 0 / 18px 100%,
+    rgb(6 11 20 / 24%);
+}
+
+.workspace-side-panel .bg-slate-50,
+.workspace-side-panel .bg-white\/70,
+.connect-provider-card {
+  background: rgb(255 255 255 / 5%) !important;
+  color: var(--mebius-ink-soft) !important;
+}
+
+.workspace-side-panel .text-slate-800,
+.workspace-side-panel .text-slate-700 {
+  color: var(--mebius-ink) !important;
+}
+
+.connect-provider-card:hover,
+.connect-provider-card.is-selected {
+  background:
+    linear-gradient(90deg, rgb(255 159 67 / 14%), transparent 90%),
+    rgb(255 255 255 / 7%) !important;
+  border-color: var(--mebius-accent) !important;
+}
+
+.review-plan-steps li,
+.workbench-empty-state,
+.command-preview,
+.command-request,
+.run-output,
+.run-output header {
+  background: rgb(255 255 255 / 4%) !important;
+  border-color: var(--mebius-border) !important;
+  color: var(--mebius-ink-soft);
+}
+
+.run-output pre,
+.event-item__payload,
+.approval-card__payload {
+  background: var(--mebius-code-bg) !important;
+  color: var(--mebius-ink-soft);
+}
+
+.event-item__rail::after {
+  background: var(--mebius-border);
+}
+
+:global(:root[data-theme="light"]) .workspace-root::before {
+  background:
+    linear-gradient(90deg, rgb(15 118 110 / 8%) 1px, transparent 1px),
+    linear-gradient(0deg, rgb(15 118 110 / 6%) 1px, transparent 1px);
+}
+
+:global(:root[data-theme="light"]) .workspace-side-panel,
+:global(:root[data-theme="light"]) .workspace-topbar,
+:global(:root[data-theme="light"]) .session-pane,
+:global(:root[data-theme="light"]) .composer-footer,
+:global(:root[data-theme="light"]) .workbench-section,
+:global(:root[data-theme="light"]) .review-card,
+:global(:root[data-theme="light"]) .approval-card,
+:global(:root[data-theme="light"]) .run-card,
+:global(:root[data-theme="light"]) .event-item__body,
+:global(:root[data-theme="light"]) .diagnostics-card,
+:global(:root[data-theme="light"]) .composer-shell,
+:global(:root[data-theme="light"]) .chat-message {
+  background: var(--mebius-panel) !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-main {
+  background:
+    radial-gradient(circle at 55% -10%, rgb(15 118 110 / 9%), transparent 30rem),
+    rgb(255 255 255 / 38%);
+}
+
+:global(:root[data-theme="light"]) .workbench-tabs :deep(.n-tabs-nav) {
+  background: rgb(255 255 255 / 82%);
+}
+
+:global(:root[data-theme="light"]) .chat-message--user {
+  background:
+    linear-gradient(180deg, rgb(15 118 110 / 8%), transparent 80%),
+    #ffffff !important;
+  border-color: rgb(15 118 110 / 24%) !important;
+}
+
+:global(:root[data-theme="light"]) .workbench-tree-shell {
+  background:
+    linear-gradient(90deg, rgb(15 118 110 / 8%) 1px, transparent 1px) 18px 0 / 18px 100%,
+    rgb(255 255 255 / 56%);
+}
+
+:global(:root[data-theme="light"]) .workspace-side-panel .bg-slate-50,
+:global(:root[data-theme="light"]) .workspace-side-panel .bg-white\/70,
+:global(:root[data-theme="light"]) .connect-provider-card {
+  background: #ffffff !important;
+  color: var(--mebius-ink-soft) !important;
+}
+
+/* Production workspace theme correction.
+   This is the final layer for shell contrast, so light and dark stay readable. */
+.workspace-root {
+  background: var(--workspace-canvas) !important;
+  color: var(--workspace-message-text);
+}
+
+.workspace-root::before {
+  background:
+    linear-gradient(90deg, rgb(255 255 255 / 5%) 1px, transparent 1px),
+    linear-gradient(0deg, rgb(255 255 255 / 4%) 1px, transparent 1px);
+  opacity: 0.16;
+}
+
+:global(:root[data-theme="light"]) .workspace-root::before {
+  background:
+    linear-gradient(90deg, rgb(15 118 110 / 4%) 1px, transparent 1px),
+    linear-gradient(0deg, rgb(15 118 110 / 3%) 1px, transparent 1px);
+  opacity: 0.16;
+}
+
+.workspace-main {
+  background:
+    radial-gradient(circle at 45% -12%, color-mix(in srgb, var(--mebius-accent) 12%, transparent), transparent 30rem),
+    var(--workspace-canvas) !important;
+}
+
+.chat-scroll {
+  background:
+    radial-gradient(circle at 28% 0%, color-mix(in srgb, var(--mebius-cyan) 8%, transparent), transparent 24rem),
+    radial-gradient(circle at 82% 12%, color-mix(in srgb, var(--mebius-accent) 8%, transparent), transparent 28rem),
+    var(--workspace-canvas) !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-main,
+:global(:root[data-theme="light"]) .chat-scroll {
+  background:
+    radial-gradient(circle at 36% -10%, rgb(15 118 110 / 4%), transparent 30rem),
+    radial-gradient(circle at 88% 6%, rgb(255 159 67 / 3%), transparent 28rem),
+    var(--workspace-canvas) !important;
+}
+
+.workspace-side-panel,
+.workspace-topbar,
+.session-pane,
+.composer-footer,
+.workbench-tabs :deep(.n-tabs-nav),
+.workbench-section,
+.review-card,
+.approval-card,
+.run-card,
+.event-item__body,
+.diagnostics-card {
+  background: var(--workspace-panel-bg) !important;
+  border-color: var(--workspace-card-border) !important;
+  color: var(--workspace-message-text);
+  box-shadow: 0 1px 0 var(--workspace-card-border);
+  backdrop-filter: none;
+}
+
+:global(:root[data-theme="light"]) .workspace-side-panel,
+:global(:root[data-theme="light"]) .workspace-topbar,
+:global(:root[data-theme="light"]) .session-pane,
+:global(:root[data-theme="light"]) .composer-footer,
+:global(:root[data-theme="light"]) .workbench-tabs :deep(.n-tabs-nav),
+:global(:root[data-theme="light"]) .workbench-section,
+:global(:root[data-theme="light"]) .review-card,
+:global(:root[data-theme="light"]) .approval-card,
+:global(:root[data-theme="light"]) .run-card,
+:global(:root[data-theme="light"]) .event-item__body,
+:global(:root[data-theme="light"]) .diagnostics-card {
+  box-shadow: var(--workspace-panel-shadow);
+}
+
+.left-sidebar-card,
+.session-pane,
+.workspace-side-panel :deep(.n-list),
+.workspace-side-panel :deep(.n-list-item),
+.session-pane :deep(.n-list),
+.session-pane :deep(.n-list-item) {
+  background: transparent;
+  color: var(--workspace-message-text);
+}
+
+.workspace-side-panel :deep(.n-thing-main__content),
+.workspace-side-panel :deep(.n-thing-header__title),
+.session-pane :deep(.n-thing-main__content),
+.session-pane :deep(.n-thing-header__title) {
+  color: inherit;
+}
+
+.left-sidebar-disclosure {
+  background: transparent;
+  color: var(--workspace-message-text);
+}
+
+.left-sidebar-disclosure:hover,
+.left-sidebar-disclosure:focus-visible,
+.workspace-side-panel :deep(.n-list-item:hover),
+.workspace-side-panel :deep(.n-list-item.bg-slate-100),
+.session-pane :deep(.n-list-item:hover),
+.session-pane :deep(.n-list-item.bg-slate-100) {
+  background: var(--workspace-hover-bg) !important;
+  color: var(--workspace-message-text);
+}
+
+.workspace-side-panel :deep(.n-list-item.bg-slate-100),
+.session-pane :deep(.n-list-item.bg-slate-100) {
+  background: var(--workspace-selected-bg) !important;
+  box-shadow: inset 3px 0 0 var(--mebius-accent);
+}
+
+.left-sidebar-disclosure__chevron,
+.workbench-tabs :deep(.n-tabs-tab),
+.chat-message .text-mebius-muted {
+  color: var(--workspace-message-muted) !important;
+}
+
+.workbench-tabs {
+  background: transparent !important;
+}
+
+.workbench-tabs :deep(.n-tabs-nav) {
+  background: var(--workspace-tab-bg) !important;
+  box-shadow: 0 1px 0 var(--workspace-card-border);
+}
+
+.workbench-tabs :deep(.n-tabs-tab__label) {
+  color: inherit;
+}
+
+.workbench-tabs :deep(.n-tabs-tab.n-tabs-tab--active) {
+  color: var(--mebius-accent) !important;
+}
+
+.workbench-tabs :deep(.n-tabs-bar) {
+  background-color: var(--mebius-accent);
+}
+
+.chat-empty-state,
+.workbench-empty-state,
+.command-preview,
+.command-request,
+.review-plan-steps li,
+.run-output,
+.run-output header,
+.workbench-tree-shell {
+  background: var(--workspace-card-subtle) !important;
+  border-color: var(--workspace-card-border) !important;
+  color: var(--workspace-message-text);
+}
+
+.chat-empty-state {
+  background:
+    radial-gradient(circle at 50% -24%, color-mix(in srgb, var(--mebius-accent) 14%, transparent), transparent 50%),
+    var(--workspace-card-subtle) !important;
+}
+
+.chat-message {
+  background: var(--workspace-card-bg) !important;
+  border: 1px solid var(--workspace-card-border) !important;
+  border-left: 4px solid var(--mebius-accent) !important;
+  color: var(--workspace-message-text);
+  margin-left: 0;
+  max-width: min(900px, 100%);
+  overflow: hidden;
+  position: relative;
+}
+
+:global(:root[data-theme="dark"]) .chat-message {
+  box-shadow: 0 14px 36px rgb(0 0 0 / 18%);
+}
+
+:global(:root[data-theme="light"]) .chat-message {
+  box-shadow: 0 10px 24px rgb(35 54 74 / 9%);
+}
+
+.chat-message--user {
+  background: var(--workspace-message-user-bg) !important;
+  border-color: color-mix(in srgb, var(--mebius-accent) 42%, var(--workspace-card-border)) !important;
+  border-left-color: var(--mebius-accent) !important;
+  margin-left: auto;
+}
+
+.chat-message--assistant {
+  background: var(--workspace-message-assistant-bg) !important;
+  border-left-color: color-mix(in srgb, var(--mebius-accent) 58%, var(--workspace-card-border)) !important;
+}
+
+.chat-message--tool,
+.chat-message--system {
+  background: var(--workspace-message-tool-bg) !important;
+  border-left-color: var(--workspace-message-muted) !important;
+}
+
+.composer-shell {
+  background: var(--workspace-input-bg) !important;
+  border-color: var(--workspace-card-border) !important;
+  box-shadow: 0 8px 22px rgb(15 23 42 / 6%);
+}
+
+.composer-shell:focus-within {
+  border-color: color-mix(in srgb, var(--mebius-accent) 58%, var(--workspace-card-border)) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--mebius-accent) 16%, transparent);
+}
+
+.composer-shell :deep(.n-input),
+.composer-shell :deep(.n-input-wrapper),
+.composer-shell :deep(.n-input__textarea-el),
+.composer-shell :deep(.n-input__input-el) {
+  background: transparent !important;
+  color: var(--workspace-message-text) !important;
+}
+
+.composer-shell :deep(.n-input__placeholder) {
+  color: var(--workspace-placeholder-text) !important;
+}
+
+.workspace-root :deep(.n-button:not(.n-button--primary-type)) {
+  color: var(--workspace-message-text) !important;
+}
+
+.workspace-root :deep(.n-button--primary-type) {
+  color: #ffffff !important;
+}
+
+.workspace-root :deep(.n-input),
+.workspace-root :deep(.n-base-selection),
+.workspace-root :deep(.n-dropdown-menu),
+.workspace-root :deep(.n-popover) {
+  color: var(--workspace-message-text) !important;
+}
+
+.workspace-root :deep(.n-input__input-el),
+.workspace-root :deep(.n-input__textarea-el),
+.workspace-root :deep(.n-base-selection-label),
+.workspace-root :deep(.n-base-selection-input),
+.workspace-root :deep(.n-base-selection-input__content),
+.workspace-root :deep(.n-thing-header__title),
+.workspace-root :deep(.n-thing-main__content),
+.workspace-root :deep(.n-thing-main__description),
+.workspace-root :deep(.n-button__content),
+.workspace-root :deep(.n-tabs-tab__label),
+.workspace-root :deep(.mebius-brand__name) {
+  color: var(--workspace-message-text) !important;
+}
+
+.workspace-root :deep(.n-input__placeholder),
+.workspace-root :deep(.n-base-selection-placeholder),
+.workspace-root :deep(.n-base-selection__placeholder),
+.workspace-root :deep(.mebius-brand__subtitle) {
+  color: var(--workspace-placeholder-text) !important;
+}
+
+.workspace-root :deep(.n-button .n-icon),
+.workspace-root :deep(.n-base-icon),
+.workspace-root :deep(.n-input__suffix),
+.workspace-root :deep(.n-base-selection-suffix),
+.workspace-root :deep(.n-tabs-tab .n-icon) {
+  color: var(--workspace-icon-muted) !important;
+}
+
+.workspace-root :deep(.n-button:hover .n-icon),
+.workspace-root :deep(.n-button:focus-visible .n-icon),
+.workspace-root :deep(.n-tabs-tab.n-tabs-tab--active .n-icon) {
+  color: var(--mebius-accent) !important;
+}
+
+.workspace-root :deep(.n-button--primary-type .n-button__content),
+.workspace-root :deep(.n-button--primary-type .n-icon) {
+  color: #ffffff !important;
+}
+
+.workspace-content-resize-handle::before,
+.sidebar-resize-handle::before,
+.file-pane-resize-handle::before,
+.event-item__rail::after {
+  background: var(--workspace-card-border);
+}
+
+.workspace-content-resize-handle::after,
+.sidebar-resize-handle::after,
+.file-pane-resize-handle::after {
+  background: var(--mebius-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--mebius-accent) 16%, transparent);
+}
+
+.workbench-section__title,
+.review-card__title,
+.approval-card__title,
+.run-card__command,
+.event-item__type,
+.diagnostics-card__title {
+  color: var(--workspace-message-text);
+}
+
+.workbench-section__title .n-icon,
+.diagnostics-card__icon,
+.event-item__dot {
+  color: var(--mebius-accent);
+}
+
+.workbench-section__subtitle,
+.review-card__meta,
+.review-plan-summary,
+.review-plan-steps__detail,
+.review-plan-steps__status,
+.approval-card__meta,
+.run-card__meta,
+.run-card__cwd,
+.event-item__summary,
+.diagnostics-card__summary,
+.diagnostics-card__meta {
+  color: var(--workspace-message-muted) !important;
+}
+
+.event-item__payload,
+.approval-card__payload,
+.run-output pre {
+  background: var(--mebius-code-bg) !important;
+  color: var(--workspace-message-text);
+}
+
+.workspace-side-panel .bg-slate-50,
+.workspace-side-panel .bg-white\/70,
+.connect-provider-card {
+  background: var(--workspace-card-subtle) !important;
+  border-color: var(--workspace-card-border) !important;
+  color: var(--workspace-message-text) !important;
+}
+
+.workspace-side-panel .text-slate-800,
+.workspace-side-panel .text-slate-700,
+.workspace-side-panel .text-slate-600,
+.workspace-side-panel .text-slate-500,
+.workspace-main .text-slate-800,
+.workspace-main .text-slate-700,
+.workspace-main .text-slate-600,
+.workspace-main .text-slate-500 {
+  color: var(--workspace-message-text) !important;
+}
+
+.workspace-side-panel .text-mebius-muted,
+.workspace-main .text-mebius-muted {
+  color: var(--workspace-message-muted) !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-root :where(strong, h1, h2, h3, h4, h5, h6),
+:global(:root[data-theme="light"]) .workspace-root :deep(strong),
+:global(:root[data-theme="light"]) .workspace-root :deep(h1),
+:global(:root[data-theme="light"]) .workspace-root :deep(h2),
+:global(:root[data-theme="light"]) .workspace-root :deep(h3),
+:global(:root[data-theme="light"]) .workspace-root :deep(h4) {
+  color: var(--workspace-message-text) !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-root .text-mebius-muted,
+:global(:root[data-theme="light"]) .workspace-root :deep(.text-mebius-muted),
+:global(:root[data-theme="light"]) .workspace-root :deep(.text-slate-400),
+:global(:root[data-theme="light"]) .workspace-root :deep(.text-slate-500),
+:global(:root[data-theme="light"]) .workspace-root :deep(.text-slate-600) {
+  color: var(--workspace-message-muted) !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-side-panel,
+:global(:root[data-theme="light"]) .workspace-topbar,
+:global(:root[data-theme="light"]) .session-pane,
+:global(:root[data-theme="light"]) .composer-footer,
+:global(:root[data-theme="light"]) .workbench-section,
+:global(:root[data-theme="light"]) .review-card,
+:global(:root[data-theme="light"]) .approval-card,
+:global(:root[data-theme="light"]) .run-card,
+:global(:root[data-theme="light"]) .event-item__body,
+:global(:root[data-theme="light"]) .diagnostics-card,
+:global(:root[data-theme="light"]) .chat-message,
+:global(:root[data-theme="light"]) .composer-shell {
+  background: #ffffff !important;
+  border-color: var(--workspace-card-border) !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-side-panel :deep(.n-list-item:hover),
+:global(:root[data-theme="light"]) .workspace-side-panel :deep(.n-list-item.bg-slate-100),
+:global(:root[data-theme="light"]) .session-pane :deep(.n-list-item:hover),
+:global(:root[data-theme="light"]) .session-pane :deep(.n-list-item.bg-slate-100),
+:global(:root[data-theme="light"]) .left-sidebar-disclosure:hover,
+:global(:root[data-theme="light"]) .left-sidebar-disclosure:focus-visible {
+  background: var(--workspace-hover-bg) !important;
+  color: var(--workspace-message-text) !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-side-panel :deep(.n-list-item.bg-slate-100),
+:global(:root[data-theme="light"]) .session-pane :deep(.n-list-item.bg-slate-100) {
+  background: var(--workspace-selected-bg) !important;
+  box-shadow: inset 3px 0 0 var(--mebius-accent);
+}
+
+:global(:root[data-theme="light"]) .chat-message--user {
+  background: var(--workspace-message-user-bg) !important;
+}
+
+:global(:root[data-theme="light"]) .chat-message--assistant {
+  background: var(--workspace-message-assistant-bg) !important;
+}
+
+:global(:root[data-theme="light"]) .chat-message--tool,
+:global(:root[data-theme="light"]) .chat-message--system {
+  background: var(--workspace-message-tool-bg) !important;
+}
+
+:global(:root[data-theme="light"]) .chat-empty-state,
+:global(:root[data-theme="light"]) .workbench-empty-state,
+:global(:root[data-theme="light"]) .command-preview,
+:global(:root[data-theme="light"]) .command-request,
+:global(:root[data-theme="light"]) .review-plan-steps li,
+:global(:root[data-theme="light"]) .run-output,
+:global(:root[data-theme="light"]) .run-output header,
+:global(:root[data-theme="light"]) .workbench-tree-shell {
+  background: var(--workspace-card-subtle) !important;
+  border-color: var(--workspace-card-border) !important;
+  color: var(--workspace-message-text) !important;
+}
+
+.connect-provider-card:hover,
+.connect-provider-card.is-selected {
+  background: color-mix(in srgb, var(--mebius-accent) 10%, var(--workspace-card-bg)) !important;
+  border-color: var(--mebius-accent) !important;
+}
+
+/* Light theme readability clamp. Keep this as the final workspace layer. */
+:global(:root[data-theme="light"]) .workspace-root {
+  background: #f8fafc !important;
+  color: #111827 !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-main,
+:global(:root[data-theme="light"]) .chat-scroll {
+  background:
+    radial-gradient(circle at 36% -10%, rgb(15 118 110 / 4%), transparent 30rem),
+    radial-gradient(circle at 88% 6%, rgb(255 159 67 / 3%), transparent 28rem),
+    #f8fafc !important;
+  color: #111827 !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-side-panel,
+:global(:root[data-theme="light"]) .workspace-topbar,
+:global(:root[data-theme="light"]) .session-pane,
+:global(:root[data-theme="light"]) .composer-footer,
+:global(:root[data-theme="light"]) .workbench-tabs :deep(.n-tabs-nav),
+:global(:root[data-theme="light"]) .workbench-section,
+:global(:root[data-theme="light"]) .review-card,
+:global(:root[data-theme="light"]) .approval-card,
+:global(:root[data-theme="light"]) .run-card,
+:global(:root[data-theme="light"]) .event-item__body,
+:global(:root[data-theme="light"]) .diagnostics-card,
+:global(:root[data-theme="light"]) .chat-message,
+:global(:root[data-theme="light"]) .composer-shell {
+  background: #ffffff !important;
+  border-color: #d1d5db !important;
+  color: #111827 !important;
+  opacity: 1;
+}
+
+:global(:root[data-theme="light"]) .workspace-root :where(h1, h2, h3, h4, h5, h6, strong),
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-thing-header__title),
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-button__content),
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-tabs-tab__label),
+:global(:root[data-theme="light"]) .workspace-root :deep(.mebius-brand__name) {
+  color: #111827 !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-thing-main__content),
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-thing-main__description),
+:global(:root[data-theme="light"]) .workspace-root :deep(.mebius-brand__subtitle),
+:global(:root[data-theme="light"]) .workbench-section__subtitle,
+:global(:root[data-theme="light"]) .review-card__meta,
+:global(:root[data-theme="light"]) .review-plan-summary,
+:global(:root[data-theme="light"]) .review-plan-steps__detail,
+:global(:root[data-theme="light"]) .review-plan-steps__status,
+:global(:root[data-theme="light"]) .approval-card__meta,
+:global(:root[data-theme="light"]) .run-card__meta,
+:global(:root[data-theme="light"]) .run-card__cwd,
+:global(:root[data-theme="light"]) .event-item__summary,
+:global(:root[data-theme="light"]) .diagnostics-card__summary,
+:global(:root[data-theme="light"]) .diagnostics-card__meta {
+  color: #4b5563 !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-root .text-mebius-muted,
+:global(:root[data-theme="light"]) .workspace-root :deep(.text-mebius-muted),
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-input__placeholder),
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-base-selection-placeholder),
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-base-selection__placeholder),
+:global(:root[data-theme="light"]) .workspace-root :deep(.text-slate-400),
+:global(:root[data-theme="light"]) .workspace-root :deep(.text-slate-500) {
+  color: #6b7280 !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-root .text-slate-600,
+:global(:root[data-theme="light"]) .workspace-root :deep(.text-slate-600),
+:global(:root[data-theme="light"]) .workspace-root .text-slate-700,
+:global(:root[data-theme="light"]) .workspace-root :deep(.text-slate-700) {
+  color: #4b5563 !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-root .text-slate-800,
+:global(:root[data-theme="light"]) .workspace-root :deep(.text-slate-800),
+:global(:root[data-theme="light"]) .workspace-root :deep(.text-slate-900),
+:global(:root[data-theme="light"]) .workspace-root :deep(.text-slate-950) {
+  color: #111827 !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-side-panel :deep(.n-list),
+:global(:root[data-theme="light"]) .workspace-side-panel :deep(.n-list-item),
+:global(:root[data-theme="light"]) .session-pane :deep(.n-list),
+:global(:root[data-theme="light"]) .session-pane :deep(.n-list-item) {
+  background: transparent !important;
+  color: #111827 !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-side-panel :deep(.n-list-item:hover),
+:global(:root[data-theme="light"]) .workspace-side-panel :deep(.n-list-item.bg-slate-100),
+:global(:root[data-theme="light"]) .session-pane :deep(.n-list-item:hover),
+:global(:root[data-theme="light"]) .session-pane :deep(.n-list-item.bg-slate-100),
+:global(:root[data-theme="light"]) .left-sidebar-disclosure:hover,
+:global(:root[data-theme="light"]) .left-sidebar-disclosure:focus-visible {
+  background: #e5f3f1 !important;
+  color: #111827 !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-side-panel :deep(.n-list-item.bg-slate-100),
+:global(:root[data-theme="light"]) .session-pane :deep(.n-list-item.bg-slate-100) {
+  background: #d2eae5 !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-input),
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-input-wrapper),
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-input__input-el),
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-input__textarea-el),
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-base-selection),
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-base-selection-label),
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-base-selection-input),
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-base-selection-input__content) {
+  background: #ffffff !important;
+  color: #111827 !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-input.n-input--disabled),
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-base-selection.n-base-selection--disabled),
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-button[disabled]) {
+  opacity: 0.72 !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-button:not(.n-button--primary-type)) {
+  color: #111827 !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-button .n-icon),
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-base-icon),
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-input__suffix),
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-base-selection-suffix),
+:global(:root[data-theme="light"]) .workspace-root :deep(.n-tabs-tab .n-icon) {
+  color: #6b7280 !important;
+}
+
+:global(:root[data-theme="light"]) .chat-empty-state,
+:global(:root[data-theme="light"]) .workbench-empty-state,
+:global(:root[data-theme="light"]) .command-preview,
+:global(:root[data-theme="light"]) .command-request,
+:global(:root[data-theme="light"]) .review-plan-steps li,
+:global(:root[data-theme="light"]) .run-output,
+:global(:root[data-theme="light"]) .run-output header,
+:global(:root[data-theme="light"]) .workbench-tree-shell,
+:global(:root[data-theme="light"]) .workspace-side-panel .bg-slate-50,
+:global(:root[data-theme="light"]) .workspace-side-panel .bg-white\/70,
+:global(:root[data-theme="light"]) .connect-provider-card {
+  background: #f9fafb !important;
+  border-color: #d1d5db !important;
+  color: #111827 !important;
+}
+
+:global(:root[data-theme="light"]) .event-item__payload,
+:global(:root[data-theme="light"]) .approval-card__payload,
+:global(:root[data-theme="light"]) .run-output pre,
+:global(:root[data-theme="light"]) .workspace-root :deep(.markdown-body pre),
+:global(:root[data-theme="light"]) .workspace-root :deep(.markdown-body code) {
+  background: #f3f4f6 !important;
+  border-color: #d1d5db !important;
+  color: #111827 !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-root :deep(.code-preview),
+:global(:root[data-theme="light"]) .workspace-root :deep(.code-editor),
+:global(:root[data-theme="light"]) .workspace-root :deep(.diff-preview) {
+  background: #ffffff !important;
+  border-color: #d1d5db !important;
+  color: #111827 !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-root :deep(.code-preview__header),
+:global(:root[data-theme="light"]) .workspace-root :deep(.code-editor__header),
+:global(:root[data-theme="light"]) .workspace-root :deep(.diff-preview__header) {
+  background: #f9fafb !important;
+  border-color: #d1d5db !important;
+  color: #111827 !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-root :deep(.code-preview__chip),
+:global(:root[data-theme="light"]) .workspace-root :deep(.code-editor__chip) {
+  background: #f3f4f6 !important;
+  border-color: #d1d5db !important;
+  color: #4b5563 !important;
+}
+
+:global(:root[data-theme="light"]) .workspace-root :deep(.code-preview__scroller),
+:global(:root[data-theme="light"]) .workspace-root :deep(.code-preview__scroller .shiki),
+:global(:root[data-theme="light"]) .workspace-root :deep(.cm-editor),
+:global(:root[data-theme="light"]) .workspace-root :deep(.cm-scroller) {
+  background: #ffffff !important;
+  color: #111827 !important;
 }
 </style>

@@ -62,18 +62,19 @@ function detectPath(diffText: string) {
 
 <style scoped>
 .diff-preview {
-  background: #ffffff;
-  border: 1px solid #d9dee7;
+  background: var(--workspace-card-bg, #ffffff);
+  border: 1px solid var(--workspace-card-border, #d1d5db);
   border-radius: 8px;
+  color: var(--workspace-message-text, #111827);
   min-height: 0;
   overflow: hidden;
 }
 
 .diff-preview__header {
   align-items: center;
-  background: #f8fafc;
-  border-bottom: 1px solid #e2e8f0;
-  color: #0f172a;
+  background: var(--workspace-card-subtle, #f9fafb);
+  border-bottom: 1px solid var(--workspace-card-border, #d1d5db);
+  color: var(--workspace-message-text, #111827);
   display: flex;
   font-size: 12px;
   font-weight: 700;
@@ -88,7 +89,7 @@ function detectPath(diffText: string) {
 }
 
 .diff-preview__empty {
-  color: #64748b;
+  color: var(--workspace-message-muted, #4b5563);
   font-size: 12px;
   padding: 0.75rem;
 }
@@ -110,7 +111,7 @@ function detectPath(diffText: string) {
 }
 
 .diff-preview__marker {
-  color: #94a3b8;
+  color: var(--workspace-icon-muted, #6b7280);
   padding-left: 0.55rem;
   user-select: none;
 }
@@ -120,8 +121,8 @@ function detectPath(diffText: string) {
 }
 
 .diff-preview__line.is-header {
-  background: #f1f5f9;
-  color: #475569;
+  background: var(--mebius-code-bg, #f3f4f6);
+  color: var(--workspace-message-muted, #4b5563);
   font-weight: 700;
 }
 
@@ -136,6 +137,6 @@ function detectPath(diffText: string) {
 }
 
 .diff-preview__line.is-context {
-  color: #334155;
+  color: var(--workspace-message-text, #111827);
 }
 </style>

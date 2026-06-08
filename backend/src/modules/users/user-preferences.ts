@@ -5,12 +5,20 @@ export interface LayoutPreferences {
   rightSidebarWidth: number;
 }
 
+export type ThemeMode = 'dark' | 'light';
+
+export interface ThemePreferences {
+  mode: ThemeMode;
+}
+
 export interface UserPreferences {
   layout: LayoutPreferences;
+  theme: ThemePreferences;
 }
 
 export type UserPreferencesPatch = {
   layout?: Partial<LayoutPreferences>;
+  theme?: Partial<ThemePreferences>;
 };
 
 export const defaultUserPreferences: UserPreferences = {
@@ -19,6 +27,9 @@ export const defaultUserPreferences: UserPreferences = {
     rightSidebarCollapsed: false,
     leftSidebarWidth: 280,
     rightSidebarWidth: 420,
+  },
+  theme: {
+    mode: 'dark',
   },
 };
 
@@ -30,6 +41,7 @@ const layoutWidthLimits = {
 export function normalizeUserPreferences(value: unknown): UserPreferences {
   const source = isRecord(value) ? value : {};
   const layout = isRecord(source.layout) ? source.layout : {};
+  const theme = isRecord(source.theme) ? source.theme : {};
 
   return {
     layout: {
@@ -37,6 +49,9 @@ export function normalizeUserPreferences(value: unknown): UserPreferences {
       rightSidebarCollapsed: layout.rightSidebarCollapsed === true,
       leftSidebarWidth: normalizeLayoutWidth(layout.leftSidebarWidth, layoutWidthLimits.leftSidebarWidth),
       rightSidebarWidth: normalizeLayoutWidth(layout.rightSidebarWidth, layoutWidthLimits.rightSidebarWidth),
+    },
+    theme: {
+      mode: normalizeThemeMode(theme.mode),
     },
   };
 }
@@ -65,6 +80,9 @@ export function mergeUserPreferences(
       layoutWidthLimits.rightSidebarWidth,
     );
   }
+  if (patch.theme?.mode === 'dark' || patch.theme?.mode === 'light') {
+    next.theme.mode = patch.theme.mode;
+  }
 
   return next;
 }
@@ -81,4 +99,8 @@ function normalizeLayoutWidth(
     return limits.defaultValue;
   }
   return Math.min(limits.max, Math.max(limits.min, Math.round(value)));
+}
+
+function normalizeThemeMode(value: unknown): ThemeMode {
+  return value === 'light' ? 'light' : 'dark';
 }

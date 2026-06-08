@@ -5,6 +5,9 @@ node_modules/
 dist/
 coverage/
 .turbo/
+.cache/
+.vite/
+*.tsbuildinfo
 
 # env files
 .env
@@ -15,6 +18,24 @@ coverage/
 backend/workspaces/
 backend/uploads/
 backend/*.sqlite
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+
+# local tool/agent artifacts
+.agents/
+.codex/
+.tmp-*/
+.tmp-chrome*/
+skills-lock.json
+
+# logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
 # private course material
 面向对象技术与方法结课设计.docx

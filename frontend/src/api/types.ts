@@ -5,12 +5,20 @@ export interface LayoutPreferences {
   rightSidebarWidth: number;
 }
 
+export type ThemeMode = 'dark' | 'light';
+
+export interface ThemePreferences {
+  mode: ThemeMode;
+}
+
 export interface UserPreferences {
   layout: LayoutPreferences;
+  theme: ThemePreferences;
 }
 
 export type UserPreferencesPatch = {
   layout?: Partial<LayoutPreferences>;
+  theme?: Partial<ThemePreferences>;
 };
 
 export interface User {

@@ -8,14 +8,17 @@ import {
   request,
   setAccessToken,
 } from '../api/http';
-import type { User, UserPreferences, UserPreferencesPatch } from '../api/types';
+import type { ThemeMode, User, UserPreferences, UserPreferencesPatch } from '../api/types';
 import { router } from '../router';
 
 interface AuthState {
   user: User | null;
   token: string | null;
+  themeMode: ThemeMode;
   loading: boolean;
 }
+
+const themeKey = 'mebius.theme';
 
 export const defaultUserPreferences: UserPreferences = {
   layout: {
@@ -23,6 +26,9 @@ export const defaultUserPreferences: UserPreferences = {
     rightSidebarCollapsed: false,
     leftSidebarWidth: 280,
     rightSidebarWidth: 420,
+  },
+  theme: {
+    mode: 'dark',
   },
 };
 
@@ -35,6 +41,7 @@ export const useAuthStore = defineStore('auth', {
   state: (): AuthState => ({
     user: null,
     token: getAccessToken(),
+    themeMode: readThemeMode(),
     loading: false,
   }),
   actions: {
@@ -43,6 +50,7 @@ export const useAuthStore = defineStore('auth', {
       try {
         const result = await login(email, password);
         this.user = normalizeUser(result.user);
+        this.applyUserTheme();
         this.token = result.accessToken;
         setAccessToken(result.accessToken);
         await router.push({ name: 'app' });
@@ -61,6 +69,7 @@ export const useAuthStore = defineStore('auth', {
       try {
         const result = await register(input);
         this.user = normalizeUser(result.user);
+        this.applyUserTheme();
         this.token = result.accessToken;
         setAccessToken(result.accessToken);
         await router.push({ name: 'app' });
@@ -71,6 +80,7 @@ export const useAuthStore = defineStore('auth', {
     async fetchMe() {
       if (!getAccessToken()) return;
       this.user = normalizeUser(await request<User>('/auth/me'));
+      this.applyUserTheme();
     },
     async updatePreferences(patch: UserPreferencesPatch) {
       if (!this.user) return null;
@@ -87,11 +97,36 @@ export const useAuthStore = defineStore('auth', {
           body: jsonBody(patch),
         });
         this.user = normalizeUser(updated);
+        this.applyUserTheme();
         return this.user;
       } catch (error) {
         this.user = previous;
+        this.applyUserTheme();
         throw error;
       }
+    },
+    async setThemeMode(mode: ThemeMode) {
+      const previous = this.themeMode;
+      this.themeMode = mode;
+      saveThemeMode(mode);
+
+      if (!this.user) return;
+
+      try {
+        await this.updatePreferences({ theme: { mode } });
+      } catch (error) {
+        this.themeMode = previous;
+        saveThemeMode(previous);
+        throw error;
+      }
+    },
+    async toggleTheme() {
+      await this.setThemeMode(this.themeMode === 'dark' ? 'light' : 'dark');
+    },
+    applyUserTheme() {
+      const mode = this.user?.preferences.theme.mode ?? this.themeMode;
+      this.themeMode = mode;
+      saveThemeMode(mode);
     },
     async logout() {
       this.user = null;
@@ -120,6 +155,9 @@ function normalizePreferences(value: unknown): UserPreferences {
       leftSidebarWidth: normalizeLayoutWidth(layout.leftSidebarWidth, layoutWidthLimits.leftSidebarWidth),
       rightSidebarWidth: normalizeLayoutWidth(layout.rightSidebarWidth, layoutWidthLimits.rightSidebarWidth),
     },
+    theme: {
+      mode: normalizeThemeMode(source.theme),
+    },
   };
 }
 
@@ -128,6 +166,10 @@ function mergePreferences(current: UserPreferences, patch: UserPreferencesPatch)
     layout: {
       ...current.layout,
       ...pickBooleanLayout(patch),
+    },
+    theme: {
+      ...current.theme,
+      ...pickTheme(patch),
     },
   };
 }
@@ -155,6 +197,13 @@ function pickBooleanLayout(patch: UserPreferencesPatch): Partial<UserPreferences
   return layout;
 }
 
+function pickTheme(patch: UserPreferencesPatch): Partial<UserPreferences['theme']> {
+  if (patch.theme?.mode === 'dark' || patch.theme?.mode === 'light') {
+    return { mode: patch.theme.mode };
+  }
+  return {};
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -167,4 +216,19 @@ function normalizeLayoutWidth(
     return limits.defaultValue;
   }
   return Math.min(limits.max, Math.max(limits.min, Math.round(value)));
+}
+
+function normalizeThemeMode(value: unknown): ThemeMode {
+  if (isRecord(value) && value.mode === 'light') return 'light';
+  return 'dark';
+}
+
+function readThemeMode(): ThemeMode {
+  if (typeof localStorage === 'undefined') return 'dark';
+  return localStorage.getItem(themeKey) === 'light' ? 'light' : 'dark';
+}
+
+function saveThemeMode(mode: ThemeMode) {
+  if (typeof localStorage === 'undefined') return;
+  localStorage.setItem(themeKey, mode);
 }

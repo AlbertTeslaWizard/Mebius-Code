@@ -195,7 +195,7 @@ function nodeIcon(node: TreeNode) {
   background: transparent;
   border: 0;
   border-radius: 6px;
-  color: #334155;
+  color: var(--workspace-message-text, #0f172a);
   display: grid;
   font-size: 12px;
   gap: 0.35rem;
@@ -213,27 +213,28 @@ function nodeIcon(node: TreeNode) {
 }
 
 .workspace-file-tree__row:hover {
-  background: #eef6f4;
-  color: #0f172a;
+  background: var(--workspace-hover-bg, #e8f4f1);
+  color: var(--workspace-message-text, #0f172a);
 }
 
 .workspace-file-tree__row:focus-visible {
-  box-shadow: 0 0 0 2px rgb(20 184 166 / 24%);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--mebius-accent, #0f766e) 24%, transparent);
 }
 
 .workspace-file-tree__row.is-selected {
-  background: #dff4ee;
-  color: #0f766e;
+  background: var(--workspace-selected-bg, #d7eee9);
+  box-shadow: inset 3px 0 0 var(--mebius-accent, #0f766e);
+  color: var(--workspace-message-text, #0f172a);
   font-weight: 650;
 }
 
 .workspace-file-tree__row.is-directory {
-  color: #1e293b;
+  color: var(--workspace-message-text, #0f172a);
 }
 
 .workspace-file-tree__chevron {
   align-items: center;
-  color: #94a3b8;
+  color: var(--workspace-icon-muted, #536579);
   display: inline-flex;
   justify-content: center;
   transition: transform 120ms ease;
@@ -244,15 +245,15 @@ function nodeIcon(node: TreeNode) {
 }
 
 .workspace-file-tree__icon {
-  color: #64748b;
+  color: var(--workspace-icon-muted, #536579);
 }
 
 .workspace-file-tree__row.is-directory .workspace-file-tree__icon {
-  color: #d28b21;
+  color: var(--mebius-warning, #b45309);
 }
 
 .workspace-file-tree__row.is-selected .workspace-file-tree__icon {
-  color: #0f766e;
+  color: var(--mebius-accent, #0f766e);
 }
 
 .workspace-file-tree__name {
@@ -278,7 +279,7 @@ function nodeIcon(node: TreeNode) {
 .workspace-file-tree__action {
   align-items: center;
   border-radius: 5px;
-  color: #64748b;
+  color: var(--workspace-icon-muted, #536579);
   display: inline-flex;
   height: 22px;
   justify-content: center;
@@ -288,8 +289,8 @@ function nodeIcon(node: TreeNode) {
 
 .workspace-file-tree__action:hover,
 .workspace-file-tree__action:focus-visible {
-  background: #dbeafe;
-  color: #1d4ed8;
+  background: var(--workspace-hover-bg, #e8f4f1);
+  color: var(--mebius-accent, #0f766e);
 }
 
 .workspace-file-tree__action.is-danger:hover,
@@ -300,9 +301,9 @@ function nodeIcon(node: TreeNode) {
 
 .workspace-file-tree__empty {
   align-items: center;
-  border: 1px dashed #cbd5e1;
+  border: 1px dashed var(--workspace-card-border, #b8c7d3);
   border-radius: 8px;
-  color: #64748b;
+  color: var(--workspace-message-muted, #475569);
   display: flex;
   font-size: 13px;
   justify-content: center;
