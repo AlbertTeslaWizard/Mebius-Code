@@ -35,6 +35,8 @@ Slash commands always use command handling, regardless of the active composer mo
 ## Commands
 
 - `/models`: choose or configure the active model.
+- `/clear`: clear the current chat and model context.
+- `/compact`: compact the current chat into model context.
 - `/plan <goal>`: create a plan.
 - `/plan-approve`: approve the latest plan.
 - `/approve`: approve the active tool request.

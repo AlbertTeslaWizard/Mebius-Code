@@ -2,7 +2,7 @@
 import { SyntaxStyle } from '@opentui/core';
 import { useKeyboard, useRenderer } from '@opentui/solid';
 import { For, Show, createContext, createMemo, createSignal, onCleanup, onMount, useContext } from 'solid-js';
-import type { Accessor } from 'solid-js';
+import type { Accessor, JSX } from 'solid-js';
 import { attachEventStream, refreshReviewData, type WorkspaceState } from '../bootstrap';
 import { saveConfig } from '../config';
 import type { Approval, ApprovalPreview, Message, ModelChoice, ModelsCommandResult, TuiThemeName } from '../types';
@@ -78,6 +78,8 @@ interface CommandPaletteCommand {
 
 const commandPaletteCommands: CommandPaletteCommand[] = [
   { label: '/models', insert: '/models', description: 'Choose or configure a model' },
+  { label: '/clear', insert: '/clear', description: 'Clear the chat and model context' },
+  { label: '/compact', insert: '/compact', description: 'Compact the chat into model context' },
   { label: '/themes', insert: '/themes', description: 'Switch the TUI theme' },
   { label: '/plan <goal>', insert: '/plan ', description: 'Create a plan for a goal' },
   { label: '/plan-approve', insert: '/plan-approve', description: 'Approve the latest plan' },
@@ -91,6 +93,21 @@ const commandPaletteCommands: CommandPaletteCommand[] = [
 
 const RIGHT_RAIL_WIDTH = 32;
 const MAIN_COLUMN_MIN_WIDTH = 48;
+const HIGH_LEVEL_EVENT_TYPES = new Set([
+  'agent_status',
+  'message_created',
+  'model_call_started',
+  'model_call_completed',
+  'model_call_failed',
+  'error',
+  'done',
+]);
+const RUNNING_AGENT_STATUSES = new Set(['thinking', 'responding', 'using_tools', 'waiting_for_approval', 'working']);
+const COMPLETED_AGENT_STATUSES = new Set(['completed']);
+const ERROR_AGENT_STATUSES = new Set(['failed', 'error']);
+
+type TaskStatus = 'idle' | 'running' | 'completed' | 'error';
+type StatusEvent = WorkspaceState['events'][number];
 
 export function App(props: AppProps) {
   const [state, setState] = createSignal(props.initialState);
@@ -127,8 +144,7 @@ export function App(props: AppProps) {
   const rightTitle = createMemo(() => {
     const approval = activeApproval();
     if (approval) return `Approval - ${approval.toolCall.name}`;
-    if (state().plan) return `Plan - ${state().plan?.plan.status}`;
-    return 'Logs';
+    return 'Status';
   });
 
   useKeyboard((event) => {
@@ -275,6 +291,22 @@ export function App(props: AppProps) {
       if (!approval) throw new Error('No pending approval.');
       await current.api.reject(approval.id);
       return;
+    }
+    if (value === '/clear') {
+      await current.api.runSessionCommand(current.session.id, '/clear');
+      setState((prev) => ({ ...prev, messages: [], activity: 'Context cleared' }));
+      return;
+    }
+    if (value.startsWith('/clear ')) {
+      throw new Error('/clear does not accept arguments.');
+    }
+    if (value === '/compact') {
+      await current.api.runSessionCommand(current.session.id, '/compact');
+      setState((prev) => ({ ...prev, messages: [], activity: 'Context compacted' }));
+      return;
+    }
+    if (value.startsWith('/compact ')) {
+      throw new Error('/compact does not accept arguments.');
     }
     if (value.startsWith('/plan ')) {
       await createPlanFromGoal(value.slice('/plan '.length));
@@ -431,7 +463,13 @@ export function App(props: AppProps) {
                 fallback={
                   <box style={{ flexDirection: 'row', flexGrow: 1, minHeight: 0 }}>
                     <ChatPanel messages={state().messages} error={state().error} />
-                    <RightPanel title={rightTitle()} approval={activeApproval()} state={state()} />
+                    <RightPanel
+                      title={rightTitle()}
+                      approval={activeApproval()}
+                      state={state()}
+                      mode={composerMode()}
+                      busy={busy()}
+                    />
                   </box>
                 }
               >
@@ -829,7 +867,13 @@ function MessageBody(props: { message: Message }) {
   );
 }
 
-function RightPanel(props: { title: string; approval: Approval | undefined; state: WorkspaceState }) {
+function RightPanel(props: {
+  title: string;
+  approval: Approval | undefined;
+  state: WorkspaceState;
+  mode: ComposerMode;
+  busy: boolean;
+}) {
   const theme = useTheme();
   return (
     <box
@@ -844,7 +888,7 @@ function RightPanel(props: { title: string; approval: Approval | undefined; stat
         backgroundColor: theme().panel,
       }}
     >
-      <Show when={props.approval} fallback={<Logs state={props.state} />}>
+      <Show when={props.approval} fallback={<StatusPanel state={props.state} mode={props.mode} busy={props.busy} />}>
         {(approval) => <ApprovalView approval={approval()} />}
       </Show>
     </box>
@@ -897,22 +941,180 @@ function Preview(props: { preview: ApprovalPreview }) {
   );
 }
 
-function Logs(props: { state: WorkspaceState }) {
+function StatusPanel(props: { state: WorkspaceState; mode: ComposerMode; busy: boolean }) {
   const theme = useTheme();
+  const modelInfo = createMemo(() => getActiveModelInfo(props.state));
+  const taskStatus = createMemo(() => deriveTaskStatus(props.state, props.busy));
+  const contextTokens = createMemo(() => estimateContextTokens(props.state.messages));
+  const recentEvents = createMemo(() => props.state.events.filter(isHighLevelEvent).slice(0, 5));
+
   return (
     <scrollbox style={{ flexGrow: 1 }}>
-      <Show when={props.state.plan}>
-        <text fg={theme().text}>Plan: {props.state.plan?.plan.status}</text>
-        <text fg={theme().muted}>{props.state.plan?.plan.summary}</text>
-      </Show>
-      <For each={props.state.commandRuns.slice(0, 8)}>
-        {(run) => <text fg={theme().text}>{run.status} - {run.command}</text>}
-      </For>
-      <For each={props.state.events.slice(0, 30)}>
-        {(event) => <text fg={theme().muted}>{event.time} - {event.type}</text>}
-      </For>
+      <StatusSection title="Session">
+        <StatusRow label="Name" value={props.state.session.title} />
+        <StatusRow label="ID" value={shortId(props.state.session.id)} />
+        <StatusRow label="Mode" value={composerModeLabel(props.mode)} />
+        <StatusRow label="Task" value={taskStatus()} valueColor={statusColor(taskStatus(), theme())} />
+      </StatusSection>
+
+      <StatusSection title="Model">
+        <StatusRow label="Name" value={modelInfo().modelName === 'no model' ? '-' : modelInfo().modelName} />
+        <StatusRow
+          label="Provider"
+          value={modelInfo().providerDisplay.includes('no provider') ? '-' : modelInfo().providerDisplay}
+        />
+        <StatusRow label="Mode" value={composerModeLabel(props.mode)} />
+      </StatusSection>
+
+      <StatusSection title="Context">
+        <StatusRow label="Tokens" value={contextTokens() > 0 ? `${contextTokens().toLocaleString()} est` : '-'} />
+        <StatusRow label="Usage" value="-" />
+        <StatusRow label="Cost" value="$0.00" />
+      </StatusSection>
+
+      <StatusSection title="Workspace">
+        <StatusRow label="Path" value={props.state.project.workspacePath || props.state.targetPath || '-'} />
+        <StatusRow label="API" value={props.state.mode === 'remote' ? 'remote API' : 'local API'} />
+        <StatusRow label="Backend" value="reachable" valueColor={theme().green} />
+        <StatusRow
+          label="Local"
+          value={props.state.capabilities.localWorkspacesEnabled ? 'enabled' : 'disabled'}
+          valueColor={props.state.capabilities.localWorkspacesEnabled ? theme().green : theme().yellow}
+        />
+      </StatusSection>
+
+      <StatusSection title="Logs">
+        <Show when={recentEvents().length > 0} fallback={<text fg={theme().muted}>-</text>}>
+          <For each={recentEvents()}>
+            {(event) => (
+              <box style={{ flexDirection: 'column', marginBottom: 1 }}>
+                <text fg={theme().muted}>{event.time}</text>
+                <text fg={eventColor(event, theme())} wrapMode="word">
+                  {formatEvent(event)}
+                </text>
+              </box>
+            )}
+          </For>
+        </Show>
+      </StatusSection>
     </scrollbox>
   );
+}
+
+function StatusSection(props: { title: string; children: JSX.Element }) {
+  const theme = useTheme();
+  return (
+    <box style={{ flexDirection: 'column', marginBottom: 1 }}>
+      <text fg={theme().muted}>{props.title}</text>
+      {props.children}
+    </box>
+  );
+}
+
+function StatusRow(props: { label: string; value: string; valueColor?: string }) {
+  const theme = useTheme();
+  return (
+    <box style={{ flexDirection: 'row', minWidth: 0 }}>
+      <text fg={theme().muted} style={{ width: 9, flexShrink: 0 }}>
+        {props.label}
+      </text>
+      <text fg={props.valueColor ?? theme().text} wrapMode="word" style={{ flexGrow: 1, minWidth: 0 }}>
+        {props.value || '-'}
+      </text>
+    </box>
+  );
+}
+
+function deriveTaskStatus(state: WorkspaceState, busy: boolean): TaskStatus {
+  const events = state.events.filter(isHighLevelEvent);
+  const latest = events[0];
+  const latestAgentStatus = events
+    .filter((event) => event.type === 'agent_status')
+    .map((event) => eventString(event, 'status'))
+    .find((status): status is string => Boolean(status));
+
+  if (state.error.trim() || isErrorEvent(latest) || (latestAgentStatus && ERROR_AGENT_STATUSES.has(latestAgentStatus))) {
+    return 'error';
+  }
+  if (latest?.type === 'done' || (latestAgentStatus && COMPLETED_AGENT_STATUSES.has(latestAgentStatus))) {
+    return 'completed';
+  }
+  if (busy || state.session.agentActivity || (latestAgentStatus && RUNNING_AGENT_STATUSES.has(latestAgentStatus))) {
+    return 'running';
+  }
+  if (latest?.type === 'model_call_completed') {
+    return 'completed';
+  }
+  if (latest?.type === 'message_created' && eventString(latest, 'role') === 'assistant') {
+    return 'completed';
+  }
+  return 'idle';
+}
+
+function estimateContextTokens(messages: Message[]): number {
+  return messages.reduce((total, message) => total + Math.ceil((message.content || '').length / 4), 0);
+}
+
+function isHighLevelEvent(event: StatusEvent): boolean {
+  return HIGH_LEVEL_EVENT_TYPES.has(event.type);
+}
+
+function isErrorEvent(event: StatusEvent | undefined): boolean {
+  if (!event) return false;
+  if (event.type === 'error' || event.type === 'model_call_failed') return true;
+  return event.type === 'agent_status' && ERROR_AGENT_STATUSES.has(eventString(event, 'status') ?? '');
+}
+
+function statusColor(status: TaskStatus, theme: TuiTheme): string {
+  if (status === 'completed') return theme.green;
+  if (status === 'running') return theme.yellow;
+  if (status === 'error') return theme.red;
+  return theme.muted;
+}
+
+function eventColor(event: StatusEvent, theme: TuiTheme): string {
+  if (isErrorEvent(event)) return theme.red;
+  if (event.type === 'done' || event.type === 'model_call_completed') return theme.green;
+  if (event.type === 'model_call_started') return theme.yellow;
+  const status = eventString(event, 'status');
+  if (status && COMPLETED_AGENT_STATUSES.has(status)) return theme.green;
+  if (status && RUNNING_AGENT_STATUSES.has(status)) return theme.yellow;
+  return theme.text;
+}
+
+function formatEvent(event: StatusEvent): string {
+  if (event.type === 'agent_status') {
+    return eventSummary(event, eventString(event, 'status'), eventString(event, 'activity'), eventString(event, 'message'));
+  }
+  if (event.type === 'message_created') {
+    return eventSummary(event, eventString(event, 'role'));
+  }
+  if (event.type === 'model_call_started' || event.type === 'model_call_completed' || event.type === 'model_call_failed') {
+    return eventSummary(
+      event,
+      eventString(event, 'modelName') ?? eventString(event, 'displayName'),
+      eventString(event, 'mode'),
+      event.type === 'model_call_failed' ? eventString(event, 'message') : undefined,
+    );
+  }
+  if (event.type === 'error') {
+    return eventSummary(event, eventString(event, 'message'));
+  }
+  return event.type;
+}
+
+function eventSummary(event: StatusEvent, ...parts: Array<string | undefined>): string {
+  const values = parts.filter((part): part is string => Boolean(part));
+  return values.length > 0 ? `${event.type}: ${values.join(' - ')}` : event.type;
+}
+
+function eventString(event: StatusEvent, key: string): string | undefined {
+  const value = event.data[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function shortId(value: string): string {
+  return value.length > 8 ? value.slice(0, 8) : value || '-';
 }
 
 function getActiveModelInfo(state: WorkspaceState): ActiveModelInfo {

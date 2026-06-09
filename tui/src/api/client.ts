@@ -84,6 +84,13 @@ export class ApiClient {
     });
   }
 
+  async runSessionCommand<T = unknown>(sessionId: string, command: string, args?: Record<string, unknown>): Promise<T> {
+    return this.request<T>(`/sessions/${sessionId}/commands`, {
+      method: 'POST',
+      body: JSON.stringify({ command, ...(args ? { args } : {}) }),
+    });
+  }
+
   async listMessages(sessionId: string): Promise<Message[]> {
     return this.request<Message[]>(`/sessions/${sessionId}/messages`);
   }

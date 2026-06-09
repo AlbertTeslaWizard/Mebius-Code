@@ -200,6 +200,12 @@ export class SessionsService {
         .from(Message)
         .where('session_id = :sessionId', { sessionId: session.id })
         .execute();
+      await this.summaries
+        .createQueryBuilder()
+        .delete()
+        .from(ConversationSummary)
+        .where('session_id = :sessionId', { sessionId: session.id })
+        .execute();
       this.events.publish(session.id, 'agent_status', { status: 'context_cleared' });
       return { cleared: true };
     }

@@ -199,6 +199,14 @@ function reduceEvent(state: WorkspaceState, event: SseEvent): WorkspaceState {
 
   if (event.type === 'agent_status') {
     const status = typeof event.data.status === 'string' ? event.data.status : 'working';
+    if (status === 'context_cleared' || status === 'context_compacted') {
+      return {
+        ...state,
+        events,
+        messages: [],
+        activity: status === 'context_cleared' ? 'Context cleared' : 'Context compacted',
+      };
+    }
     const toolName = typeof event.data.toolName === 'string' ? ` · ${event.data.toolName}` : '';
     const command = typeof event.data.command === 'string' ? ` · ${event.data.command}` : '';
     return { ...state, events, activity: `${status}${toolName}${command}` };

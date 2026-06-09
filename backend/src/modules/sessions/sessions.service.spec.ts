@@ -11,14 +11,31 @@ import { Session } from './session.entity';
 import { SessionsService } from './sessions.service';
 
 describe('SessionsService', () => {
+  const messageDeleteQueryBuilder = createDeleteQueryBuilder();
+  const summaryDeleteQueryBuilder = createDeleteQueryBuilder();
   const sessions = {
     findAndCount: jest.fn(),
     findOne: jest.fn(),
     remove: jest.fn((session: Session) => Promise.resolve(session)),
     save: jest.fn((session: Session) => Promise.resolve(session)),
   } as unknown as jest.Mocked<Repository<Session>>;
-  const messages = {} as jest.Mocked<Repository<Message>>;
-  const summaries = {} as jest.Mocked<Repository<ConversationSummary>>;
+  const messages = {
+    create: jest.fn((message: Partial<Message>) => message as Message),
+    save: jest.fn((message: Message) => Promise.resolve(message)),
+    find: jest.fn(),
+    createQueryBuilder: jest.fn(() => messageDeleteQueryBuilder),
+  } as unknown as jest.Mocked<Repository<Message>>;
+  const summaries = {
+    create: jest.fn((summary: Partial<ConversationSummary>) => summary as ConversationSummary),
+    save: jest.fn((summary: ConversationSummary) =>
+      Promise.resolve({
+        ...summary,
+        id: 'summary-1',
+      } as ConversationSummary),
+    ),
+    findOne: jest.fn(),
+    createQueryBuilder: jest.fn(() => summaryDeleteQueryBuilder),
+  } as unknown as jest.Mocked<Repository<ConversationSummary>>;
   const toolCalls = {
     findOne: jest.fn(),
   } as unknown as jest.Mocked<Repository<ToolCall>>;
@@ -141,6 +158,10 @@ describe('SessionsService', () => {
     sessions.findOne.mockResolvedValue(sessionFixture());
     approvals.findOne.mockResolvedValue(null);
     toolCalls.findOne.mockResolvedValue(null);
+    messages.find.mockResolvedValue([
+      { role: 'user', content: 'Build the feature' },
+      { role: 'assistant', content: 'I will inspect the code first.' },
+    ] as Message[]);
   });
 
   it('lists sessions for an owned project with pagination and status filters', async () => {
@@ -352,6 +373,53 @@ describe('SessionsService', () => {
     expect((result as { modelConfig?: unknown }).modelConfig).not.toHaveProperty('apiKey');
   });
 
+  it('clears session messages and summaries with /clear', async () => {
+    const result = await service.handleCommand('owner-1', 'session-1', {
+      command: '/clear',
+    });
+
+    expect(messages.createQueryBuilder).toHaveBeenCalledTimes(1);
+    expect(messageDeleteQueryBuilder.delete).toHaveBeenCalled();
+    expect(messageDeleteQueryBuilder.from).toHaveBeenCalledWith(Message);
+    expect(messageDeleteQueryBuilder.where).toHaveBeenCalledWith('session_id = :sessionId', { sessionId: 'session-1' });
+    expect(messageDeleteQueryBuilder.execute).toHaveBeenCalled();
+    expect(summaries.createQueryBuilder).toHaveBeenCalledTimes(1);
+    expect(summaryDeleteQueryBuilder.delete).toHaveBeenCalled();
+    expect(summaryDeleteQueryBuilder.from).toHaveBeenCalledWith(ConversationSummary);
+    expect(summaryDeleteQueryBuilder.where).toHaveBeenCalledWith('session_id = :sessionId', { sessionId: 'session-1' });
+    expect(summaryDeleteQueryBuilder.execute).toHaveBeenCalled();
+    expect(events.publish).toHaveBeenCalledWith('session-1', 'agent_status', {
+      status: 'context_cleared',
+    });
+    expect(result).toEqual({ cleared: true });
+  });
+
+  it('compacts session messages into a summary and clears visible messages with /compact', async () => {
+    const result = await service.handleCommand('owner-1', 'session-1', {
+      command: '/compact',
+    });
+
+    expect(messages.find).toHaveBeenCalledWith({
+      where: { session: { id: 'session-1' } },
+      order: { createdAt: 'ASC' },
+      take: 100,
+    });
+    expect(summaries.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        session: expect.objectContaining({ id: 'session-1' }),
+        content: expect.stringContaining('user: Build the feature'),
+        tokenEstimate: expect.any(Number),
+      }),
+    );
+    expect(messages.createQueryBuilder).toHaveBeenCalledTimes(1);
+    expect(summaries.createQueryBuilder).not.toHaveBeenCalled();
+    expect(events.publish).toHaveBeenCalledWith('session-1', 'agent_status', {
+      status: 'context_compacted',
+      summaryId: 'summary-1',
+    });
+    expect(result).toEqual(expect.objectContaining({ id: 'summary-1' }));
+  });
+
   it('deletes owned sessions and publishes a deletion event', async () => {
     const result = await service.remove('owner-1', 'session-1');
 
@@ -389,4 +457,13 @@ function sessionFixture(): Session {
     createdAt,
     updatedAt: createdAt,
   } as Session;
+}
+
+function createDeleteQueryBuilder() {
+  return {
+    delete: jest.fn().mockReturnThis(),
+    from: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+    execute: jest.fn().mockResolvedValue({ affected: 1 }),
+  };
 }
