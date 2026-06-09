@@ -1,7 +1,7 @@
 /** @jsxImportSource @opentui/solid */
-import { SyntaxStyle } from '@opentui/core';
+import { SyntaxStyle, type TextareaAction, type TextareaRenderable } from '@opentui/core';
 import { useKeyboard, useRenderer } from '@opentui/solid';
-import { For, Show, createContext, createMemo, createSignal, onCleanup, onMount, useContext } from 'solid-js';
+import { For, Show, createContext, createEffect, createMemo, createSignal, onCleanup, onMount, useContext } from 'solid-js';
 import type { Accessor, JSX } from 'solid-js';
 import { attachEventStream, refreshReviewData, type WorkspaceState } from '../bootstrap';
 import { saveConfig } from '../config';
@@ -93,6 +93,12 @@ const commandPaletteCommands: CommandPaletteCommand[] = [
 
 const RIGHT_RAIL_WIDTH = 32;
 const MAIN_COLUMN_MIN_WIDTH = 48;
+const COMPOSER_HEIGHT = 6;
+const composerSubmitKeyBindings: Array<{ name: string; action: TextareaAction }> = [
+  { name: 'return', action: 'submit' },
+  { name: 'kpenter', action: 'submit' },
+  { name: 'linefeed', action: 'submit' },
+];
 const HIGH_LEVEL_EVENT_TYPES = new Set([
   'agent_status',
   'message_created',
@@ -462,7 +468,21 @@ export function App(props: AppProps) {
                 when={modelPalette()}
                 fallback={
                   <box style={{ flexDirection: 'row', flexGrow: 1, minHeight: 0 }}>
-                    <ChatPanel messages={state().messages} error={state().error} />
+                    <ChatPanel
+                      messages={state().messages}
+                      error={state().error}
+                      composer={{
+                        mode: composerMode(),
+                        accentColor: composerAccentColor(),
+                        modelInfo: activeModelInfo(),
+                        value: input(),
+                        focused: !modelPalette() && !commandPalette() && !themePalette(),
+                        onInput: setInput,
+                        onSubmit: () => {
+                          void submit();
+                        },
+                      }}
+                    />
                     <RightPanel
                       title={rightTitle()}
                       approval={activeApproval()}
@@ -522,25 +542,6 @@ export function App(props: AppProps) {
           />
         )}
       </Show>
-      <box style={{ height: 4, flexDirection: 'row', backgroundColor: theme().background }}>
-        <Composer
-          mode={composerMode()}
-          accentColor={composerAccentColor()}
-          modelInfo={activeModelInfo()}
-          value={input()}
-          focused={!modelPalette() && !commandPalette() && !themePalette()}
-          onInput={setInput}
-          onSubmit={() => {
-            void submit();
-          }}
-        />
-        <box
-          style={{
-            width: RIGHT_RAIL_WIDTH,
-            flexShrink: 0,
-          }}
-        />
-      </box>
       </box>
     </ThemeContext.Provider>
   );
@@ -679,6 +680,15 @@ function Composer(props: {
   onSubmit: () => void;
 }) {
   const theme = useTheme();
+  let textareaRef: TextareaRenderable | undefined;
+
+  createEffect(() => {
+    const value = props.value;
+    if (!textareaRef || textareaRef.plainText === value) return;
+    textareaRef.setText(value);
+    textareaRef.cursorOffset = value.length;
+  });
+
   return (
     <box
       border
@@ -686,26 +696,37 @@ function Composer(props: {
       borderColor={theme().border}
       focusedBorderColor={theme().border}
       style={{
-        height: 4,
-        flexGrow: 1,
-        minWidth: MAIN_COLUMN_MIN_WIDTH,
+        width: '100%',
+        height: COMPOSER_HEIGHT,
+        minHeight: COMPOSER_HEIGHT,
+        minWidth: 0,
+        flexShrink: 0,
+        alignSelf: 'stretch',
         flexDirection: 'row',
         backgroundColor: theme().input,
       }}
     >
       <box style={{ width: 1, flexShrink: 0, alignSelf: 'stretch', backgroundColor: props.accentColor }} />
-      <box style={{ flexGrow: 1, minWidth: 0, paddingX: 1, flexDirection: 'column' }}>
-        <input
+      <box style={{ width: '100%', flexGrow: 1, minWidth: 0, paddingX: 1, flexDirection: 'column' }}>
+        <textarea
+          ref={textareaRef}
           focused={props.focused}
-          value={props.value}
-          placeholder=""
-          style={{ width: '100%', flexShrink: 0 }}
-          onInput={props.onInput}
+          initialValue={props.value}
+          placeholder={null}
+          backgroundColor={theme().input}
+          focusedBackgroundColor={theme().input}
+          textColor={theme().text}
+          focusedTextColor={theme().text}
+          cursorColor={props.accentColor}
+          wrapMode="word"
+          keyBindings={composerSubmitKeyBindings}
+          style={{ width: '100%', flexGrow: 1, minHeight: 3, minWidth: 0, flexShrink: 1 }}
+          onContentChange={() => props.onInput(textareaRef?.plainText ?? '')}
           onSubmit={props.onSubmit}
         />
-        <box style={{ height: 1, flexDirection: 'row' }}>
+        <box style={{ width: '100%', height: 1, flexShrink: 0, flexDirection: 'row' }}>
           <text fg={props.accentColor}>{composerModeLabel(props.mode)}</text>
-          <text fg={theme().muted}> · {props.modelInfo.modelName} · {props.modelInfo.providerDisplay}</text>
+          <text fg={theme().muted}> - {props.modelInfo.modelName} - {props.modelInfo.providerDisplay}</text>
         </box>
       </box>
     </box>
@@ -799,11 +820,42 @@ function ModelsPanel(props: {
   );
 }
 
-function ChatPanel(props: { messages: Message[]; error: string }) {
+function ChatPanel(props: {
+  messages: Message[];
+  error: string;
+  composer: {
+    mode: ComposerMode;
+    accentColor: string;
+    modelInfo: ActiveModelInfo;
+    value: string;
+    focused: boolean;
+    onInput: (value: string) => void;
+    onSubmit: () => void;
+  };
+}) {
   const theme = useTheme();
   return (
-    <box border borderColor={theme().border} title="Chat" style={{ flexGrow: 1, minWidth: MAIN_COLUMN_MIN_WIDTH, paddingX: 1, backgroundColor: theme().panel }}>
-      <scrollbox stickyScroll stickyStart="bottom" style={{ flexGrow: 1, minHeight: 0, width: '100%' }}>
+    <box
+      border
+      borderColor={theme().border}
+      title="Chat"
+      style={{
+        flexGrow: 1,
+        flexShrink: 1,
+        minWidth: MAIN_COLUMN_MIN_WIDTH,
+        minHeight: 0,
+        paddingX: 1,
+        paddingBottom: 1,
+        flexDirection: 'column',
+        backgroundColor: theme().panel,
+      }}
+    >
+      <scrollbox
+        stickyScroll
+        stickyStart="bottom"
+        contentOptions={{ width: '100%', minWidth: '100%', maxWidth: '100%', alignSelf: 'stretch', flexDirection: 'column' }}
+        style={{ width: '100%', flexGrow: 1, minHeight: 0, minWidth: 0, alignSelf: 'stretch' }}
+      >
         <Show when={props.error}>
           <text fg={theme().red}>{props.error}</text>
         </Show>
@@ -811,26 +863,32 @@ function ChatPanel(props: { messages: Message[]; error: string }) {
           {(message) => <MessageBlock message={message} />}
         </For>
       </scrollbox>
+      <Composer {...props.composer} />
     </box>
   );
 }
 
 function MessageBlock(props: { message: Message }) {
   const theme = useTheme();
+  const isUserMessage = createMemo(() => props.message.role === 'user');
+  const accentColor = createMemo(() => (isUserMessage() ? theme().blue : roleColor(props.message.role, theme())));
   return (
     <box
       style={{
         width: '100%',
+        flexGrow: 0,
+        flexShrink: 0,
         minWidth: 0,
+        alignSelf: 'stretch',
         flexDirection: 'row',
         alignItems: 'stretch',
         marginBottom: 1,
-        backgroundColor: theme().background,
+        backgroundColor: isUserMessage() ? theme().input : theme().background,
       }}
     >
-      <box style={{ width: 1, flexShrink: 0, alignSelf: 'stretch', backgroundColor: roleColor(props.message.role, theme()) }} />
-      <box style={{ flexGrow: 1, minWidth: 0, paddingX: 1, flexDirection: 'column' }}>
-        <text fg={roleColor(props.message.role, theme())} style={{ width: '100%', flexShrink: 0 }}>
+      <box style={{ width: 1, flexShrink: 0, alignSelf: 'stretch', backgroundColor: accentColor() }} />
+      <box style={{ width: '100%', flexGrow: 1, minWidth: 0, paddingX: 1, flexDirection: 'column' }}>
+        <text fg={accentColor()} style={{ width: '100%', minWidth: 0, flexShrink: 0 }}>
           {props.message.role}
           {props.message.streaming ? ' - streaming' : ''}
         </text>

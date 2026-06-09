@@ -127,7 +127,11 @@ TUI 支持以下命令：
 
 MVP 阶段 `mebius` 不自动启动 NestJS 后端，而是连接已经运行的 API。启动时先调用 `GET /api/system/capabilities`，再根据 API 地址判断本机模式或远程 API 模式：localhost、127.0.0.1 和 ::1 视为本机 API，可以在后端允许时创建 local workspace；其他地址视为 remote API，只能打开远程后端已有项目，不能提交客户端本机路径。
 
-TUI 工作台采用三栏结构：左侧展示项目、Session、文件树和 Git 状态；中间展示聊天记录、流式输出和输入框；右侧展示 Plan、审批、Patch Diff、命令运行和事件日志。终端宽度不足时，右侧和左侧面板可以折叠或切换。
+TUI 工作台采用三栏结构：左侧展示项目、Session、文件树和 Git 状态；中间展示聊天记录、流式输出和输入框；右侧默认展示 Status / Session 状态面板，并在审批时切换为审批预览。终端宽度不足时，右侧和左侧面板可以折叠或切换。
+
+右侧 Status 面板按 Session、Model、Context、Workspace 和 Logs 分组展示摘要信息：Session 展示会话名、会话 ID、当前模式和任务状态；Model 展示当前模型和 Provider；Context 展示当前消息上下文的 token 估算、使用比例占位和成本占位；Workspace 展示工作区路径、local/remote API mode、后端可达状态和 local workspace 开关。Logs 分组只渲染最近少量高层 SSE 事件，例如 `agent_status`、`message_created`、`model_call_started`、`model_call_completed`、`model_call_failed`、`error` 和 `done`，不渲染逐 token 流事件，避免默认界面呈现为调试控制台。
+
+本阶段 TUI 不实现 LSP 相关能力，也不显示 LSP 状态。语言服务器、自动补全、跳转定义等 IDE 能力留作后续扩展，不进入当前后端协议和 TUI 默认界面。
 
 TUI 本地配置保存 apiBaseUrl、JWT、最近项目、最近会话和偏好设置。Windows 使用 `%APPDATA%/Mebius/config.json`，Linux/macOS 使用 `~/.config/mebius/config.json`，配置文件尽量限制为当前用户读写。
 

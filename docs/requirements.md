@@ -211,7 +211,10 @@ Mebius Code
 - 当 `mebius --api <url>` 指向非本机地址时，TUI 默认进入 remote API mode，只能打开远程后端已有项目，不得提交本机路径。
 - `mebius --api <url>` 只作为本次启动临时覆盖；持久保存 API 地址通过 `mebius login --api <url>` 或 `mebius config set api <url>` 完成。
 - TUI 应支持 `login`、`logout`、`doctor` 和 API 配置命令，本地保存 apiBaseUrl、JWT、最近项目、最近会话和用户偏好。
-- TUI 主界面采用左侧项目/文件/Git、中间聊天/输入、右侧 Plan/审批/Diff/命令/日志的多面板工作台，并按终端宽度自适应。
+- TUI 主界面采用左侧项目/文件/Git、中间聊天/输入、右侧状态/审批/预览的多面板工作台，并按终端宽度自适应。
+- TUI 右侧默认面板应展示 Status / Session 摘要，包括当前会话、任务状态、模型、上下文估算、workspace path、API mode、后端可达状态和 local workspace 开关；不应默认展示连续 token 调试日志。
+- TUI 右侧日志区只展示最近少量高层事件，例如 `agent_status`、`message_created`、`model_call_started`、`model_call_completed`、`model_call_failed`、`error` 和 `done`，不得把每个 `token` 事件作为默认用户界面内容。
+- 当前阶段 TUI 不实现 LSP，不展示 LSP 状态，不新增语言服务器、自动补全或跳转定义能力。
 - TUI 首版文件树只做浏览和打开文件，不实现完整 IDE 编辑器。
 - TUI 中的真实文件修改、补丁应用和命令执行必须沿用后端审批流程，先展示 Diff 或命令风险，再由用户确认。
 
