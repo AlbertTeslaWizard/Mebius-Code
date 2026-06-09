@@ -129,6 +129,10 @@ MVP 阶段 `mebius` 不自动启动 NestJS 后端，而是连接已经运行的 
 
 TUI 工作台采用三栏结构：左侧展示项目、Session、文件树和 Git 状态；中间展示聊天记录、流式输出和输入框；右侧默认展示 Status / Session 状态面板，并在审批时切换为审批预览。终端宽度不足时，右侧和左侧面板可以折叠或切换。
 
+TUI 的命令入口包括聊天输入中的 Slash Command 和 `Ctrl+P` 命令面板。`/new` 创建并切换到新会话，`/sessions` 打开全屏历史会话选择器，`/models` 打开模型选择器，`/themes` 切换 TUI 主题，`/clear` 和 `/compact` 调用后端会话命令。`/sessions` 复用 `GET /projects/:projectId/sessions`、`GET /sessions/:id` 和 `GET /sessions/:id/messages` 等既有 API，不新增后端数据结构。
+
+历史会话选择器按后端返回的 `updatedAt` 倒序展示同一项目下的会话，并在 TUI 本地按 Today、Yesterday 和具体日期分组。选择某个会话后，TUI 会停止旧会话 SSE，重新拉取会话详情、消息、最新计划、命令运行记录、待审批项、Git 状态和模型选择状态，更新 `recentSessionId` 后再订阅新会话 SSE。由于 Web 和 TUI 共用同一后端项目会话 API，同一 workspace 的历史会话天然多端互通。
+
 右侧 Status 面板按 Session、Model、Context、Workspace 和 Logs 分组展示摘要信息：Session 展示会话名、会话 ID、当前模式和任务状态；Model 展示当前模型和 Provider；Context 展示当前消息上下文的 token 估算、使用比例占位和成本占位；Workspace 展示工作区路径、local/remote API mode、后端可达状态和 local workspace 开关。Logs 分组只渲染最近少量高层 SSE 事件，例如 `agent_status`、`message_created`、`model_call_started`、`model_call_completed`、`model_call_failed`、`error` 和 `done`，不渲染逐 token 流事件，避免默认界面呈现为调试控制台。
 
 本阶段 TUI 不实现 LSP 相关能力，也不显示 LSP 状态。语言服务器、自动补全、跳转定义等 IDE 能力留作后续扩展，不进入当前后端协议和 TUI 默认界面。

@@ -82,7 +82,7 @@ export async function bootstrapWorkspace(input: {
   const sessionList = await api.listSessions(project.id);
   let session = sessionList.items.find((item) => item.id === config.recentSessionId) ?? sessionList.items[0];
   if (!session) {
-    session = await api.createSession(project.id, `TUI session for ${project.name}`);
+    session = await api.createSession(project.id, { title: `TUI session for ${project.name}` });
   }
   const nextConfig = {
     ...config,

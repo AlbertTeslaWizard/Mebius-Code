@@ -55,6 +55,8 @@ export interface Session {
   status: string;
   activeModelConfig: ModelConfig | null;
   agentActivity?: AgentActivity | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ModelConfig {

@@ -35,6 +35,7 @@ Slash commands always use command handling, regardless of the active composer mo
 ## Commands
 
 - `/models`: choose or configure the active model.
+- `/new <title>`: create and switch to a new session, inheriting the current model.
 - `/clear`: clear the current chat and model context.
 - `/compact`: compact the current chat into model context.
 - `/plan <goal>`: create a plan.

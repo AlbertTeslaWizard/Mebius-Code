@@ -5,7 +5,7 @@ import { For, Show, createContext, createEffect, createMemo, createSignal, onCle
 import type { Accessor, JSX } from 'solid-js';
 import { attachEventStream, refreshReviewData, type WorkspaceState } from '../bootstrap';
 import { saveConfig } from '../config';
-import type { Approval, ApprovalPreview, Message, ModelChoice, ModelsCommandResult, TuiThemeName } from '../types';
+import type { Approval, ApprovalPreview, Message, ModelChoice, ModelsCommandResult, Session, TuiThemeName } from '../types';
 import { getTuiTheme, resolveTuiThemeName, tuiThemeList, type TuiTheme } from './theme';
 
 const ThemeContext = createContext<Accessor<TuiTheme>>();
@@ -72,11 +72,19 @@ interface ThemePaletteState {
   selectedIndex: number;
 }
 
+interface SessionPaletteState {
+  sessions: Session[];
+  selectedIndex: number;
+  query: string;
+  loading: boolean;
+  error?: string;
+}
+
 interface CommandPaletteCommand {
   label: string;
   description: string;
   insert?: string;
-  action?: 'models';
+  action?: 'models' | 'sessions';
 }
 
 interface ModelChoiceGroupRow {
@@ -89,8 +97,20 @@ interface ModelChoiceGroup {
   rows: ModelChoiceGroupRow[];
 }
 
+interface SessionGroupRow {
+  session: Session;
+  index: number;
+}
+
+interface SessionGroup {
+  title: string;
+  rows: SessionGroupRow[];
+}
+
 const commandPaletteCommands: CommandPaletteCommand[] = [
   { label: 'Select model', insert: '/models', action: 'models', description: 'Choose or configure the active model' },
+  { label: '/sessions', action: 'sessions', description: 'Switch to a previous session' },
+  { label: '/new <title>', insert: '/new ', description: 'Create and switch to a new session' },
   { label: '/clear', insert: '/clear', description: 'Clear the chat and model context' },
   { label: '/compact', insert: '/compact', description: 'Compact the chat into model context' },
   { label: '/themes', insert: '/themes', description: 'Switch the TUI theme' },
@@ -124,6 +144,10 @@ const HIGH_LEVEL_EVENT_TYPES = new Set([
 const RUNNING_AGENT_STATUSES = new Set(['thinking', 'responding', 'using_tools', 'waiting_for_approval', 'working']);
 const COMPLETED_AGENT_STATUSES = new Set(['completed']);
 const ERROR_AGENT_STATUSES = new Set(['failed', 'error']);
+const MIN_SESSION_TITLE_LENGTH = 2;
+const MAX_SESSION_TITLE_LENGTH = 120;
+const SESSION_WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const SESSION_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 type TaskStatus = 'idle' | 'running' | 'completed' | 'error';
 type StatusEvent = WorkspaceState['events'][number];
@@ -139,23 +163,16 @@ export function App(props: AppProps) {
   const [modelPalette, setModelPalette] = createSignal<ModelPaletteState | null>(null);
   const [commandPalette, setCommandPalette] = createSignal<CommandPaletteState | null>(null);
   const [themePalette, setThemePalette] = createSignal<ThemePaletteState | null>(null);
+  const [sessionPalette, setSessionPalette] = createSignal<SessionPaletteState | null>(null);
   const [recentModelKeys, setRecentModelKeys] = createSignal<string[]>(initialRecentModelKeys(props.initialState.modelChoices));
   const renderer = useRenderer();
-  const abort = new AbortController();
+  let eventStreamAbort: AbortController | null = null;
 
   onMount(() => {
-    const token = props.initialState.config.accessToken;
-    if (token) {
-      attachEventStream({
-        state,
-        setState: (updater) => setState(updater),
-        token,
-        abortSignal: abort.signal,
-      });
-    }
+    startEventStream();
   });
 
-  onCleanup(() => abort.abort());
+  onCleanup(() => stopEventStream());
 
   const activeApproval = createMemo(() => state().approvals[0]);
   const activeModelInfo = createMemo(() => getActiveModelInfo(state()));
@@ -166,6 +183,25 @@ export function App(props: AppProps) {
     if (approval) return `Approval - ${approval.toolCall.name}`;
     return 'Status';
   });
+
+  function startEventStream() {
+    stopEventStream();
+    const token = state().config.accessToken;
+    if (!token) return;
+
+    eventStreamAbort = new AbortController();
+    attachEventStream({
+      state,
+      setState: (updater) => setState(updater),
+      token,
+      abortSignal: eventStreamAbort.signal,
+    });
+  }
+
+  function stopEventStream() {
+    eventStreamAbort?.abort();
+    eventStreamAbort = null;
+  }
 
   useKeyboard((event) => {
     const name = event.name.toLowerCase();
@@ -181,6 +217,12 @@ export function App(props: AppProps) {
         event.preventDefault();
         event.stopPropagation();
         setCommandPalette(null);
+        return;
+      }
+      if (sessionPalette()) {
+        event.preventDefault();
+        event.stopPropagation();
+        setSessionPalette(null);
         return;
       }
       if (modelPalette()) {
@@ -221,6 +263,31 @@ export function App(props: AppProps) {
       }
     }
 
+    const sessionState = sessionPalette();
+    if (sessionState) {
+      if (name === 'up') {
+        event.preventDefault();
+        event.stopPropagation();
+        moveSessionSelection(-1);
+        return;
+      }
+      if (name === 'down') {
+        event.preventDefault();
+        event.stopPropagation();
+        moveSessionSelection(1);
+        return;
+      }
+      if (isEnterKey(name)) {
+        event.preventDefault();
+        event.stopPropagation();
+        const session = selectedSession(sessionState);
+        if (session) {
+          void chooseSession(session);
+        }
+        return;
+      }
+    }
+
     const modelState = modelPalette();
     if (modelState?.step === 'list') {
       if (name === 'up') {
@@ -246,7 +313,7 @@ export function App(props: AppProps) {
       }
     }
 
-    if (name === 'tab' && !modelPalette() && !commandPalette() && !themePalette()) {
+    if (name === 'tab' && !modelPalette() && !commandPalette() && !themePalette() && !sessionPalette()) {
       event.preventDefault();
       event.stopPropagation();
       toggleComposerMode();
@@ -260,6 +327,7 @@ export function App(props: AppProps) {
   function openCommandPalette() {
     setModelPalette(null);
     setThemePalette(null);
+    setSessionPalette(null);
     setCommandPalette({ selectedIndex: 0, query: '' });
   }
 
@@ -267,6 +335,10 @@ export function App(props: AppProps) {
     setCommandPalette(null);
     if (command.action === 'models') {
       await openModelSelectModal();
+      return;
+    }
+    if (command.action === 'sessions') {
+      await openSessionPalette();
       return;
     }
     setInput(command.insert ?? '');
@@ -297,6 +369,7 @@ export function App(props: AppProps) {
     const current = state();
     setCommandPalette(null);
     setThemePalette(null);
+    setSessionPalette(null);
     let choices = current.modelChoices;
     let error: string | undefined;
     try {
@@ -338,11 +411,75 @@ export function App(props: AppProps) {
   function openThemePalette() {
     setCommandPalette(null);
     setModelPalette(null);
+    setSessionPalette(null);
     const selectedIndex = Math.max(
       tuiThemeList.findIndex((item) => item.name === themeName()),
       0,
     );
     setThemePalette({ selectedIndex });
+  }
+
+  async function openSessionPalette(initialQuery = '') {
+    const current = state();
+    const query = initialQuery.trim();
+    setCommandPalette(null);
+    setModelPalette(null);
+    setThemePalette(null);
+    setSessionPalette({
+      sessions: current.sessions,
+      selectedIndex: initialSessionSelectedIndex(current.sessions, query, current.session.id),
+      query,
+      loading: true,
+    });
+
+    try {
+      const sessions = (await current.api.listSessions(current.project.id)).items;
+      setState((prev) => ({ ...prev, sessions, error: '' }));
+      setSessionPalette((palette) =>
+        palette
+          ? {
+              ...palette,
+              sessions,
+              selectedIndex: initialSessionSelectedIndex(sessions, palette.query, current.session.id),
+              loading: false,
+              error: undefined,
+            }
+          : palette,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load sessions.';
+      setState((prev) => ({ ...prev, error: message }));
+      setSessionPalette((palette) => (palette ? { ...palette, loading: false, error: message } : palette));
+    }
+  }
+
+  function moveSessionSelection(delta: number) {
+    setSessionPalette((current) => {
+      if (!current) return current;
+      const count = flattenSessionGroups(buildSessionGroups(current.sessions, current.query)).length;
+      return { ...current, selectedIndex: moveIndex(current.selectedIndex, delta, count) };
+    });
+  }
+
+  function selectedSession(palette: SessionPaletteState | null): Session | undefined {
+    if (!palette) return undefined;
+    return flattenSessionGroups(buildSessionGroups(palette.sessions, palette.query))[palette.selectedIndex];
+  }
+
+  async function chooseSession(session: Session) {
+    if (busy()) return;
+    setBusy(true);
+    setSessionPalette((current) => (current ? { ...current, loading: true, error: undefined } : current));
+    try {
+      await switchToSession(session);
+      setSessionPalette(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to switch sessions.';
+      setState((current) => ({ ...current, error: message }));
+      setSessionPalette((current) => (current ? { ...current, loading: false, error: message } : current));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function chooseTheme(nextThemeName: TuiThemeName) {
@@ -402,7 +539,7 @@ export function App(props: AppProps) {
   }
 
   function exitTui() {
-    abort.abort();
+    stopEventStream();
     renderer.destroy();
   }
 
@@ -426,6 +563,14 @@ export function App(props: AppProps) {
       const approval = current.approvals[0];
       if (!approval) throw new Error('No pending approval.');
       await current.api.reject(approval.id);
+      return;
+    }
+    if (value === '/new' || value.startsWith('/new ')) {
+      await createNewSessionFromCommand(value);
+      return;
+    }
+    if (value === '/sessions' || value.startsWith('/sessions ')) {
+      await openSessionPalette(value.slice('/sessions'.length));
       return;
     }
     if (value === '/clear') {
@@ -477,6 +622,81 @@ export function App(props: AppProps) {
     }
 
     await runAgentPrompt(value);
+  }
+
+  async function createNewSessionFromCommand(value: string) {
+    const title = parseNewSessionTitle(value);
+    const current = state();
+    const modelConfigId =
+      current.session.activeModelConfig?.id ?? current.modelChoices.find((choice) => choice.active)?.modelConfigId;
+
+    setState((prev) => ({ ...prev, activity: 'Creating session', error: '' }));
+    const created = await current.api.createSession(current.project.id, {
+      ...(title ? { title } : {}),
+      ...(modelConfigId ? { modelConfigId } : {}),
+    });
+
+    await switchToSession(created, { fallbackToTarget: true });
+  }
+
+  async function switchToSession(target: Session, options: { fallbackToTarget?: boolean } = {}) {
+    const current = state();
+    setState((prev) => ({ ...prev, activity: `Opening session: ${target.title}`, error: '' }));
+    stopEventStream();
+    try {
+      const sessionPromise = current.api.getSession(target.id).catch((error) => {
+        if (options.fallbackToTarget) return target;
+        throw error;
+      });
+
+      const [session, sessionList, messages, approvals, plan, commandRuns, gitStatus, modelChoices] = await Promise.all([
+        sessionPromise,
+        current.api
+          .listSessions(current.project.id)
+          .then((result) => result.items)
+          .catch(() => current.sessions),
+        current.api.listMessages(target.id).catch(() => []),
+        current.api.pendingApprovals().catch(() => current.approvals),
+        current.api.latestPlan(target.id).catch(() => null),
+        current.api.commandRuns(target.id).catch(() => []),
+        current.api.gitStatus(current.project.id).catch(() => current.gitStatus),
+        current.api.listModels(target.id).catch(() => current.modelChoices),
+      ]);
+      const nextConfig = {
+        ...current.config,
+        recentProjectId: current.project.id,
+        recentSessionId: session.id,
+      };
+
+      setState((prev) => ({
+        ...prev,
+        config: nextConfig,
+        session,
+        sessions: upsertSessionList(sessionList, session),
+        modelChoices,
+        messages,
+        gitStatus,
+        approvals,
+        plan,
+        commandRuns,
+        events: [],
+        activity: `Session: ${session.title}`,
+        error: '',
+      }));
+      startEventStream();
+
+      try {
+        await saveConfig(nextConfig);
+      } catch (error) {
+        setState((prev) => ({
+          ...prev,
+          error: error instanceof Error ? error.message : 'Failed to save recent session.',
+        }));
+      }
+    } catch (error) {
+      startEventStream();
+      throw error;
+    }
   }
 
   async function createPlanFromGoal(goal: string) {
@@ -591,7 +811,7 @@ export function App(props: AppProps) {
               accentColor: composerAccentColor(),
               modelInfo: activeModelInfo(),
               value: input(),
-              focused: !modelPalette() && !commandPalette() && !themePalette(),
+              focused: !modelPalette() && !commandPalette() && !themePalette() && !sessionPalette(),
               onInput: setInput,
               onSubmit: () => {
                 void submit();
@@ -609,6 +829,20 @@ export function App(props: AppProps) {
               onQuery={(query) => setCommandPalette((current) => (current ? { ...current, query, selectedIndex: 0 } : current))}
               onChoose={(command) => {
                 void chooseCommand(command);
+              }}
+            />
+          )}
+        </Show>
+
+        <Show when={sessionPalette()}>
+          {(palette) => (
+            <SessionsPalette
+              palette={palette()}
+              currentSessionId={state().session.id}
+              onClose={() => setSessionPalette(null)}
+              onQuery={(query) => setSessionPalette((current) => (current ? { ...current, query, selectedIndex: 0 } : current))}
+              onChoose={(session) => {
+                void chooseSession(session);
               }}
             />
           )}
@@ -719,6 +953,119 @@ function CommandPalette(props: {
       </scrollbox>
       <PaletteFooter items={[['Enter', 'select'], ['Esc', 'close'], ['Up/Down', 'navigate']]} />
     </ModalShell>
+  );
+}
+
+function SessionsPalette(props: {
+  palette: SessionPaletteState;
+  currentSessionId: string;
+  onClose: () => void;
+  onQuery: (query: string) => void;
+  onChoose: (session: Session) => void;
+}) {
+  const theme = useTheme();
+  const dimensions = useTerminalDimensions();
+  const groups = createMemo(() => buildSessionGroups(props.palette.sessions, props.palette.query));
+  const flatSessions = createMemo(() => flattenSessionGroups(groups()));
+  const renderedRows = createMemo(() => groups().reduce((total, group) => total + group.rows.length + 1, 0));
+  const listHeight = createMemo(() => clamp(renderedRows(), 2, Math.max(4, dimensions().height - 7)));
+
+  return (
+    <box
+      style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        width: '100%',
+        height: '100%',
+        zIndex: 22,
+        paddingX: 2,
+        paddingY: 1,
+        flexDirection: 'column',
+        backgroundColor: theme().background,
+      }}
+      onKeyDown={(event) => {
+        if (event.name === 'escape') {
+          props.onClose();
+        }
+      }}
+    >
+      <box style={{ width: '100%', height: 1, flexDirection: 'row', flexShrink: 0 }}>
+        <text fg={theme().text}>Sessions</text>
+        <box style={{ flexGrow: 1 }} />
+        <text fg={theme().muted}>esc</text>
+      </box>
+      <PaletteSearch value={props.palette.query} placeholder="Search sessions" onInput={props.onQuery} />
+      <Show when={props.palette.error}>
+        <text fg={theme().red}>{props.palette.error}</text>
+      </Show>
+      <Show when={props.palette.loading}>
+        <text fg={theme().yellow}>Loading sessions...</text>
+      </Show>
+      <scrollbox
+        scrollY
+        style={{ width: '100%', height: listHeight(), minHeight: 2, marginTop: 1, flexShrink: 1 }}
+        contentOptions={{ width: '100%', minWidth: '100%', flexDirection: 'column' }}
+      >
+        <Show when={flatSessions().length > 0} fallback={<text fg={theme().muted}>No sessions found</text>}>
+          <For each={groups()}>
+            {(group) => (
+              <box style={{ flexDirection: 'column', width: '100%', marginBottom: 1 }}>
+                <text fg={theme().blue}>{group.title}</text>
+                <For each={group.rows}>
+                  {(row) => {
+                    const selected = createMemo(() => row.index === props.palette.selectedIndex);
+                    return (
+                      <SessionRow
+                        session={row.session}
+                        selected={selected()}
+                        current={row.session.id === props.currentSessionId}
+                        onChoose={() => props.onChoose(row.session)}
+                      />
+                    );
+                  }}
+                </For>
+              </box>
+            )}
+          </For>
+        </Show>
+      </scrollbox>
+      <PaletteFooter items={[['Enter', 'switch'], ['Esc', 'close'], ['Up/Down', 'navigate']]} />
+    </box>
+  );
+}
+
+function SessionRow(props: { session: Session; selected: boolean; current: boolean; onChoose: () => void }) {
+  const theme = useTheme();
+  const rowBackground = createMemo(() => (props.selected ? theme().selection : theme().background));
+  const primaryColor = createMemo(() => (props.selected ? theme().text : theme().text));
+  const secondaryColor = createMemo(() => (props.selected ? theme().text : theme().muted));
+  const markerColor = createMemo(() => (props.current ? theme().green : secondaryColor()));
+
+  return (
+    <box
+      style={{
+        width: '100%',
+        height: 1,
+        minHeight: 1,
+        flexDirection: 'row',
+        backgroundColor: rowBackground(),
+      }}
+      onMouseDown={props.onChoose}
+    >
+      <text fg={markerColor()} style={{ width: 2, flexShrink: 0 }}>
+        {props.current ? '*' : ' '}
+      </text>
+      <text fg={primaryColor()} truncate style={{ flexGrow: 1, minWidth: 0 }}>
+        {props.session.title}
+      </text>
+      <text fg={secondaryColor()} truncate style={{ width: 20, flexShrink: 0 }}>
+        {props.session.activeModelConfig?.modelName ?? props.session.status}
+      </text>
+      <text fg={secondaryColor()} style={{ width: 5, flexShrink: 0 }}>
+        {formatSessionTime(props.session)}
+      </text>
+    </box>
   );
 }
 
@@ -1422,6 +1769,23 @@ function shortId(value: string): string {
   return value.length > 8 ? value.slice(0, 8) : value || '-';
 }
 
+function parseNewSessionTitle(value: string): string | undefined {
+  const title = value.slice('/new'.length).trim();
+  if (!title) return undefined;
+  if (title.length < MIN_SESSION_TITLE_LENGTH || title.length > MAX_SESSION_TITLE_LENGTH) {
+    throw new Error(`/new title must be ${MIN_SESSION_TITLE_LENGTH}-${MAX_SESSION_TITLE_LENGTH} characters.`);
+  }
+  return title;
+}
+
+function upsertSessionList(
+  sessions: WorkspaceState['sessions'],
+  session: WorkspaceState['session'],
+): WorkspaceState['sessions'] {
+  const existing = sessions.some((item) => item.id === session.id);
+  return existing ? sessions.map((item) => (item.id === session.id ? session : item)) : [session, ...sessions];
+}
+
 function getActiveModelInfo(state: WorkspaceState): ActiveModelInfo {
   const activeModel = state.session.activeModelConfig;
   const activeChoice = state.modelChoices.find((choice) => choice.active);
@@ -1448,6 +1812,90 @@ function roleColor(role: Message['role'], theme: TuiTheme): string {
 
 function themeChoiceName(theme: TuiTheme, currentThemeName: TuiThemeName): string {
   return `${theme.name === currentThemeName ? '* ' : '  '}${theme.label}`;
+}
+
+function buildSessionGroups(sessions: Session[], query: string): SessionGroup[] {
+  const filteredSessions = sessions.filter((session) => sessionMatches(session, query));
+  let index = 0;
+  const groups: SessionGroup[] = [];
+
+  for (const session of filteredSessions) {
+    const title = sessionGroupTitle(session);
+    let group = groups[groups.length - 1];
+    if (!group || group.title !== title) {
+      group = { title, rows: [] };
+      groups.push(group);
+    }
+    group.rows.push({ session, index: index++ });
+  }
+
+  return groups;
+}
+
+function flattenSessionGroups(groups: SessionGroup[]): Session[] {
+  return groups.flatMap((group) => group.rows.map((row) => row.session));
+}
+
+function initialSessionSelectedIndex(sessions: Session[], query: string, currentSessionId: string): number {
+  const flatSessions = flattenSessionGroups(buildSessionGroups(sessions, query));
+  const currentIndex = flatSessions.findIndex((session) => session.id === currentSessionId);
+  return Math.max(currentIndex, 0);
+}
+
+function sessionMatches(session: Session, query: string): boolean {
+  const normalizedQuery = normalizeSearch(query);
+  if (!normalizedQuery) return true;
+  return [
+    session.title,
+    session.id,
+    shortId(session.id),
+    session.status,
+    session.activeModelConfig?.displayName,
+    session.activeModelConfig?.modelName,
+    session.activeModelConfig?.providerId ?? undefined,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .map(normalizeSearch)
+    .some((value) => value.includes(normalizedQuery));
+}
+
+function sessionGroupTitle(session: Session): string {
+  const date = sessionTimestamp(session);
+  if (!date) return 'Unknown date';
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+  if (sameLocalDay(date, today)) return 'Today';
+  if (sameLocalDay(date, yesterday)) return 'Yesterday';
+  return `${SESSION_WEEKDAYS[date.getDay()]} ${SESSION_MONTHS[date.getMonth()]} ${pad2(date.getDate())} ${date.getFullYear()}`;
+}
+
+function formatSessionTime(session: Session): string {
+  const date = sessionTimestamp(session);
+  if (!date) return '--:--';
+  return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+}
+
+function sessionTimestamp(session: Session): Date | null {
+  return parseDate(session.updatedAt) ?? parseDate(session.createdAt);
+}
+
+function parseDate(value: string | undefined): Date | null {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function sameLocalDay(left: Date, right: Date): boolean {
+  return (
+    left.getFullYear() === right.getFullYear() &&
+    left.getMonth() === right.getMonth() &&
+    left.getDate() === right.getDate()
+  );
+}
+
+function pad2(value: number): string {
+  return value.toString().padStart(2, '0');
 }
 
 function filteredCommandPaletteCommands(query: string): CommandPaletteCommand[] {

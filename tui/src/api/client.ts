@@ -55,10 +55,13 @@ export class ApiClient {
     return this.request<ListResponse<Session>>(`/projects/${projectId}/sessions`);
   }
 
-  async createSession(projectId: string, title?: string): Promise<Session> {
+  async createSession(
+    projectId: string,
+    input: { title?: string; modelConfigId?: string } = {},
+  ): Promise<Session> {
     return this.request<Session>(`/projects/${projectId}/sessions`, {
       method: 'POST',
-      body: JSON.stringify({ title }),
+      body: JSON.stringify(input),
     });
   }
 
