@@ -1,3 +1,5 @@
+export type TuiThemeName = 'onedark' | 'monokai' | 'dracula' | 'catppuccin-mocha' | 'gruvbox-dark';
+
 export interface TuiConfig {
   apiBaseUrl: string;
   accessToken?: string;
@@ -6,6 +8,7 @@ export interface TuiConfig {
   preferences?: {
     leftSidebarVisible?: boolean;
     rightPanel?: 'plan' | 'diff' | 'logs';
+    theme?: TuiThemeName;
   };
 }
 

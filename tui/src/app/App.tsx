@@ -1,31 +1,46 @@
 /** @jsxImportSource @opentui/solid */
 import { SyntaxStyle } from '@opentui/core';
 import { useKeyboard, useRenderer } from '@opentui/solid';
-import { For, Show, createMemo, createSignal, onCleanup, onMount } from 'solid-js';
+import { For, Show, createContext, createMemo, createSignal, onCleanup, onMount, useContext } from 'solid-js';
+import type { Accessor } from 'solid-js';
 import { attachEventStream, refreshReviewData, type WorkspaceState } from '../bootstrap';
-import type { Approval, ApprovalPreview, Message, ModelChoice, ModelsCommandResult } from '../types';
-import { oneDark } from './theme';
+import { saveConfig } from '../config';
+import type { Approval, ApprovalPreview, Message, ModelChoice, ModelsCommandResult, TuiThemeName } from '../types';
+import { getTuiTheme, resolveTuiThemeName, tuiThemeList, type TuiTheme } from './theme';
 
-const messageMarkdownStyle = SyntaxStyle.create();
-messageMarkdownStyle.registerStyle('default', { fg: oneDark.text });
-messageMarkdownStyle.registerStyle('markup.heading', { fg: oneDark.blue, bold: true });
-messageMarkdownStyle.registerStyle('markup.strong', { fg: oneDark.text, bold: true });
-messageMarkdownStyle.registerStyle('markup.italic', { fg: oneDark.text, italic: true });
-messageMarkdownStyle.registerStyle('markup.raw', { fg: oneDark.green });
-messageMarkdownStyle.registerStyle('markup.link', { fg: oneDark.blue, underline: true });
-messageMarkdownStyle.registerStyle('markup.link.label', { fg: oneDark.blue, underline: true });
-messageMarkdownStyle.registerStyle('markup.link.url', { fg: oneDark.purple, underline: true });
-messageMarkdownStyle.registerStyle('markup.quote', { fg: oneDark.muted, dim: true });
-messageMarkdownStyle.registerStyle('markup.list', { fg: oneDark.yellow });
-messageMarkdownStyle.registerStyle('conceal', { fg: oneDark.muted, dim: true });
+const ThemeContext = createContext<Accessor<TuiTheme>>();
 
-const markdownTableOptions = {
-  style: 'grid',
-  widthMode: 'full',
-  wrapMode: 'word',
-  cellPaddingX: 1,
-  borderColor: oneDark.border,
-} as const;
+function useTheme(): Accessor<TuiTheme> {
+  const theme = useContext(ThemeContext);
+  if (!theme) throw new Error('Theme context is not available.');
+  return theme;
+}
+
+function createMessageMarkdownStyle(theme: TuiTheme): SyntaxStyle {
+  const style = SyntaxStyle.create();
+  style.registerStyle('default', { fg: theme.text });
+  style.registerStyle('markup.heading', { fg: theme.blue, bold: true });
+  style.registerStyle('markup.strong', { fg: theme.text, bold: true });
+  style.registerStyle('markup.italic', { fg: theme.text, italic: true });
+  style.registerStyle('markup.raw', { fg: theme.green });
+  style.registerStyle('markup.link', { fg: theme.blue, underline: true });
+  style.registerStyle('markup.link.label', { fg: theme.blue, underline: true });
+  style.registerStyle('markup.link.url', { fg: theme.purple, underline: true });
+  style.registerStyle('markup.quote', { fg: theme.muted, dim: true });
+  style.registerStyle('markup.list', { fg: theme.yellow });
+  style.registerStyle('conceal', { fg: theme.muted, dim: true });
+  return style;
+}
+
+function createMarkdownTableOptions(theme: TuiTheme) {
+  return {
+    style: 'grid',
+    widthMode: 'full',
+    wrapMode: 'word',
+    cellPaddingX: 1,
+    borderColor: theme.border,
+  } as const;
+}
 
 interface AppProps {
   initialState: WorkspaceState;
@@ -51,6 +66,10 @@ interface CommandPaletteState {
   selectedIndex: number;
 }
 
+interface ThemePaletteState {
+  selectedIndex: number;
+}
+
 interface CommandPaletteCommand {
   label: string;
   insert: string;
@@ -59,6 +78,7 @@ interface CommandPaletteCommand {
 
 const commandPaletteCommands: CommandPaletteCommand[] = [
   { label: '/models', insert: '/models', description: 'Choose or configure a model' },
+  { label: '/themes', insert: '/themes', description: 'Switch the TUI theme' },
   { label: '/plan <goal>', insert: '/plan ', description: 'Create a plan for a goal' },
   { label: '/plan-approve', insert: '/plan-approve', description: 'Approve the latest plan' },
   { label: '/approve', insert: '/approve', description: 'Approve the active tool request' },
@@ -76,9 +96,13 @@ export function App(props: AppProps) {
   const [state, setState] = createSignal(props.initialState);
   const [input, setInput] = createSignal('');
   const [composerMode, setComposerMode] = createSignal<ComposerMode>('build');
+  const [themeName, setThemeName] = createSignal<TuiThemeName>(
+    resolveTuiThemeName(props.initialState.config.preferences?.theme),
+  );
   const [busy, setBusy] = createSignal(false);
   const [modelPalette, setModelPalette] = createSignal<ModelPaletteState | null>(null);
   const [commandPalette, setCommandPalette] = createSignal<CommandPaletteState | null>(null);
+  const [themePalette, setThemePalette] = createSignal<ThemePaletteState | null>(null);
   const renderer = useRenderer();
   const abort = new AbortController();
 
@@ -98,7 +122,8 @@ export function App(props: AppProps) {
 
   const activeApproval = createMemo(() => state().approvals[0]);
   const activeModelInfo = createMemo(() => getActiveModelInfo(state()));
-  const composerAccentColor = createMemo(() => composerModeAccent(composerMode()));
+  const theme = createMemo(() => getTuiTheme(themeName()));
+  const composerAccentColor = createMemo(() => composerModeAccent(composerMode(), theme()));
   const rightTitle = createMemo(() => {
     const approval = activeApproval();
     if (approval) return `Approval - ${approval.toolCall.name}`;
@@ -128,9 +153,15 @@ export function App(props: AppProps) {
         setModelPalette(null);
         return;
       }
+      if (themePalette()) {
+        event.preventDefault();
+        event.stopPropagation();
+        setThemePalette(null);
+        return;
+      }
     }
 
-    if (name === 'tab' && !modelPalette() && !commandPalette()) {
+    if (name === 'tab' && !modelPalette() && !commandPalette() && !themePalette()) {
       event.preventDefault();
       event.stopPropagation();
       toggleComposerMode();
@@ -143,12 +174,50 @@ export function App(props: AppProps) {
 
   function openCommandPalette() {
     setModelPalette(null);
+    setThemePalette(null);
     setCommandPalette({ selectedIndex: 0 });
   }
 
   function chooseCommand(command: CommandPaletteCommand) {
     setInput(command.insert);
     setCommandPalette(null);
+  }
+
+  function openThemePalette() {
+    setCommandPalette(null);
+    setModelPalette(null);
+    const selectedIndex = Math.max(
+      tuiThemeList.findIndex((item) => item.name === themeName()),
+      0,
+    );
+    setThemePalette({ selectedIndex });
+  }
+
+  async function chooseTheme(nextThemeName: TuiThemeName) {
+    const current = state();
+    const nextConfig = {
+      ...current.config,
+      preferences: {
+        ...current.config.preferences,
+        theme: nextThemeName,
+      },
+    };
+    setThemeName(nextThemeName);
+    setThemePalette(null);
+    setState((prev) => ({
+      ...prev,
+      config: nextConfig,
+      activity: `Theme: ${getTuiTheme(nextThemeName).label}`,
+      error: '',
+    }));
+    try {
+      await saveConfig(nextConfig);
+    } catch (error) {
+      setState((prev) => ({
+        ...prev,
+        error: error instanceof Error ? error.message : 'Failed to save theme preference.',
+      }));
+    }
   }
 
   async function submit() {
@@ -236,6 +305,10 @@ export function App(props: AppProps) {
         selectedIndex: Math.max(choices.findIndex((choice) => choice.active), 0),
         apiKey: '',
       });
+      return;
+    }
+    if (value === '/themes' || value.startsWith('/themes ')) {
+      openThemePalette();
       return;
     }
     if (value === '/model' || value.startsWith('/model ') || value === '/connect' || value.startsWith('/connect ')) {
@@ -344,36 +417,56 @@ export function App(props: AppProps) {
   }
 
   return (
-    <box style={{ flexDirection: 'column', width: '100%', height: '100%', backgroundColor: oneDark.background }}>
+    <ThemeContext.Provider value={theme}>
+      <box style={{ flexDirection: 'column', width: '100%', height: '100%', backgroundColor: theme().background }}>
       <Header state={state()} busy={busy()} />
       <Show
         when={commandPalette()}
         fallback={
           <Show
-            when={modelPalette()}
+            when={themePalette()}
             fallback={
-              <box style={{ flexDirection: 'row', flexGrow: 1, minHeight: 0 }}>
-                <ChatPanel messages={state().messages} error={state().error} />
-                <RightPanel title={rightTitle()} approval={activeApproval()} state={state()} />
-              </box>
+              <Show
+                when={modelPalette()}
+                fallback={
+                  <box style={{ flexDirection: 'row', flexGrow: 1, minHeight: 0 }}>
+                    <ChatPanel messages={state().messages} error={state().error} />
+                    <RightPanel title={rightTitle()} approval={activeApproval()} state={state()} />
+                  </box>
+                }
+              >
+                {(palette) => (
+                  <ModelsPanel
+                    palette={palette()}
+                    busy={busy()}
+                    onClose={() => setModelPalette(null)}
+                    onSelectedIndex={(selectedIndex) =>
+                      setModelPalette((current) => (current ? { ...current, selectedIndex } : current))
+                    }
+                    onChoose={(choice) => {
+                      void chooseModel(choice);
+                    }}
+                    onApiKeyInput={(apiKey) =>
+                      setModelPalette((current) => (current ? { ...current, apiKey, error: undefined } : current))
+                    }
+                    onSubmitApiKey={() => {
+                      void submitModelApiKey();
+                    }}
+                  />
+                )}
+              </Show>
             }
           >
             {(palette) => (
-              <ModelsPanel
+              <ThemesPanel
                 palette={palette()}
-                busy={busy()}
-                onClose={() => setModelPalette(null)}
+                currentThemeName={themeName()}
+                onClose={() => setThemePalette(null)}
                 onSelectedIndex={(selectedIndex) =>
-                  setModelPalette((current) => (current ? { ...current, selectedIndex } : current))
+                  setThemePalette((current) => (current ? { ...current, selectedIndex } : current))
                 }
-                onChoose={(choice) => {
-                  void chooseModel(choice);
-                }}
-                onApiKeyInput={(apiKey) =>
-                  setModelPalette((current) => (current ? { ...current, apiKey, error: undefined } : current))
-                }
-                onSubmitApiKey={() => {
-                  void submitModelApiKey();
+                onChoose={(name) => {
+                  void chooseTheme(name);
                 }}
               />
             )}
@@ -391,13 +484,13 @@ export function App(props: AppProps) {
           />
         )}
       </Show>
-      <box style={{ height: 4, flexDirection: 'row', backgroundColor: oneDark.background }}>
+      <box style={{ height: 4, flexDirection: 'row', backgroundColor: theme().background }}>
         <Composer
           mode={composerMode()}
           accentColor={composerAccentColor()}
           modelInfo={activeModelInfo()}
           value={input()}
-          focused={!modelPalette() && !commandPalette()}
+          focused={!modelPalette() && !commandPalette() && !themePalette()}
           onInput={setInput}
           onSubmit={() => {
             void submit();
@@ -410,19 +503,21 @@ export function App(props: AppProps) {
           }}
         />
       </box>
-    </box>
+      </box>
+    </ThemeContext.Provider>
   );
 }
 
 function Header(props: { state: WorkspaceState; busy: boolean }) {
+  const theme = useTheme();
   const mode = props.state.mode === 'remote' ? 'remote API' : 'local API';
   return (
-    <box style={{ height: 3, paddingX: 1, alignItems: 'center', flexDirection: 'row', backgroundColor: oneDark.background }}>
-      <text fg={oneDark.text}>Mebius</text>
-      <text fg={oneDark.muted}> - {props.state.project.name}</text>
-      <text fg={oneDark.muted}> - {props.state.session.title}</text>
-      <text fg={oneDark.muted}> - {mode}</text>
-      <text fg={props.busy ? oneDark.yellow : oneDark.green}> - {props.busy ? 'busy' : props.state.activity}</text>
+    <box style={{ height: 3, paddingX: 1, alignItems: 'center', flexDirection: 'row', backgroundColor: theme().background }}>
+      <text fg={theme().text}>Mebius</text>
+      <text fg={theme().muted}> - {props.state.project.name}</text>
+      <text fg={theme().muted}> - {props.state.session.title}</text>
+      <text fg={theme().muted}> - {mode}</text>
+      <text fg={props.busy ? theme().yellow : theme().green}> - {props.busy ? 'busy' : props.state.activity}</text>
     </box>
   );
 }
@@ -433,12 +528,13 @@ function CommandPalette(props: {
   onSelectedIndex: (index: number) => void;
   onChoose: (command: CommandPaletteCommand) => void;
 }) {
+  const theme = useTheme();
   return (
     <box
       border
-      borderColor={oneDark.blue}
+      borderColor={theme().blue}
       title="Commands"
-      style={{ flexGrow: 1, minHeight: 0, paddingX: 2, paddingY: 1, flexDirection: 'column', backgroundColor: oneDark.panel }}
+      style={{ flexGrow: 1, minHeight: 0, paddingX: 2, paddingY: 1, flexDirection: 'column', backgroundColor: theme().panel }}
       onKeyDown={(event) => {
         if (event.name === 'escape') {
           props.onClose();
@@ -456,12 +552,12 @@ function CommandPalette(props: {
         showDescription
         showScrollIndicator
         wrapSelection
-        backgroundColor={oneDark.panel}
-        textColor={oneDark.text}
-        selectedBackgroundColor={oneDark.selection}
-        selectedTextColor={oneDark.text}
-        descriptionColor={oneDark.muted}
-        selectedDescriptionColor={oneDark.text}
+        backgroundColor={theme().panel}
+        textColor={theme().text}
+        selectedBackgroundColor={theme().selection}
+        selectedTextColor={theme().text}
+        descriptionColor={theme().muted}
+        selectedDescriptionColor={theme().text}
         style={{ flexGrow: 1, minHeight: 8 }}
         onChange={(index) => props.onSelectedIndex(index)}
         onSelect={(_index, option) => {
@@ -478,6 +574,63 @@ function CommandPalette(props: {
   );
 }
 
+function ThemesPanel(props: {
+  palette: ThemePaletteState;
+  currentThemeName: TuiThemeName;
+  onClose: () => void;
+  onSelectedIndex: (index: number) => void;
+  onChoose: (themeName: TuiThemeName) => void;
+}) {
+  const theme = useTheme();
+  return (
+    <box
+      border
+      borderColor={theme().border}
+      title="Themes"
+      style={{ flexGrow: 1, minHeight: 0, paddingX: 2, paddingY: 1, flexDirection: 'column', backgroundColor: theme().panel }}
+      onKeyDown={(event) => {
+        if (event.name === 'escape') {
+          props.onClose();
+        }
+      }}
+    >
+      <text fg={theme().text}>TUI themes</text>
+      <text fg={theme().muted}>Enter selects. Esc closes.</text>
+      <box style={{ flexDirection: 'column', flexGrow: 1, minHeight: 0, marginTop: 1 }}>
+        <select
+          focused
+          options={tuiThemeList.map((item) => ({
+            name: themeChoiceName(item, props.currentThemeName),
+            description: item.description,
+            value: item.name,
+          }))}
+          selectedIndex={props.palette.selectedIndex}
+          showDescription
+          showScrollIndicator
+          wrapSelection
+          backgroundColor={theme().panel}
+          textColor={theme().text}
+          selectedBackgroundColor={theme().selection}
+          selectedTextColor={theme().text}
+          descriptionColor={theme().muted}
+          selectedDescriptionColor={theme().text}
+          style={{ flexGrow: 1, minHeight: 8 }}
+          onChange={(index) => props.onSelectedIndex(index)}
+          onSelect={(_index, option) => {
+            const name = option?.value as TuiThemeName | undefined;
+            if (name) props.onChoose(name);
+          }}
+          onKeyDown={(event) => {
+            if (event.name === 'escape') {
+              props.onClose();
+            }
+          }}
+        />
+      </box>
+    </box>
+  );
+}
+
 function Composer(props: {
   mode: ComposerMode;
   accentColor: string;
@@ -487,18 +640,19 @@ function Composer(props: {
   onInput: (value: string) => void;
   onSubmit: () => void;
 }) {
+  const theme = useTheme();
   return (
     <box
       border
       borderStyle="rounded"
-      borderColor={oneDark.border}
-      focusedBorderColor={oneDark.border}
+      borderColor={theme().border}
+      focusedBorderColor={theme().border}
       style={{
         height: 4,
         flexGrow: 1,
         minWidth: MAIN_COLUMN_MIN_WIDTH,
         flexDirection: 'row',
-        backgroundColor: oneDark.input,
+        backgroundColor: theme().input,
       }}
     >
       <box style={{ width: 1, flexShrink: 0, alignSelf: 'stretch', backgroundColor: props.accentColor }} />
@@ -513,7 +667,7 @@ function Composer(props: {
         />
         <box style={{ height: 1, flexDirection: 'row' }}>
           <text fg={props.accentColor}>{composerModeLabel(props.mode)}</text>
-          <text fg={oneDark.muted}> · {props.modelInfo.modelName} · {props.modelInfo.providerDisplay}</text>
+          <text fg={theme().muted}> · {props.modelInfo.modelName} · {props.modelInfo.providerDisplay}</text>
         </box>
       </box>
     </box>
@@ -529,22 +683,23 @@ function ModelsPanel(props: {
   onApiKeyInput: (apiKey: string) => void;
   onSubmitApiKey: () => void;
 }) {
+  const theme = useTheme();
   return (
     <box
       border
-      borderColor={oneDark.border}
+      borderColor={theme().border}
       title="Models"
-      style={{ flexGrow: 1, minHeight: 0, paddingX: 2, paddingY: 1, flexDirection: 'column', backgroundColor: oneDark.panel }}
+      style={{ flexGrow: 1, minHeight: 0, paddingX: 2, paddingY: 1, flexDirection: 'column', backgroundColor: theme().panel }}
       onKeyDown={(event) => {
         if (event.name === 'escape') {
           props.onClose();
         }
       }}
     >
-      <text fg={oneDark.text}>DeepSeek models</text>
-      <text fg={oneDark.muted}>Enter selects. Existing provider keys are reused. Esc closes.</text>
+      <text fg={theme().text}>DeepSeek models</text>
+      <text fg={theme().muted}>Enter selects. Existing provider keys are reused. Esc closes.</text>
       <Show when={props.palette.error}>
-        <text fg={oneDark.red}>{props.palette.error}</text>
+        <text fg={theme().red}>{props.palette.error}</text>
       </Show>
       <Show
         when={props.palette.step === 'apiKey'}
@@ -561,12 +716,12 @@ function ModelsPanel(props: {
               showDescription
               showScrollIndicator
               wrapSelection
-              backgroundColor={oneDark.panel}
-              textColor={oneDark.text}
-              selectedBackgroundColor={oneDark.selection}
-              selectedTextColor={oneDark.text}
-              descriptionColor={oneDark.muted}
-              selectedDescriptionColor={oneDark.text}
+              backgroundColor={theme().panel}
+              textColor={theme().text}
+              selectedBackgroundColor={theme().selection}
+              selectedTextColor={theme().text}
+              descriptionColor={theme().muted}
+              selectedDescriptionColor={theme().text}
               style={{ flexGrow: 1, minHeight: 8 }}
               onChange={(index) => props.onSelectedIndex(index)}
               onSelect={(_index, option) => {
@@ -583,8 +738,8 @@ function ModelsPanel(props: {
         }
       >
         <box style={{ flexDirection: 'column', marginTop: 1 }}>
-          <text fg={oneDark.yellow}>API key required for {props.palette.pendingChoice?.modelName}</text>
-          <text fg={oneDark.muted}>The key is sent to the backend model config store and is not added to chat.</text>
+          <text fg={theme().yellow}>API key required for {props.palette.pendingChoice?.modelName}</text>
+          <text fg={theme().muted}>The key is sent to the backend model config store and is not added to chat.</text>
           <input
             focused
             value={props.palette.apiKey}
@@ -597,7 +752,7 @@ function ModelsPanel(props: {
               }
             }}
           />
-          <text fg={props.busy ? oneDark.yellow : oneDark.muted}>
+          <text fg={props.busy ? theme().yellow : theme().muted}>
             {props.busy ? 'Validating key...' : 'Press Enter to save and switch.'}
           </text>
         </box>
@@ -607,11 +762,12 @@ function ModelsPanel(props: {
 }
 
 function ChatPanel(props: { messages: Message[]; error: string }) {
+  const theme = useTheme();
   return (
-    <box border borderColor={oneDark.border} title="Chat" style={{ flexGrow: 1, minWidth: MAIN_COLUMN_MIN_WIDTH, paddingX: 1, backgroundColor: oneDark.panel }}>
+    <box border borderColor={theme().border} title="Chat" style={{ flexGrow: 1, minWidth: MAIN_COLUMN_MIN_WIDTH, paddingX: 1, backgroundColor: theme().panel }}>
       <scrollbox stickyScroll stickyStart="bottom" style={{ flexGrow: 1, minHeight: 0, width: '100%' }}>
         <Show when={props.error}>
-          <text fg={oneDark.red}>{props.error}</text>
+          <text fg={theme().red}>{props.error}</text>
         </Show>
         <For each={props.messages}>
           {(message) => <MessageBlock message={message} />}
@@ -622,6 +778,7 @@ function ChatPanel(props: { messages: Message[]; error: string }) {
 }
 
 function MessageBlock(props: { message: Message }) {
+  const theme = useTheme();
   return (
     <box
       style={{
@@ -630,12 +787,12 @@ function MessageBlock(props: { message: Message }) {
         flexDirection: 'row',
         alignItems: 'stretch',
         marginBottom: 1,
-        backgroundColor: oneDark.background,
+        backgroundColor: theme().background,
       }}
     >
-      <box style={{ width: 1, flexShrink: 0, alignSelf: 'stretch', backgroundColor: roleColor(props.message.role) }} />
+      <box style={{ width: 1, flexShrink: 0, alignSelf: 'stretch', backgroundColor: roleColor(props.message.role, theme()) }} />
       <box style={{ flexGrow: 1, minWidth: 0, paddingX: 1, flexDirection: 'column' }}>
-        <text fg={roleColor(props.message.role)} style={{ width: '100%', flexShrink: 0 }}>
+        <text fg={roleColor(props.message.role, theme())} style={{ width: '100%', flexShrink: 0 }}>
           {props.message.role}
           {props.message.streaming ? ' - streaming' : ''}
         </text>
@@ -646,41 +803,45 @@ function MessageBlock(props: { message: Message }) {
 }
 
 function MessageBody(props: { message: Message }) {
+  const theme = useTheme();
+  const messageMarkdownStyle = createMemo(() => createMessageMarkdownStyle(theme()));
+  const markdownTableOptions = createMemo(() => createMarkdownTableOptions(theme()));
   if (props.message.role === 'assistant' || props.message.role === 'system') {
     return (
       <markdown
         content={props.message.content || ' '}
-        syntaxStyle={messageMarkdownStyle}
-        fg={oneDark.text}
+        syntaxStyle={messageMarkdownStyle()}
+        fg={theme().text}
         conceal={true}
         concealCode={false}
         streaming={props.message.streaming ?? false}
         internalBlockMode="top-level"
-        tableOptions={markdownTableOptions}
+        tableOptions={markdownTableOptions()}
         style={{ width: '100%', minWidth: 0, flexShrink: 0 }}
       />
     );
   }
 
   return (
-    <text fg={oneDark.text} wrapMode="word" style={{ width: '100%', minWidth: 0, flexShrink: 0 }}>
+    <text fg={theme().text} wrapMode="word" style={{ width: '100%', minWidth: 0, flexShrink: 0 }}>
       {props.message.content || ' '}
     </text>
   );
 }
 
 function RightPanel(props: { title: string; approval: Approval | undefined; state: WorkspaceState }) {
+  const theme = useTheme();
   return (
     <box
       border
-      borderColor={oneDark.border}
+      borderColor={theme().border}
       title={props.title}
       style={{
         width: RIGHT_RAIL_WIDTH,
         flexShrink: 0,
         paddingX: 1,
         flexDirection: 'column',
-        backgroundColor: oneDark.panel,
+        backgroundColor: theme().panel,
       }}
     >
       <Show when={props.approval} fallback={<Logs state={props.state} />}>
@@ -691,11 +852,12 @@ function RightPanel(props: { title: string; approval: Approval | undefined; stat
 }
 
 function ApprovalView(props: { approval: Approval }) {
+  const theme = useTheme();
   const preview = props.approval.preview;
   return (
     <scrollbox style={{ flexGrow: 1 }}>
-      <text fg={oneDark.yellow}>Pending {props.approval.toolCall.name}</text>
-      <text fg={oneDark.muted}>Type /approve or /reject in the prompt.</text>
+      <text fg={theme().yellow}>Pending {props.approval.toolCall.name}</text>
+      <text fg={theme().muted}>Type /approve or /reject in the prompt.</text>
       <Show when={preview}>
         {(value) => <Preview preview={value()} />}
       </Show>
@@ -704,14 +866,15 @@ function ApprovalView(props: { approval: Approval }) {
 }
 
 function Preview(props: { preview: ApprovalPreview }) {
+  const theme = useTheme();
   if (props.preview.kind === 'command') {
     return (
       <box style={{ flexDirection: 'column' }}>
-        <text fg={oneDark.softRed}>Command requires approval</text>
-        <text fg={oneDark.text}>{props.preview.command}</text>
-        <text fg={oneDark.muted}>cwd: {props.preview.cwd ?? 'workspace root'}</text>
+        <text fg={theme().softRed}>Command requires approval</text>
+        <text fg={theme().text}>{props.preview.command}</text>
+        <text fg={theme().muted}>cwd: {props.preview.cwd ?? 'workspace root'}</text>
         <Show when={highRiskCommand(props.preview.command)}>
-          <text fg={oneDark.red}>High risk command: review carefully before approving.</text>
+          <text fg={theme().red}>High risk command: review carefully before approving.</text>
         </Show>
       </box>
     );
@@ -719,13 +882,13 @@ function Preview(props: { preview: ApprovalPreview }) {
   const files = props.preview.kind === 'patch' ? [{ path: props.preview.path, diffText: props.preview.diffText }] : props.preview.files;
   return (
     <box style={{ flexDirection: 'column' }}>
-      <text fg={oneDark.green}>Patch diff</text>
+      <text fg={theme().green}>Patch diff</text>
       <For each={files}>
         {(file) => (
           <box style={{ flexDirection: 'column', marginBottom: 1 }}>
-            <text fg={oneDark.text}>{file.path}</text>
+            <text fg={theme().text}>{file.path}</text>
             <For each={file.diffText.split('\n').slice(0, 80)}>
-              {(line) => <text fg={line.startsWith('+') ? oneDark.green : line.startsWith('-') ? oneDark.softRed : oneDark.text}>{line}</text>}
+              {(line) => <text fg={line.startsWith('+') ? theme().green : line.startsWith('-') ? theme().softRed : theme().text}>{line}</text>}
             </For>
           </box>
         )}
@@ -735,17 +898,18 @@ function Preview(props: { preview: ApprovalPreview }) {
 }
 
 function Logs(props: { state: WorkspaceState }) {
+  const theme = useTheme();
   return (
     <scrollbox style={{ flexGrow: 1 }}>
       <Show when={props.state.plan}>
-        <text fg={oneDark.text}>Plan: {props.state.plan?.plan.status}</text>
-        <text fg={oneDark.muted}>{props.state.plan?.plan.summary}</text>
+        <text fg={theme().text}>Plan: {props.state.plan?.plan.status}</text>
+        <text fg={theme().muted}>{props.state.plan?.plan.summary}</text>
       </Show>
       <For each={props.state.commandRuns.slice(0, 8)}>
-        {(run) => <text fg={oneDark.text}>{run.status} - {run.command}</text>}
+        {(run) => <text fg={theme().text}>{run.status} - {run.command}</text>}
       </For>
       <For each={props.state.events.slice(0, 30)}>
-        {(event) => <text fg={oneDark.muted}>{event.time} - {event.type}</text>}
+        {(event) => <text fg={theme().muted}>{event.time} - {event.type}</text>}
       </For>
     </scrollbox>
   );
@@ -760,19 +924,23 @@ function getActiveModelInfo(state: WorkspaceState): ActiveModelInfo {
   return { modelName, providerDisplay: `${providerName}/${displayName}` };
 }
 
-function composerModeAccent(mode: ComposerMode): string {
-  return mode === 'build' ? oneDark.purple : oneDark.yellow;
+function composerModeAccent(mode: ComposerMode, theme: TuiTheme): string {
+  return mode === 'build' ? theme.purple : theme.yellow;
 }
 
 function composerModeLabel(mode: ComposerMode): string {
   return mode === 'build' ? 'Build' : 'Plan';
 }
 
-function roleColor(role: Message['role']): string {
-  if (role === 'user') return oneDark.blue;
-  if (role === 'assistant') return oneDark.green;
-  if (role === 'tool') return oneDark.yellow;
-  return oneDark.muted;
+function roleColor(role: Message['role'], theme: TuiTheme): string {
+  if (role === 'user') return theme.blue;
+  if (role === 'assistant') return theme.green;
+  if (role === 'tool') return theme.yellow;
+  return theme.muted;
+}
+
+function themeChoiceName(theme: TuiTheme, currentThemeName: TuiThemeName): string {
+  return `${theme.name === currentThemeName ? '* ' : '  '}${theme.label}`;
 }
 
 function modelChoiceName(choice: ModelChoice): string {
