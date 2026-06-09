@@ -67,3 +67,4 @@ bun run start
 
 The installed CLI command is `mebius`. Use `mebius login --api http://localhost:3000/api`
 to persist credentials and API configuration.
+See [tui/README.md](tui/README.md) for TUI commands and shortcuts.

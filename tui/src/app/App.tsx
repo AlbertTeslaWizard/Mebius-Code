@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 import { SyntaxStyle } from '@opentui/core';
-import { useRenderer } from '@opentui/solid';
+import { useKeyboard, useRenderer } from '@opentui/solid';
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from 'solid-js';
 import { attachEventStream, refreshReviewData, type WorkspaceState } from '../bootstrap';
 import type { Approval, ApprovalPreview, Message, ModelChoice, ModelsCommandResult } from '../types';
@@ -40,11 +40,45 @@ interface ModelPaletteState {
   error?: string;
 }
 
+type ComposerMode = 'build' | 'plan';
+
+interface ActiveModelInfo {
+  modelName: string;
+  providerDisplay: string;
+}
+
+interface CommandPaletteState {
+  selectedIndex: number;
+}
+
+interface CommandPaletteCommand {
+  label: string;
+  insert: string;
+  description: string;
+}
+
+const commandPaletteCommands: CommandPaletteCommand[] = [
+  { label: '/models', insert: '/models', description: 'Choose or configure a model' },
+  { label: '/plan <goal>', insert: '/plan ', description: 'Create a plan for a goal' },
+  { label: '/plan-approve', insert: '/plan-approve', description: 'Approve the latest plan' },
+  { label: '/approve', insert: '/approve', description: 'Approve the active tool request' },
+  { label: '/reject', insert: '/reject', description: 'Reject the active tool request' },
+  { label: '/run <command>', insert: '/run ', description: 'Request a shell command run' },
+  { label: '/open <path>', insert: '/open ', description: 'Open a project file' },
+  { label: '/exit', insert: '/exit', description: 'Exit the TUI' },
+  { label: '/quit', insert: '/quit', description: 'Exit the TUI' },
+];
+
+const RIGHT_RAIL_WIDTH = 32;
+const MAIN_COLUMN_MIN_WIDTH = 48;
+
 export function App(props: AppProps) {
   const [state, setState] = createSignal(props.initialState);
   const [input, setInput] = createSignal('');
+  const [composerMode, setComposerMode] = createSignal<ComposerMode>('build');
   const [busy, setBusy] = createSignal(false);
   const [modelPalette, setModelPalette] = createSignal<ModelPaletteState | null>(null);
+  const [commandPalette, setCommandPalette] = createSignal<CommandPaletteState | null>(null);
   const renderer = useRenderer();
   const abort = new AbortController();
 
@@ -63,12 +97,59 @@ export function App(props: AppProps) {
   onCleanup(() => abort.abort());
 
   const activeApproval = createMemo(() => state().approvals[0]);
+  const activeModelInfo = createMemo(() => getActiveModelInfo(state()));
+  const composerAccentColor = createMemo(() => composerModeAccent(composerMode()));
   const rightTitle = createMemo(() => {
     const approval = activeApproval();
     if (approval) return `Approval - ${approval.toolCall.name}`;
     if (state().plan) return `Plan - ${state().plan?.plan.status}`;
     return 'Logs';
   });
+
+  useKeyboard((event) => {
+    const name = event.name.toLowerCase();
+    if (event.ctrl && name === 'p') {
+      event.preventDefault();
+      event.stopPropagation();
+      openCommandPalette();
+      return;
+    }
+
+    if (name === 'escape') {
+      if (commandPalette()) {
+        event.preventDefault();
+        event.stopPropagation();
+        setCommandPalette(null);
+        return;
+      }
+      if (modelPalette()) {
+        event.preventDefault();
+        event.stopPropagation();
+        setModelPalette(null);
+        return;
+      }
+    }
+
+    if (name === 'tab' && !modelPalette() && !commandPalette()) {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleComposerMode();
+    }
+  });
+
+  function toggleComposerMode() {
+    setComposerMode((mode) => (mode === 'build' ? 'plan' : 'build'));
+  }
+
+  function openCommandPalette() {
+    setModelPalette(null);
+    setCommandPalette({ selectedIndex: 0 });
+  }
+
+  function chooseCommand(command: CommandPaletteCommand) {
+    setInput(command.insert);
+    setCommandPalette(null);
+  }
 
   async function submit() {
     const value = input().trim();
@@ -82,7 +163,11 @@ export function App(props: AppProps) {
     setInput('');
     setBusy(true);
     try {
-      await handleCommand(value);
+      if (value.startsWith('/')) {
+        await handleCommand(value);
+      } else {
+        await submitComposerText(value);
+      }
       const updates = await refreshReviewData(state());
       setState((current) => ({ ...current, ...updates }));
     } catch (error) {
@@ -100,6 +185,14 @@ export function App(props: AppProps) {
     renderer.destroy();
   }
 
+  async function submitComposerText(value: string) {
+    if (composerMode() === 'plan') {
+      await createPlanFromGoal(value);
+      return;
+    }
+    await runAgentPrompt(value);
+  }
+
   async function handleCommand(value: string) {
     const current = state();
     if (value === '/approve') {
@@ -115,8 +208,7 @@ export function App(props: AppProps) {
       return;
     }
     if (value.startsWith('/plan ')) {
-      const plan = await current.api.createPlan(current.session.id, value.slice('/plan '.length));
-      setState((prev) => ({ ...prev, plan }));
+      await createPlanFromGoal(value.slice('/plan '.length));
       return;
     }
     if (value === '/plan-approve') {
@@ -150,6 +242,18 @@ export function App(props: AppProps) {
       throw new Error('Use /models to choose or configure a model in the TUI.');
     }
 
+    await runAgentPrompt(value);
+  }
+
+  async function createPlanFromGoal(goal: string) {
+    const current = state();
+    setState((prev) => ({ ...prev, activity: 'Planning' }));
+    const plan = await current.api.createPlan(current.session.id, goal);
+    setState((prev) => ({ ...prev, plan, activity: 'Ready' }));
+  }
+
+  async function runAgentPrompt(value: string) {
+    const current = state();
     setState((prev) => ({
       ...prev,
       messages: [
@@ -243,43 +347,66 @@ export function App(props: AppProps) {
     <box style={{ flexDirection: 'column', width: '100%', height: '100%', backgroundColor: oneDark.background }}>
       <Header state={state()} busy={busy()} />
       <Show
-        when={modelPalette()}
+        when={commandPalette()}
         fallback={
-          <box style={{ flexDirection: 'row', flexGrow: 1, minHeight: 0 }}>
-            <ChatPanel messages={state().messages} error={state().error} />
-            <RightPanel title={rightTitle()} approval={activeApproval()} state={state()} />
-          </box>
+          <Show
+            when={modelPalette()}
+            fallback={
+              <box style={{ flexDirection: 'row', flexGrow: 1, minHeight: 0 }}>
+                <ChatPanel messages={state().messages} error={state().error} />
+                <RightPanel title={rightTitle()} approval={activeApproval()} state={state()} />
+              </box>
+            }
+          >
+            {(palette) => (
+              <ModelsPanel
+                palette={palette()}
+                busy={busy()}
+                onClose={() => setModelPalette(null)}
+                onSelectedIndex={(selectedIndex) =>
+                  setModelPalette((current) => (current ? { ...current, selectedIndex } : current))
+                }
+                onChoose={(choice) => {
+                  void chooseModel(choice);
+                }}
+                onApiKeyInput={(apiKey) =>
+                  setModelPalette((current) => (current ? { ...current, apiKey, error: undefined } : current))
+                }
+                onSubmitApiKey={() => {
+                  void submitModelApiKey();
+                }}
+              />
+            )}
+          </Show>
         }
       >
         {(palette) => (
-          <ModelsPanel
+          <CommandPalette
             palette={palette()}
-            busy={busy()}
-            onClose={() => setModelPalette(null)}
+            onClose={() => setCommandPalette(null)}
             onSelectedIndex={(selectedIndex) =>
-              setModelPalette((current) => (current ? { ...current, selectedIndex } : current))
+              setCommandPalette((current) => (current ? { ...current, selectedIndex } : current))
             }
-            onChoose={(choice) => {
-              void chooseModel(choice);
-            }}
-            onApiKeyInput={(apiKey) =>
-              setModelPalette((current) => (current ? { ...current, apiKey, error: undefined } : current))
-            }
-            onSubmitApiKey={() => {
-              void submitModelApiKey();
-            }}
+            onChoose={chooseCommand}
           />
         )}
       </Show>
-      <box border borderColor={oneDark.border} style={{ height: 5, paddingX: 1, flexDirection: 'column', backgroundColor: oneDark.input }}>
-        <text fg={oneDark.muted}>Type a task, /models, /plan goal, /approve, /reject, /run command, /open path, or /exit.</text>
-        <input
-          focused={!modelPalette()}
+      <box style={{ height: 4, flexDirection: 'row', backgroundColor: oneDark.background }}>
+        <Composer
+          mode={composerMode()}
+          accentColor={composerAccentColor()}
+          modelInfo={activeModelInfo()}
           value={input()}
-          placeholder="Ask Mebius to work on this repository..."
-          onInput={(value) => setInput(value)}
+          focused={!modelPalette() && !commandPalette()}
+          onInput={setInput}
           onSubmit={() => {
             void submit();
+          }}
+        />
+        <box
+          style={{
+            width: RIGHT_RAIL_WIDTH,
+            flexShrink: 0,
           }}
         />
       </box>
@@ -289,18 +416,106 @@ export function App(props: AppProps) {
 
 function Header(props: { state: WorkspaceState; busy: boolean }) {
   const mode = props.state.mode === 'remote' ? 'remote API' : 'local API';
-  const modelName =
-    props.state.session.activeModelConfig?.modelName ??
-    props.state.modelChoices.find((choice) => choice.active)?.modelName ??
-    'no model';
   return (
     <box style={{ height: 3, paddingX: 1, alignItems: 'center', flexDirection: 'row', backgroundColor: oneDark.background }}>
       <text fg={oneDark.text}>Mebius</text>
       <text fg={oneDark.muted}> - {props.state.project.name}</text>
       <text fg={oneDark.muted}> - {props.state.session.title}</text>
-      <text fg={oneDark.muted}> - {modelName}</text>
       <text fg={oneDark.muted}> - {mode}</text>
       <text fg={props.busy ? oneDark.yellow : oneDark.green}> - {props.busy ? 'busy' : props.state.activity}</text>
+    </box>
+  );
+}
+
+function CommandPalette(props: {
+  palette: CommandPaletteState;
+  onClose: () => void;
+  onSelectedIndex: (index: number) => void;
+  onChoose: (command: CommandPaletteCommand) => void;
+}) {
+  return (
+    <box
+      border
+      borderColor={oneDark.blue}
+      title="Commands"
+      style={{ flexGrow: 1, minHeight: 0, paddingX: 2, paddingY: 1, flexDirection: 'column', backgroundColor: oneDark.panel }}
+      onKeyDown={(event) => {
+        if (event.name === 'escape') {
+          props.onClose();
+        }
+      }}
+    >
+      <select
+        focused
+        options={commandPaletteCommands.map((command) => ({
+          name: command.label,
+          description: command.description,
+          value: command,
+        }))}
+        selectedIndex={props.palette.selectedIndex}
+        showDescription
+        showScrollIndicator
+        wrapSelection
+        backgroundColor={oneDark.panel}
+        textColor={oneDark.text}
+        selectedBackgroundColor={oneDark.selection}
+        selectedTextColor={oneDark.text}
+        descriptionColor={oneDark.muted}
+        selectedDescriptionColor={oneDark.text}
+        style={{ flexGrow: 1, minHeight: 8 }}
+        onChange={(index) => props.onSelectedIndex(index)}
+        onSelect={(_index, option) => {
+          const command = option?.value as CommandPaletteCommand | undefined;
+          if (command) props.onChoose(command);
+        }}
+        onKeyDown={(event) => {
+          if (event.name === 'escape') {
+            props.onClose();
+          }
+        }}
+      />
+    </box>
+  );
+}
+
+function Composer(props: {
+  mode: ComposerMode;
+  accentColor: string;
+  modelInfo: ActiveModelInfo;
+  value: string;
+  focused: boolean;
+  onInput: (value: string) => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <box
+      border
+      borderStyle="rounded"
+      borderColor={oneDark.border}
+      focusedBorderColor={oneDark.border}
+      style={{
+        height: 4,
+        flexGrow: 1,
+        minWidth: MAIN_COLUMN_MIN_WIDTH,
+        flexDirection: 'row',
+        backgroundColor: oneDark.input,
+      }}
+    >
+      <box style={{ width: 1, flexShrink: 0, alignSelf: 'stretch', backgroundColor: props.accentColor }} />
+      <box style={{ flexGrow: 1, minWidth: 0, paddingX: 1, flexDirection: 'column' }}>
+        <input
+          focused={props.focused}
+          value={props.value}
+          placeholder=""
+          style={{ width: '100%', flexShrink: 0 }}
+          onInput={props.onInput}
+          onSubmit={props.onSubmit}
+        />
+        <box style={{ height: 1, flexDirection: 'row' }}>
+          <text fg={props.accentColor}>{composerModeLabel(props.mode)}</text>
+          <text fg={oneDark.muted}> · {props.modelInfo.modelName} · {props.modelInfo.providerDisplay}</text>
+        </box>
+      </box>
     </box>
   );
 }
@@ -393,20 +608,39 @@ function ModelsPanel(props: {
 
 function ChatPanel(props: { messages: Message[]; error: string }) {
   return (
-    <box border borderColor={oneDark.border} title="Chat" style={{ flexGrow: 1, minWidth: 40, paddingX: 1, backgroundColor: oneDark.panel }}>
-      <scrollbox stickyScroll stickyStart="bottom" style={{ flexGrow: 1, minHeight: 0 }}>
+    <box border borderColor={oneDark.border} title="Chat" style={{ flexGrow: 1, minWidth: MAIN_COLUMN_MIN_WIDTH, paddingX: 1, backgroundColor: oneDark.panel }}>
+      <scrollbox stickyScroll stickyStart="bottom" style={{ flexGrow: 1, minHeight: 0, width: '100%' }}>
         <Show when={props.error}>
           <text fg={oneDark.red}>{props.error}</text>
         </Show>
         <For each={props.messages}>
-          {(message) => (
-            <box style={{ flexDirection: 'column', width: '100%', marginBottom: 1 }}>
-              <text fg={roleColor(message.role)}>{message.role}{message.streaming ? ' - streaming' : ''}</text>
-              <MessageBody message={message} />
-            </box>
-          )}
+          {(message) => <MessageBlock message={message} />}
         </For>
       </scrollbox>
+    </box>
+  );
+}
+
+function MessageBlock(props: { message: Message }) {
+  return (
+    <box
+      style={{
+        width: '100%',
+        minWidth: 0,
+        flexDirection: 'row',
+        alignItems: 'stretch',
+        marginBottom: 1,
+        backgroundColor: oneDark.background,
+      }}
+    >
+      <box style={{ width: 1, flexShrink: 0, alignSelf: 'stretch', backgroundColor: roleColor(props.message.role) }} />
+      <box style={{ flexGrow: 1, minWidth: 0, paddingX: 1, flexDirection: 'column' }}>
+        <text fg={roleColor(props.message.role)} style={{ width: '100%', flexShrink: 0 }}>
+          {props.message.role}
+          {props.message.streaming ? ' - streaming' : ''}
+        </text>
+        <MessageBody message={props.message} />
+      </box>
     </box>
   );
 }
@@ -423,13 +657,13 @@ function MessageBody(props: { message: Message }) {
         streaming={props.message.streaming ?? false}
         internalBlockMode="top-level"
         tableOptions={markdownTableOptions}
-        style={{ width: '100%', flexShrink: 0 }}
+        style={{ width: '100%', minWidth: 0, flexShrink: 0 }}
       />
     );
   }
 
   return (
-    <text fg={oneDark.text} wrapMode="word" style={{ width: '100%', flexShrink: 0 }}>
+    <text fg={oneDark.text} wrapMode="word" style={{ width: '100%', minWidth: 0, flexShrink: 0 }}>
       {props.message.content || ' '}
     </text>
   );
@@ -437,7 +671,18 @@ function MessageBody(props: { message: Message }) {
 
 function RightPanel(props: { title: string; approval: Approval | undefined; state: WorkspaceState }) {
   return (
-    <box border borderColor={oneDark.border} title={props.title} style={{ width: 48, paddingX: 1, flexDirection: 'column', backgroundColor: oneDark.panel }}>
+    <box
+      border
+      borderColor={oneDark.border}
+      title={props.title}
+      style={{
+        width: RIGHT_RAIL_WIDTH,
+        flexShrink: 0,
+        paddingX: 1,
+        flexDirection: 'column',
+        backgroundColor: oneDark.panel,
+      }}
+    >
       <Show when={props.approval} fallback={<Logs state={props.state} />}>
         {(approval) => <ApprovalView approval={approval()} />}
       </Show>
@@ -504,6 +749,23 @@ function Logs(props: { state: WorkspaceState }) {
       </For>
     </scrollbox>
   );
+}
+
+function getActiveModelInfo(state: WorkspaceState): ActiveModelInfo {
+  const activeModel = state.session.activeModelConfig;
+  const activeChoice = state.modelChoices.find((choice) => choice.active);
+  const modelName = activeModel?.modelName ?? activeChoice?.modelName ?? 'no model';
+  const providerName = activeChoice?.providerName ?? activeModel?.providerId ?? 'no provider';
+  const displayName = activeModel?.displayName ?? activeChoice?.displayName ?? 'no display';
+  return { modelName, providerDisplay: `${providerName}/${displayName}` };
+}
+
+function composerModeAccent(mode: ComposerMode): string {
+  return mode === 'build' ? oneDark.purple : oneDark.yellow;
+}
+
+function composerModeLabel(mode: ComposerMode): string {
+  return mode === 'build' ? 'Build' : 'Plan';
 }
 
 function roleColor(role: Message['role']): string {
