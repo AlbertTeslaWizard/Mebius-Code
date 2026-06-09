@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 import { SyntaxStyle, type TextareaAction, type TextareaRenderable } from '@opentui/core';
-import { useKeyboard, useRenderer } from '@opentui/solid';
+import { useKeyboard, useRenderer, useTerminalDimensions } from '@opentui/solid';
 import { For, Show, createContext, createEffect, createMemo, createSignal, onCleanup, onMount, useContext } from 'solid-js';
 import type { Accessor, JSX } from 'solid-js';
 import { attachEventStream, refreshReviewData, type WorkspaceState } from '../bootstrap';
@@ -50,6 +50,7 @@ interface ModelPaletteState {
   step: 'list' | 'apiKey';
   choices: ModelChoice[];
   selectedIndex: number;
+  query: string;
   apiKey: string;
   pendingChoice?: ModelChoice;
   error?: string;
@@ -64,6 +65,7 @@ interface ActiveModelInfo {
 
 interface CommandPaletteState {
   selectedIndex: number;
+  query: string;
 }
 
 interface ThemePaletteState {
@@ -72,12 +74,23 @@ interface ThemePaletteState {
 
 interface CommandPaletteCommand {
   label: string;
-  insert: string;
   description: string;
+  insert?: string;
+  action?: 'models';
+}
+
+interface ModelChoiceGroupRow {
+  choice: ModelChoice;
+  index: number;
+}
+
+interface ModelChoiceGroup {
+  title: string;
+  rows: ModelChoiceGroupRow[];
 }
 
 const commandPaletteCommands: CommandPaletteCommand[] = [
-  { label: '/models', insert: '/models', description: 'Choose or configure a model' },
+  { label: 'Select model', insert: '/models', action: 'models', description: 'Choose or configure the active model' },
   { label: '/clear', insert: '/clear', description: 'Clear the chat and model context' },
   { label: '/compact', insert: '/compact', description: 'Compact the chat into model context' },
   { label: '/themes', insert: '/themes', description: 'Switch the TUI theme' },
@@ -126,6 +139,7 @@ export function App(props: AppProps) {
   const [modelPalette, setModelPalette] = createSignal<ModelPaletteState | null>(null);
   const [commandPalette, setCommandPalette] = createSignal<CommandPaletteState | null>(null);
   const [themePalette, setThemePalette] = createSignal<ThemePaletteState | null>(null);
+  const [recentModelKeys, setRecentModelKeys] = createSignal<string[]>(initialRecentModelKeys(props.initialState.modelChoices));
   const renderer = useRenderer();
   const abort = new AbortController();
 
@@ -183,6 +197,55 @@ export function App(props: AppProps) {
       }
     }
 
+    if (commandPalette()) {
+      if (name === 'up') {
+        event.preventDefault();
+        event.stopPropagation();
+        moveCommandSelection(-1);
+        return;
+      }
+      if (name === 'down') {
+        event.preventDefault();
+        event.stopPropagation();
+        moveCommandSelection(1);
+        return;
+      }
+      if (isEnterKey(name)) {
+        event.preventDefault();
+        event.stopPropagation();
+        const command = selectedCommand(commandPalette());
+        if (command) {
+          void chooseCommand(command);
+        }
+        return;
+      }
+    }
+
+    const modelState = modelPalette();
+    if (modelState?.step === 'list') {
+      if (name === 'up') {
+        event.preventDefault();
+        event.stopPropagation();
+        moveModelSelection(-1);
+        return;
+      }
+      if (name === 'down') {
+        event.preventDefault();
+        event.stopPropagation();
+        moveModelSelection(1);
+        return;
+      }
+      if (isEnterKey(name)) {
+        event.preventDefault();
+        event.stopPropagation();
+        const choice = selectedModelChoice(modelState, recentModelKeys());
+        if (choice) {
+          void chooseModel(choice);
+        }
+        return;
+      }
+    }
+
     if (name === 'tab' && !modelPalette() && !commandPalette() && !themePalette()) {
       event.preventDefault();
       event.stopPropagation();
@@ -197,12 +260,79 @@ export function App(props: AppProps) {
   function openCommandPalette() {
     setModelPalette(null);
     setThemePalette(null);
-    setCommandPalette({ selectedIndex: 0 });
+    setCommandPalette({ selectedIndex: 0, query: '' });
   }
 
-  function chooseCommand(command: CommandPaletteCommand) {
-    setInput(command.insert);
+  async function chooseCommand(command: CommandPaletteCommand) {
     setCommandPalette(null);
+    if (command.action === 'models') {
+      await openModelSelectModal();
+      return;
+    }
+    setInput(command.insert ?? '');
+  }
+
+  function moveCommandSelection(delta: number) {
+    setCommandPalette((current) => {
+      if (!current) return current;
+      const count = filteredCommandPaletteCommands(current.query).length;
+      return { ...current, selectedIndex: moveIndex(current.selectedIndex, delta, count) };
+    });
+  }
+
+  function selectedCommand(palette: CommandPaletteState | null): CommandPaletteCommand | undefined {
+    if (!palette) return undefined;
+    return filteredCommandPaletteCommands(palette.query)[palette.selectedIndex];
+  }
+
+  function moveModelSelection(delta: number) {
+    setModelPalette((current) => {
+      if (!current || current.step !== 'list') return current;
+      const count = flattenModelGroups(buildModelChoiceGroups(current.choices, current.query, recentModelKeys())).length;
+      return { ...current, selectedIndex: moveIndex(current.selectedIndex, delta, count) };
+    });
+  }
+
+  async function openModelSelectModal() {
+    const current = state();
+    setCommandPalette(null);
+    setThemePalette(null);
+    let choices = current.modelChoices;
+    let error: string | undefined;
+    try {
+      choices = await current.api.listModels(current.session.id);
+      setState((prev) => ({ ...prev, modelChoices: choices, error: '' }));
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : 'Failed to load models.';
+      error = message;
+      setState((prev) => ({ ...prev, error: message }));
+    }
+
+    const recentKeys = ensureRuntimeRecentModels(choices);
+    const selectedIndex = initialModelSelectedIndex(choices, recentKeys);
+    setModelPalette({
+      step: 'list',
+      choices,
+      selectedIndex,
+      query: '',
+      apiKey: '',
+      error,
+    });
+  }
+
+  function ensureRuntimeRecentModels(choices: ModelChoice[]): string[] {
+    const currentKeys = recentModelKeys();
+    if (currentKeys.length > 0) return currentKeys;
+    const activeChoice = choices.find((choice) => choice.active);
+    if (!activeChoice) return currentKeys;
+    const nextKeys = [modelChoiceKey(activeChoice)];
+    setRecentModelKeys(nextKeys);
+    return nextKeys;
+  }
+
+  function rememberRecentModel(choice: ModelChoice) {
+    const key = modelChoiceKey(choice);
+    setRecentModelKeys((current) => [key, ...current.filter((item) => item !== key)].slice(0, 5));
   }
 
   function openThemePalette() {
@@ -335,14 +465,7 @@ export function App(props: AppProps) {
       return;
     }
     if (value === '/models' || value.startsWith('/models ')) {
-      const choices = await current.api.listModels(current.session.id);
-      setState((prev) => ({ ...prev, modelChoices: choices }));
-      setModelPalette({
-        step: 'list',
-        choices,
-        selectedIndex: Math.max(choices.findIndex((choice) => choice.active), 0),
-        apiKey: '',
-      });
+      await openModelSelectModal();
       return;
     }
     if (value === '/themes' || value.startsWith('/themes ')) {
@@ -406,6 +529,7 @@ export function App(props: AppProps) {
         ...(apiKey ? { apiKey } : {}),
       });
       await applyModelsResult(result);
+      rememberRecentModel(choice);
       setModelPalette(null);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Model selection failed.';
@@ -457,65 +581,63 @@ export function App(props: AppProps) {
   return (
     <ThemeContext.Provider value={theme}>
       <box style={{ flexDirection: 'column', width: '100%', height: '100%', backgroundColor: theme().background }}>
-      <Header state={state()} busy={busy()} />
-      <Show
-        when={commandPalette()}
-        fallback={
-          <Show
-            when={themePalette()}
-            fallback={
-              <Show
-                when={modelPalette()}
-                fallback={
-                  <box style={{ flexDirection: 'row', flexGrow: 1, minHeight: 0 }}>
-                    <ChatPanel
-                      messages={state().messages}
-                      error={state().error}
-                      composer={{
-                        mode: composerMode(),
-                        accentColor: composerAccentColor(),
-                        modelInfo: activeModelInfo(),
-                        value: input(),
-                        focused: !modelPalette() && !commandPalette() && !themePalette(),
-                        onInput: setInput,
-                        onSubmit: () => {
-                          void submit();
-                        },
-                      }}
-                    />
-                    <RightPanel
-                      title={rightTitle()}
-                      approval={activeApproval()}
-                      state={state()}
-                      mode={composerMode()}
-                      busy={busy()}
-                    />
-                  </box>
-                }
-              >
-                {(palette) => (
-                  <ModelsPanel
-                    palette={palette()}
-                    busy={busy()}
-                    onClose={() => setModelPalette(null)}
-                    onSelectedIndex={(selectedIndex) =>
-                      setModelPalette((current) => (current ? { ...current, selectedIndex } : current))
-                    }
-                    onChoose={(choice) => {
-                      void chooseModel(choice);
-                    }}
-                    onApiKeyInput={(apiKey) =>
-                      setModelPalette((current) => (current ? { ...current, apiKey, error: undefined } : current))
-                    }
-                    onSubmitApiKey={() => {
-                      void submitModelApiKey();
-                    }}
-                  />
-                )}
-              </Show>
-            }
-          >
-            {(palette) => (
+        <Header state={state()} busy={busy()} />
+        <box style={{ flexDirection: 'row', flexGrow: 1, minHeight: 0 }}>
+          <ChatPanel
+            messages={state().messages}
+            error={state().error}
+            composer={{
+              mode: composerMode(),
+              accentColor: composerAccentColor(),
+              modelInfo: activeModelInfo(),
+              value: input(),
+              focused: !modelPalette() && !commandPalette() && !themePalette(),
+              onInput: setInput,
+              onSubmit: () => {
+                void submit();
+              },
+            }}
+          />
+          <RightPanel title={rightTitle()} approval={activeApproval()} state={state()} mode={composerMode()} busy={busy()} />
+        </box>
+
+        <Show when={commandPalette()}>
+          {(palette) => (
+            <CommandPalette
+              palette={palette()}
+              onClose={() => setCommandPalette(null)}
+              onQuery={(query) => setCommandPalette((current) => (current ? { ...current, query, selectedIndex: 0 } : current))}
+              onChoose={(command) => {
+                void chooseCommand(command);
+              }}
+            />
+          )}
+        </Show>
+
+        <Show when={modelPalette()}>
+          {(palette) => (
+            <ModelSelectModal
+              palette={palette()}
+              busy={busy()}
+              recentModelKeys={recentModelKeys()}
+              onClose={() => setModelPalette(null)}
+              onQuery={(query) => setModelPalette((current) => (current ? { ...current, query, selectedIndex: 0 } : current))}
+              onChoose={(choice) => {
+                void chooseModel(choice);
+              }}
+              onApiKeyInput={(apiKey) =>
+                setModelPalette((current) => (current ? { ...current, apiKey, error: undefined } : current))
+              }
+              onSubmitApiKey={() => {
+                void submitModelApiKey();
+              }}
+            />
+          )}
+        </Show>
+
+        <Show when={themePalette()}>
+          {(palette) => (
+            <ModalShell title="Themes" onClose={() => setThemePalette(null)}>
               <ThemesPanel
                 palette={palette()}
                 currentThemeName={themeName()}
@@ -527,21 +649,9 @@ export function App(props: AppProps) {
                   void chooseTheme(name);
                 }}
               />
-            )}
-          </Show>
-        }
-      >
-        {(palette) => (
-          <CommandPalette
-            palette={palette()}
-            onClose={() => setCommandPalette(null)}
-            onSelectedIndex={(selectedIndex) =>
-              setCommandPalette((current) => (current ? { ...current, selectedIndex } : current))
-            }
-            onChoose={chooseCommand}
-          />
-        )}
-      </Show>
+            </ModalShell>
+          )}
+        </Show>
       </box>
     </ThemeContext.Provider>
   );
@@ -564,51 +674,158 @@ function Header(props: { state: WorkspaceState; busy: boolean }) {
 function CommandPalette(props: {
   palette: CommandPaletteState;
   onClose: () => void;
-  onSelectedIndex: (index: number) => void;
+  onQuery: (query: string) => void;
   onChoose: (command: CommandPaletteCommand) => void;
 }) {
   const theme = useTheme();
+  const dimensions = useTerminalDimensions();
+  const commands = createMemo(() => filteredCommandPaletteCommands(props.palette.query));
+  const listHeight = createMemo(() => clamp(commands().length, 1, Math.max(3, Math.floor(dimensions().height * 0.8) - 7)));
+
   return (
-    <box
-      border
-      borderColor={theme().blue}
-      title="Commands"
-      style={{ flexGrow: 1, minHeight: 0, paddingX: 2, paddingY: 1, flexDirection: 'column', backgroundColor: theme().panel }}
-      onKeyDown={(event) => {
-        if (event.name === 'escape') {
-          props.onClose();
-        }
-      }}
-    >
-      <select
-        focused
-        options={commandPaletteCommands.map((command) => ({
-          name: command.label,
-          description: command.description,
-          value: command,
-        }))}
-        selectedIndex={props.palette.selectedIndex}
-        showDescription
-        showScrollIndicator
-        wrapSelection
-        backgroundColor={theme().panel}
-        textColor={theme().text}
-        selectedBackgroundColor={theme().selection}
-        selectedTextColor={theme().text}
-        descriptionColor={theme().muted}
-        selectedDescriptionColor={theme().text}
-        style={{ flexGrow: 1, minHeight: 8 }}
-        onChange={(index) => props.onSelectedIndex(index)}
-        onSelect={(_index, option) => {
-          const command = option?.value as CommandPaletteCommand | undefined;
-          if (command) props.onChoose(command);
+    <ModalShell title="Command palette" onClose={props.onClose}>
+      <PaletteSearch value={props.palette.query} placeholder="Search commands" onInput={props.onQuery} />
+      <scrollbox
+        scrollY
+        style={{ width: '100%', height: listHeight(), minHeight: 1, marginTop: 1, flexShrink: 0 }}
+        contentOptions={{ width: '100%', minWidth: '100%', flexDirection: 'column' }}
+      >
+        <Show when={commands().length > 0} fallback={<text fg={theme().muted}>No commands found</text>}>
+          <For each={commands()}>
+            {(command, index) => {
+              const selected = createMemo(() => index() === props.palette.selectedIndex);
+              return (
+                <box
+                  style={{
+                    width: '100%',
+                    height: 1,
+                    minHeight: 1,
+                    flexDirection: 'row',
+                    backgroundColor: selected() ? theme().selection : theme().panel,
+                  }}
+                  onMouseDown={() => props.onChoose(command)}
+                >
+                  <text fg={selected() ? theme().text : theme().text} style={{ width: 18, flexShrink: 0 }}>
+                    {command.label}
+                  </text>
+                  <text fg={selected() ? theme().text : theme().muted} style={{ flexGrow: 1, minWidth: 0 }}>
+                    {command.description}
+                  </text>
+                </box>
+              );
+            }}
+          </For>
+        </Show>
+      </scrollbox>
+      <PaletteFooter items={[['Enter', 'select'], ['Esc', 'close'], ['Up/Down', 'navigate']]} />
+    </ModalShell>
+  );
+}
+
+function ModalShell(props: { title: string; onClose: () => void; children: JSX.Element }) {
+  const theme = useTheme();
+  const dimensions = useTerminalDimensions();
+  const modalWidth = createMemo(() => {
+    const maxWidth = Math.max(28, dimensions().width - 4);
+    const target = Math.floor(dimensions().width * 0.5);
+    return clamp(target, Math.min(48, maxWidth), Math.min(82, maxWidth));
+  });
+  const maxHeight = createMemo(() => Math.max(12, Math.floor(dimensions().height * 0.8)));
+
+  return (
+    <>
+      <box
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: '100%',
+          height: '100%',
+          zIndex: 20,
+          opacity: 0.62,
+          backgroundColor: '#000000',
+        }}
+      />
+      <box
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: '100%',
+          height: '100%',
+          zIndex: 21,
+          alignItems: 'center',
+          justifyContent: 'center',
         }}
         onKeyDown={(event) => {
           if (event.name === 'escape') {
             props.onClose();
           }
         }}
+      >
+        <box
+          border
+          borderStyle="rounded"
+          borderColor={theme().border}
+          focusedBorderColor={theme().blue}
+          style={{
+            width: modalWidth(),
+            maxHeight: maxHeight(),
+            paddingX: 2,
+            paddingY: 1,
+            flexDirection: 'column',
+            backgroundColor: theme().input,
+          }}
+        >
+          <box style={{ width: '100%', height: 1, flexDirection: 'row', flexShrink: 0 }}>
+            <text fg={theme().text}>
+              {props.title}
+            </text>
+            <box style={{ flexGrow: 1 }} />
+            <text fg={theme().muted}>esc</text>
+          </box>
+          {props.children}
+        </box>
+      </box>
+    </>
+  );
+}
+
+function PaletteSearch(props: { value: string; placeholder: string; onInput: (value: string) => void }) {
+  const theme = useTheme();
+  return (
+    <box style={{ width: '100%', height: 1, minHeight: 1, marginTop: 1, flexDirection: 'row', flexShrink: 0 }}>
+      <text fg={theme().muted} style={{ width: 2, flexShrink: 0 }}>
+        &gt;
+      </text>
+      <input
+        focused
+        value={props.value}
+        placeholder={props.placeholder}
+        backgroundColor={theme().input}
+        focusedBackgroundColor={theme().input}
+        textColor={theme().text}
+        focusedTextColor={theme().text}
+        cursorColor={theme().blue}
+        onInput={props.onInput}
+        style={{ flexGrow: 1, minWidth: 0 }}
       />
+    </box>
+  );
+}
+
+function PaletteFooter(props: { items: Array<[string, string]> }) {
+  const theme = useTheme();
+  return (
+    <box style={{ width: '100%', height: 1, marginTop: 1, flexDirection: 'row', flexShrink: 0 }}>
+      <For each={props.items}>
+        {([key, action]) => (
+          <>
+            <text fg={theme().text}>{action}</text>
+            <text fg={theme().muted}> {key}  </text>
+          </>
+        )}
+      </For>
     </box>
   );
 }
@@ -623,10 +840,7 @@ function ThemesPanel(props: {
   const theme = useTheme();
   return (
     <box
-      border
-      borderColor={theme().border}
-      title="Themes"
-      style={{ flexGrow: 1, minHeight: 0, paddingX: 2, paddingY: 1, flexDirection: 'column', backgroundColor: theme().panel }}
+      style={{ flexGrow: 1, minHeight: 0, flexDirection: 'column', backgroundColor: theme().input }}
       onKeyDown={(event) => {
         if (event.name === 'escape') {
           props.onClose();
@@ -733,89 +947,122 @@ function Composer(props: {
   );
 }
 
-function ModelsPanel(props: {
+function ModelSelectModal(props: {
   palette: ModelPaletteState;
   busy: boolean;
+  recentModelKeys: string[];
   onClose: () => void;
-  onSelectedIndex: (index: number) => void;
+  onQuery: (query: string) => void;
   onChoose: (choice: ModelChoice) => void;
   onApiKeyInput: (apiKey: string) => void;
   onSubmitApiKey: () => void;
 }) {
   const theme = useTheme();
+  const dimensions = useTerminalDimensions();
+  const groups = createMemo(() => buildModelChoiceGroups(props.palette.choices, props.palette.query, props.recentModelKeys));
+  const flatChoices = createMemo(() => flattenModelGroups(groups()));
+  const renderedRows = createMemo(() => groups().reduce((total, group) => total + group.rows.length + 1, 0));
+  const listHeight = createMemo(() => clamp(renderedRows(), 2, Math.max(4, Math.floor(dimensions().height * 0.8) - 9)));
+
+  if (props.palette.step === 'apiKey') {
+    return (
+      <ModalShell title="Select model" onClose={props.onClose}>
+        <box style={{ flexDirection: 'column', marginTop: 1 }}>
+          <Show when={props.palette.error}>
+            <text fg={theme().red}>{props.palette.error}</text>
+          </Show>
+          <text fg={theme().yellow}>API key required for {props.palette.pendingChoice?.modelName}</text>
+          <text fg={theme().muted}>The key is sent to the backend model config store and is not added to chat.</text>
+          <box style={{ marginTop: 1 }}>
+            <input
+              focused
+              value={props.palette.apiKey}
+              placeholder="API Key"
+              backgroundColor={theme().input}
+              focusedBackgroundColor={theme().input}
+              textColor={theme().text}
+              focusedTextColor={theme().text}
+              cursorColor={theme().blue}
+              onInput={props.onApiKeyInput}
+              onSubmit={props.onSubmitApiKey}
+              style={{ width: '100%' }}
+            />
+          </box>
+          <text fg={props.busy ? theme().yellow : theme().muted}>
+            {props.busy ? 'Validating key...' : 'Enter saves and switches. Esc closes.'}
+          </text>
+        </box>
+      </ModalShell>
+    );
+  }
+
   return (
-    <box
-      border
-      borderColor={theme().border}
-      title="Models"
-      style={{ flexGrow: 1, minHeight: 0, paddingX: 2, paddingY: 1, flexDirection: 'column', backgroundColor: theme().panel }}
-      onKeyDown={(event) => {
-        if (event.name === 'escape') {
-          props.onClose();
-        }
-      }}
-    >
-      <text fg={theme().text}>DeepSeek models</text>
-      <text fg={theme().muted}>Enter selects. Existing provider keys are reused. Esc closes.</text>
+    <ModalShell title="Select model" onClose={props.onClose}>
+      <PaletteSearch value={props.palette.query} placeholder="Search" onInput={props.onQuery} />
       <Show when={props.palette.error}>
         <text fg={theme().red}>{props.palette.error}</text>
       </Show>
-      <Show
-        when={props.palette.step === 'apiKey'}
-        fallback={
-          <box style={{ flexDirection: 'column', flexGrow: 1, minHeight: 0, marginTop: 1 }}>
-            <select
-              focused
-              options={props.palette.choices.map((choice) => ({
-                name: modelChoiceName(choice),
-                description: modelChoiceDescription(choice),
-                value: choice,
-              }))}
-              selectedIndex={props.palette.selectedIndex}
-              showDescription
-              showScrollIndicator
-              wrapSelection
-              backgroundColor={theme().panel}
-              textColor={theme().text}
-              selectedBackgroundColor={theme().selection}
-              selectedTextColor={theme().text}
-              descriptionColor={theme().muted}
-              selectedDescriptionColor={theme().text}
-              style={{ flexGrow: 1, minHeight: 8 }}
-              onChange={(index) => props.onSelectedIndex(index)}
-              onSelect={(_index, option) => {
-                const choice = option?.value as ModelChoice | undefined;
-                if (choice) props.onChoose(choice);
-              }}
-              onKeyDown={(event) => {
-                if (event.name === 'escape') {
-                  props.onClose();
-                }
-              }}
-            />
-          </box>
-        }
+      <scrollbox
+        scrollY
+        style={{ width: '100%', height: listHeight(), minHeight: 2, marginTop: 1, flexShrink: 0 }}
+        contentOptions={{ width: '100%', minWidth: '100%', flexDirection: 'column' }}
       >
-        <box style={{ flexDirection: 'column', marginTop: 1 }}>
-          <text fg={theme().yellow}>API key required for {props.palette.pendingChoice?.modelName}</text>
-          <text fg={theme().muted}>The key is sent to the backend model config store and is not added to chat.</text>
-          <input
-            focused
-            value={props.palette.apiKey}
-            placeholder="DeepSeek API Key"
-            onInput={props.onApiKeyInput}
-            onSubmit={props.onSubmitApiKey}
-            onKeyDown={(event) => {
-              if (event.name === 'escape') {
-                props.onClose();
-              }
-            }}
-          />
-          <text fg={props.busy ? theme().yellow : theme().muted}>
-            {props.busy ? 'Validating key...' : 'Press Enter to save and switch.'}
-          </text>
-        </box>
-      </Show>
+        <Show when={flatChoices().length > 0} fallback={<text fg={theme().muted}>No models found</text>}>
+          <For each={groups()}>
+            {(group) => (
+              <box style={{ flexDirection: 'column', width: '100%', marginBottom: 1 }}>
+                <text fg={theme().blue}>{group.title}</text>
+                <For each={group.rows}>
+                  {(row) => {
+                    const selected = createMemo(() => row.index === props.palette.selectedIndex);
+                    return (
+                      <ModelChoiceRow
+                        choice={row.choice}
+                        selected={selected()}
+                        onChoose={() => props.onChoose(row.choice)}
+                      />
+                    );
+                  }}
+                </For>
+              </box>
+            )}
+          </For>
+        </Show>
+      </scrollbox>
+      <PaletteFooter items={[['Enter', 'select'], ['Esc', 'close'], ['Up/Down', 'navigate']]} />
+    </ModalShell>
+  );
+}
+
+function ModelChoiceRow(props: { choice: ModelChoice; selected: boolean; onChoose: () => void }) {
+  const theme = useTheme();
+  const rowBackground = createMemo(() => (props.selected ? theme().selection : theme().input));
+  const primaryColor = createMemo(() => (props.selected ? theme().text : theme().text));
+  const secondaryColor = createMemo(() => (props.selected ? theme().text : theme().muted));
+
+  return (
+    <box
+      style={{
+        width: '100%',
+        height: 1,
+        minHeight: 1,
+        flexDirection: 'row',
+        backgroundColor: rowBackground(),
+      }}
+      onMouseDown={props.onChoose}
+    >
+      <text fg={secondaryColor()} style={{ width: 2, flexShrink: 0 }}>
+        {props.choice.active ? '*' : ' '}
+      </text>
+      <text fg={primaryColor()} truncate style={{ flexGrow: 1, minWidth: 0 }}>
+        {props.choice.modelName}
+      </text>
+      <text fg={secondaryColor()} truncate style={{ width: 18, flexShrink: 0 }}>
+        {props.choice.providerName}
+      </text>
+      <text fg={secondaryColor()} truncate style={{ width: 16, flexShrink: 0 }}>
+        {modelChoiceTag(props.choice)}
+      </text>
     </box>
   );
 }
@@ -1203,15 +1450,105 @@ function themeChoiceName(theme: TuiTheme, currentThemeName: TuiThemeName): strin
   return `${theme.name === currentThemeName ? '* ' : '  '}${theme.label}`;
 }
 
-function modelChoiceName(choice: ModelChoice): string {
-  const active = choice.active ? '* ' : '  ';
-  const configured = choice.configured ? 'saved' : choice.requiresApiKey ? 'needs key' : 'uses saved key';
-  return `${active}${choice.modelName} (${configured})`;
+function filteredCommandPaletteCommands(query: string): CommandPaletteCommand[] {
+  const normalizedQuery = normalizeSearch(query);
+  if (!normalizedQuery) return commandPaletteCommands;
+  return commandPaletteCommands.filter((command) =>
+    [command.label, command.description, command.insert ?? ''].some((value) => normalizeSearch(value).includes(normalizedQuery)),
+  );
 }
 
-function modelChoiceDescription(choice: ModelChoice): string {
-  const status = choice.isDefault ? 'default' : choice.active ? 'current' : choice.configured ? 'configured' : 'not configured';
-  return `${choice.providerName} - ${status} - ${choice.baseUrl}`;
+function buildModelChoiceGroups(choices: ModelChoice[], query: string, recentModelKeys: string[]): ModelChoiceGroup[] {
+  const filteredChoices = choices.filter((choice) => modelChoiceMatches(choice, query));
+  const choicesByKey = new Map(filteredChoices.map((choice) => [modelChoiceKey(choice), choice]));
+  const recentChoices = recentModelKeys
+    .map((key) => choicesByKey.get(key))
+    .filter((choice): choice is ModelChoice => Boolean(choice));
+  const recentKeySet = new Set(recentChoices.map(modelChoiceKey));
+  let index = 0;
+  const groups: ModelChoiceGroup[] = [];
+
+  if (recentChoices.length > 0) {
+    groups.push({
+      title: 'Recent',
+      rows: recentChoices.map((choice) => ({ choice, index: index++ })),
+    });
+  }
+
+  const providerOrder = uniqueValues(filteredChoices.map((choice) => choice.providerName || choice.providerId || 'Models'));
+  for (const providerName of providerOrder) {
+    const providerChoices = filteredChoices.filter((choice) => {
+      const title = choice.providerName || choice.providerId || 'Models';
+      return title === providerName && !recentKeySet.has(modelChoiceKey(choice));
+    });
+    if (providerChoices.length === 0) continue;
+    groups.push({
+      title: providerName,
+      rows: providerChoices.map((choice) => ({ choice, index: index++ })),
+    });
+  }
+
+  return groups;
+}
+
+function flattenModelGroups(groups: ModelChoiceGroup[]): ModelChoice[] {
+  return groups.flatMap((group) => group.rows.map((row) => row.choice));
+}
+
+function selectedModelChoice(palette: ModelPaletteState, recentModelKeys: string[]): ModelChoice | undefined {
+  return flattenModelGroups(buildModelChoiceGroups(palette.choices, palette.query, recentModelKeys))[palette.selectedIndex];
+}
+
+function initialModelSelectedIndex(choices: ModelChoice[], recentModelKeys: string[]): number {
+  const flatChoices = flattenModelGroups(buildModelChoiceGroups(choices, '', recentModelKeys));
+  const activeIndex = flatChoices.findIndex((choice) => choice.active);
+  return Math.max(activeIndex, 0);
+}
+
+function initialRecentModelKeys(choices: ModelChoice[]): string[] {
+  const activeChoice = choices.find((choice) => choice.active);
+  return activeChoice ? [modelChoiceKey(activeChoice)] : [];
+}
+
+function modelChoiceMatches(choice: ModelChoice, query: string): boolean {
+  const normalizedQuery = normalizeSearch(query);
+  if (!normalizedQuery) return true;
+  return [choice.modelName, choice.displayName, choice.providerName, choice.providerId, choice.baseUrl]
+    .map(normalizeSearch)
+    .some((value) => value.includes(normalizedQuery));
+}
+
+function modelChoiceKey(choice: ModelChoice): string {
+  return `${choice.providerId}::${choice.modelName}`;
+}
+
+function modelChoiceTag(choice: ModelChoice): string {
+  if (choice.active) return 'current';
+  if (choice.isDefault) return 'default';
+  if (choice.configured) return 'saved';
+  if (choice.requiresApiKey) return 'needs key';
+  return 'not configured';
+}
+
+function normalizeSearch(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function uniqueValues(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+function moveIndex(currentIndex: number, delta: number, count: number): number {
+  if (count <= 0) return 0;
+  return (currentIndex + delta + count) % count;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function isEnterKey(name: string): boolean {
+  return name === 'return' || name === 'kpenter' || name === 'linefeed' || name === 'enter';
 }
 
 function highRiskCommand(command: string): boolean {
