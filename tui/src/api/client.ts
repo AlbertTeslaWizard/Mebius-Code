@@ -5,6 +5,8 @@ import type {
   GitStatus,
   ListResponse,
   Message,
+  ModelChoice,
+  ModelsCommandResult,
   PlanBundle,
   Project,
   ProjectFile,
@@ -62,6 +64,24 @@ export class ApiClient {
 
   async getSession(sessionId: string): Promise<Session> {
     return this.request<Session>(`/sessions/${sessionId}`);
+  }
+
+  async listModels(sessionId: string): Promise<ModelChoice[]> {
+    const result = await this.request<ModelsCommandResult>(`/sessions/${sessionId}/commands`, {
+      method: 'POST',
+      body: JSON.stringify({ command: '/models' }),
+    });
+    return result.type === 'models.list' ? result.models : [];
+  }
+
+  async selectModel(
+    sessionId: string,
+    input: { providerId: string; modelName: string; apiKey?: string },
+  ): Promise<ModelsCommandResult> {
+    return this.request<ModelsCommandResult>(`/sessions/${sessionId}/commands`, {
+      method: 'POST',
+      body: JSON.stringify({ command: '/models', args: input }),
+    });
   }
 
   async listMessages(sessionId: string): Promise<Message[]> {

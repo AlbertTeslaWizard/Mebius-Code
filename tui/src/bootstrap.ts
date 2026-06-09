@@ -8,6 +8,7 @@ import type {
   CommandRunView,
   GitStatus,
   Message,
+  ModelChoice,
   PlanBundle,
   Project,
   ProjectFile,
@@ -27,6 +28,7 @@ export interface WorkspaceState {
   projects: Project[];
   session: Session;
   sessions: Session[];
+  modelChoices: ModelChoice[];
   messages: Message[];
   gitStatus: GitStatus | null;
   approvals: Approval[];
@@ -91,12 +93,13 @@ export async function bootstrapWorkspace(input: {
   };
   await saveConfig(nextConfig);
 
-  const [messages, gitStatus, approvals, plan, commandRuns] = await Promise.all([
+  const [messages, gitStatus, approvals, plan, commandRuns, modelChoices] = await Promise.all([
     api.listMessages(session.id),
     api.gitStatus(project.id).catch(() => null),
     api.pendingApprovals().catch(() => []),
     api.latestPlan(session.id).catch(() => null),
     api.commandRuns(session.id).catch(() => []),
+    api.listModels(session.id).catch(() => []),
   ]);
 
   return {
@@ -109,6 +112,7 @@ export async function bootstrapWorkspace(input: {
     projects,
     session,
     sessions: sessionList.items,
+    modelChoices,
     messages,
     gitStatus,
     approvals,
@@ -141,13 +145,15 @@ export function attachEventStream(input: {
 }
 
 export async function refreshReviewData(state: WorkspaceState): Promise<Partial<WorkspaceState>> {
-  const [approvals, plan, commandRuns, gitStatus] = await Promise.all([
+  const [approvals, plan, commandRuns, gitStatus, session, modelChoices] = await Promise.all([
     state.api.pendingApprovals().catch(() => state.approvals),
     state.api.latestPlan(state.session.id).catch(() => state.plan),
     state.api.commandRuns(state.session.id).catch(() => state.commandRuns),
     state.api.gitStatus(state.project.id).catch(() => state.gitStatus),
+    state.api.getSession(state.session.id).catch(() => state.session),
+    state.api.listModels(state.session.id).catch(() => state.modelChoices),
   ]);
-  return { approvals, plan, commandRuns, gitStatus };
+  return { approvals, plan, commandRuns, gitStatus, session, modelChoices };
 }
 
 function reduceEvent(state: WorkspaceState, event: SseEvent): WorkspaceState {
@@ -178,10 +184,16 @@ function reduceEvent(state: WorkspaceState, event: SseEvent): WorkspaceState {
     const role = typeof event.data.role === 'string' ? event.data.role : '';
     const id = typeof event.data.id === 'string' ? event.data.id : '';
     const content = typeof event.data.content === 'string' ? event.data.content : '';
-    const messages = state.messages.filter((message) => !message.streaming);
-    if (id && (role === 'assistant' || role === 'user' || role === 'tool' || role === 'system')) {
-      messages.push({ id, role, content, createdAt: new Date().toISOString() });
+    if (!id || !isMessageRole(role)) {
+      return { ...state, events, activity: 'Ready' };
     }
+
+    const messages = state.messages.filter((message) => {
+      if (role === 'assistant' && message.streaming) return false;
+      if (role === 'user' && message.id.startsWith('local-user-') && message.content === content) return false;
+      return true;
+    });
+    messages.push({ id, role, content, createdAt: new Date().toISOString() });
     return { ...state, events, messages, activity: 'Ready' };
   }
 
@@ -193,6 +205,10 @@ function reduceEvent(state: WorkspaceState, event: SseEvent): WorkspaceState {
   }
 
   return { ...state, events };
+}
+
+function isMessageRole(role: string): role is Message['role'] {
+  return role === 'assistant' || role === 'user' || role === 'tool' || role === 'system';
 }
 
 function chooseRecentProject(projects: Project[], recentProjectId: string | undefined): Project | undefined {

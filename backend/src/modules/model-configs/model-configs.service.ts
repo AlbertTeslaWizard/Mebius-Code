@@ -29,12 +29,33 @@ export interface RuntimeModelConfig extends SanitizedModelConfig {
   apiKey: string;
 }
 
+export interface ModelChoice {
+  providerId: string;
+  providerName: string;
+  baseUrl: string;
+  modelName: string;
+  displayName: string;
+  configured: boolean;
+  active: boolean;
+  isDefault: boolean;
+  supportsTools: boolean;
+  requiresApiKey: boolean;
+  modelConfigId?: string;
+}
+
 export interface ConnectModelConfigInput {
   providerId: string;
   apiKey: string;
   modelName?: string;
   displayName?: string;
   baseUrl?: string;
+}
+
+export interface SelectModelInput {
+  modelConfigId?: string;
+  providerId?: string;
+  modelName?: string;
+  apiKey?: string;
 }
 
 @Injectable()
@@ -156,6 +177,94 @@ export class ModelConfigsService {
     };
   }
 
+  async listModelChoices(ownerId: string, activeModelConfigId?: string | null): Promise<ModelChoice[]> {
+    const provider = this.findProviderPreset('deepseek');
+    const baseUrl = this.resolveConnectBaseUrl(provider);
+    const configs = await this.configs.find({
+      where: { owner: { id: ownerId } },
+      order: { isDefault: 'DESC', createdAt: 'DESC' },
+    });
+    const providerConfigs = configs.filter((config) => this.matchesProvider(config, provider, baseUrl));
+    const effectiveActiveId =
+      activeModelConfigId ??
+      configs.find((config) => config.isDefault)?.id ??
+      configs[0]?.id ??
+      null;
+    const modelNames = new Set<string>([
+      ...provider.recommendedModels,
+      ...providerConfigs.map((config) => config.modelName),
+    ]);
+    const hasProviderKey = providerConfigs.length > 0;
+
+    return [...modelNames].map((modelName) => {
+      const config = providerConfigs.find((item) => item.modelName === modelName);
+      return {
+        providerId: provider.id,
+        providerName: provider.displayName,
+        baseUrl,
+        modelName,
+        displayName: config?.displayName ?? `${provider.displayName} ${modelName}`,
+        configured: Boolean(config),
+        active: config?.id === effectiveActiveId,
+        isDefault: config?.isDefault ?? false,
+        supportsTools: config?.supportsTools ?? provider.supportsTools,
+        requiresApiKey: !config && !hasProviderKey,
+        ...(config ? { modelConfigId: config.id } : {}),
+      };
+    });
+  }
+
+  async selectModel(owner: User, input: SelectModelInput): Promise<SanitizedModelConfig> {
+    if (input.modelConfigId) {
+      return this.sanitize(await this.makeDefault(owner.id, await this.findOwned(owner.id, input.modelConfigId)));
+    }
+
+    const providerId = input.providerId?.trim();
+    const modelName = input.modelName?.trim();
+    if (!providerId || !modelName) {
+      throw new BadRequestException('/models requires providerId and modelName.');
+    }
+    if (providerId !== 'deepseek') {
+      throw new BadRequestException(`Unsupported model provider for /models: ${providerId}`);
+    }
+
+    const provider = this.findProviderPreset(providerId);
+    const baseUrl = this.resolveConnectBaseUrl(provider);
+    const configs = await this.configs.find({
+      where: { owner: { id: owner.id } },
+      order: { isDefault: 'DESC', createdAt: 'DESC' },
+    });
+    const providerConfigs = configs.filter((config) => this.matchesProvider(config, provider, baseUrl));
+    const supportedModels = new Set<string>([
+      ...provider.recommendedModels,
+      ...providerConfigs.map((config) => config.modelName),
+    ]);
+    if (!supportedModels.has(modelName)) {
+      throw new BadRequestException(`Unsupported model for ${provider.displayName}: ${modelName}`);
+    }
+
+    const existing = providerConfigs.find((config) => config.modelName === modelName);
+    if (existing) {
+      return this.sanitize(await this.makeDefault(owner.id, existing));
+    }
+
+    const encryptedApiKey = await this.resolveSelectedModelApiKey(baseUrl, modelName, input.apiKey, providerConfigs);
+    await this.unsetDefaults(owner.id);
+    const config = await this.configs.save(
+      this.configs.create({
+        owner,
+        displayName: `${provider.displayName} ${modelName}`,
+        baseUrl,
+        modelName,
+        providerId: provider.id,
+        encryptedApiKey,
+        supportsTools: provider.supportsTools,
+        isDefault: true,
+      }),
+    );
+    return this.sanitize(config);
+  }
+
   async test(ownerId: string, id: string): Promise<{ ok: boolean; status?: number; message: string }> {
     const config = await this.findRuntime(ownerId, id);
     const controller = new AbortController();
@@ -239,6 +348,35 @@ export class ModelConfigsService {
       .execute();
   }
 
+  private async makeDefault(ownerId: string, config: ModelConfig): Promise<ModelConfig> {
+    await this.unsetDefaults(ownerId);
+    config.isDefault = true;
+    return this.configs.save(config);
+  }
+
+  private async resolveSelectedModelApiKey(
+    baseUrl: string,
+    modelName: string,
+    apiKey: string | undefined,
+    providerConfigs: ModelConfig[],
+  ): Promise<string> {
+    const trimmedApiKey = apiKey?.trim();
+    if (trimmedApiKey) {
+      const availableModels = await this.fetchModelIds(baseUrl, trimmedApiKey);
+      if (!availableModels.includes(modelName)) {
+        throw new BadRequestException(`Model is not available from this provider: ${modelName}`);
+      }
+      return this.encryption.encrypt(trimmedApiKey);
+    }
+
+    const reusableConfig = providerConfigs[0];
+    if (reusableConfig) {
+      return reusableConfig.encryptedApiKey;
+    }
+
+    throw new BadRequestException('API key is required for this model.');
+  }
+
   private findProviderPreset(providerId: string): ModelProviderPreset {
     const provider = MODEL_PROVIDER_PRESETS.find((preset) => preset.id === providerId);
     if (!provider) {
@@ -269,6 +407,18 @@ export class ModelConfigsService {
       return new URL(resolved).toString().replace(/\/+$/, '');
     } catch {
       throw new BadRequestException('Provider baseUrl must be a valid URL.');
+    }
+  }
+
+  private matchesProvider(config: ModelConfig, provider: ModelProviderPreset, baseUrl: string): boolean {
+    return config.providerId === provider.id || this.normalizeBaseUrl(config.baseUrl) === baseUrl;
+  }
+
+  private normalizeBaseUrl(baseUrl: string): string {
+    try {
+      return new URL(baseUrl).toString().replace(/\/+$/, '');
+    } catch {
+      return baseUrl.trim().replace(/\/+$/, '');
     }
   }
 

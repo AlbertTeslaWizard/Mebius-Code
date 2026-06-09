@@ -45,7 +45,7 @@ export const MODEL_PROVIDER_PRESETS: ModelProviderPreset[] = [
     description: 'DeepSeek OpenAI-compatible API.',
     aliases: ['deep seek', '深度求索', '深度'],
     baseUrl: 'https://api.deepseek.com',
-    recommendedModels: ['deepseek-chat', 'deepseek-reasoner'],
+    recommendedModels: ['deepseek-v4-flash', 'deepseek-v4-pro'],
     supportsTools: true,
   },
   {

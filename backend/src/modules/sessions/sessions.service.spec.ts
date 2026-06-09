@@ -54,6 +54,36 @@ describe('SessionsService', () => {
         updatedAt: new Date('2026-06-01T00:00:00.000Z'),
       }),
     ),
+    listModelChoices: jest.fn(() =>
+      Promise.resolve([
+        {
+          providerId: 'deepseek',
+          providerName: 'DeepSeek',
+          baseUrl: 'https://api.deepseek.com',
+          modelName: 'deepseek-v4-flash',
+          displayName: 'DeepSeek deepseek-v4-flash',
+          configured: true,
+          active: true,
+          isDefault: true,
+          supportsTools: true,
+          requiresApiKey: false,
+          modelConfigId: 'model-2',
+        },
+      ]),
+    ),
+    selectModel: jest.fn(() =>
+      Promise.resolve({
+        id: 'model-2',
+        displayName: 'Updated model',
+        baseUrl: 'https://api.example.com',
+        modelName: 'gpt-updated',
+        providerId: null,
+        supportsTools: true,
+        isDefault: true,
+        createdAt: new Date('2026-06-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-06-01T00:00:00.000Z'),
+      }),
+    ),
     searchProviders: jest.fn(() => [
       {
         id: 'moonshot',
@@ -271,32 +301,55 @@ describe('SessionsService', () => {
     );
   });
 
-  it('switches models with /model and returns a sanitized session view', async () => {
+  it('returns supported model choices with /models', async () => {
     const result = await service.handleCommand('owner-1', 'session-1', {
-      command: '/model model-2',
+      command: '/models',
     });
 
-    expect(modelConfigs.findRuntime).toHaveBeenCalledWith('owner-1', 'model-2');
+    expect(modelConfigs.listModelChoices).toHaveBeenCalledWith('owner-1', 'model-1');
+    expect(result).toEqual({
+      type: 'models.list',
+      models: [expect.objectContaining({ modelName: 'deepseek-v4-flash' })],
+    });
+  });
+
+  it('selects models with /models and returns a sanitized session view', async () => {
+    const result = await service.handleCommand('owner-1', 'session-1', {
+      command: '/models',
+      args: { modelConfigId: 'model-2' },
+    });
+
+    expect(modelConfigs.selectModel).toHaveBeenCalledWith(expect.objectContaining({ id: 'owner-1' }), {
+      modelConfigId: 'model-2',
+      providerId: undefined,
+      modelName: undefined,
+      apiKey: undefined,
+    });
     expect(sessions.save).toHaveBeenCalledWith(
       expect.objectContaining({
         activeModelConfig: { id: 'model-2' },
       }),
     );
     expect(events.publish).toHaveBeenCalledWith('session-1', 'agent_status', {
-      status: 'model_changed',
+      status: 'model_selected',
       modelConfigId: 'model-2',
+      providerId: null,
+      modelName: 'gpt-updated',
     });
     expect(result).toEqual(
       expect.objectContaining({
-        id: 'session-1',
-        projectId: 'project-1',
-        activeModelConfig: expect.objectContaining({
-          id: 'model-2',
-          displayName: 'Updated model',
+        type: 'models.selected',
+        session: expect.objectContaining({
+          id: 'session-1',
+          projectId: 'project-1',
+          activeModelConfig: expect.objectContaining({
+            id: 'model-2',
+            displayName: 'Updated model',
+          }),
         }),
       }),
     );
-    expect((result as { activeModelConfig?: unknown }).activeModelConfig).not.toHaveProperty('apiKey');
+    expect((result as { modelConfig?: unknown }).modelConfig).not.toHaveProperty('apiKey');
   });
 
   it('deletes owned sessions and publishes a deletion event', async () => {

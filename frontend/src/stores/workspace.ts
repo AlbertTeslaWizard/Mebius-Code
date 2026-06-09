@@ -13,6 +13,7 @@ import type {
   ListResponse,
   Message,
   ModelConfig,
+  ModelsCommandResult,
   Plan,
   PlanBundle,
   PlanStep,
@@ -438,12 +439,15 @@ export const useWorkspaceStore = defineStore('workspace', {
     },
     async switchSessionModel(modelConfigId: string) {
       if (!this.currentSession) return null;
-      const session = await request<Session>(`/sessions/${this.currentSession.id}/commands`, {
+      const result = await request<ModelsCommandResult>(`/sessions/${this.currentSession.id}/commands`, {
         method: 'POST',
-        body: jsonBody({ command: '/model', args: { modelConfigId } }),
+        body: jsonBody({ command: '/models', args: { modelConfigId } }),
       });
+      if (result.type !== 'models.selected') return null;
+      const session = result.session;
       this.currentSession = session;
       this.sessions = this.sessions.map((item) => (item.id === session.id ? session : item));
+      await this.loadModelConfigs();
       return session;
     },
     async loadMessages() {

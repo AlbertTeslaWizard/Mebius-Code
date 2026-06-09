@@ -208,20 +208,8 @@ export class SessionsService {
       return this.compact(session);
     }
 
-    if (name === '/model') {
-      const modelConfigId =
-        typeof dto.args?.modelConfigId === 'string' ? dto.args.modelConfigId : parts[0];
-      if (!modelConfigId) {
-        throw new BadRequestException('/model requires a model config id.');
-      }
-      const modelConfig = await this.modelConfigs.findRuntime(ownerId, modelConfigId);
-      session.activeModelConfig = { id: modelConfigId } as Session['activeModelConfig'];
-      const saved = await this.sessions.save(session);
-      this.events.publish(session.id, 'agent_status', {
-        status: 'model_changed',
-        modelConfigId,
-      });
-      return this.toView({ ...saved, activeModelConfig: modelConfig } as unknown as Session);
+    if (name === '/models') {
+      return this.modelsCommand(session, ownerId, dto.args, parts);
     }
 
     if (name === '/connect') {
@@ -409,5 +397,49 @@ export class SessionsService {
       { name: 'modelName', label: 'Model Name', type: 'text', required: false },
       ...baseFields,
     ];
+  }
+
+  private async modelsCommand(
+    session: Session,
+    ownerId: string,
+    args: Record<string, unknown> | undefined,
+    parts: string[],
+  ): Promise<unknown> {
+    const modelConfigId = typeof args?.modelConfigId === 'string' ? args.modelConfigId : undefined;
+    const providerId = typeof args?.providerId === 'string' ? args.providerId : undefined;
+    const apiKey = typeof args?.apiKey === 'string' ? args.apiKey : undefined;
+    const modelName =
+      typeof args?.modelName === 'string'
+        ? args.modelName
+        : parts.length > 0
+          ? parts.join(' ')
+          : undefined;
+
+    if (!modelConfigId && !providerId && !modelName && !apiKey) {
+      return {
+        type: 'models.list',
+        models: await this.modelConfigs.listModelChoices(ownerId, session.activeModelConfig?.id),
+      };
+    }
+
+    const modelConfig = await this.modelConfigs.selectModel(session.owner as User, {
+      modelConfigId,
+      providerId: providerId ?? (modelName ? 'deepseek' : undefined),
+      modelName,
+      apiKey,
+    });
+    session.activeModelConfig = { id: modelConfig.id } as Session['activeModelConfig'];
+    const saved = await this.sessions.save(session);
+    this.events.publish(session.id, 'agent_status', {
+      status: 'model_selected',
+      modelConfigId: modelConfig.id,
+      providerId: modelConfig.providerId,
+      modelName: modelConfig.modelName,
+    });
+    return {
+      type: 'models.selected',
+      modelConfig,
+      session: this.toView({ ...saved, activeModelConfig: modelConfig } as unknown as Session),
+    };
   }
 }

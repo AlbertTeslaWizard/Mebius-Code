@@ -15,6 +15,7 @@ describe('ModelConfigsService', () => {
   };
   const configs = {
     create: jest.fn((input: Partial<ModelConfig>) => input),
+    find: jest.fn(),
     findOne: jest.fn(),
     remove: jest.fn((input: ModelConfig) => Promise.resolve(input)),
     save: jest.fn((input: Partial<ModelConfig>) =>
@@ -83,6 +84,131 @@ describe('ModelConfigsService', () => {
       }),
     );
     expect(result).not.toHaveProperty('encryptedApiKey');
+  });
+
+  it('lists DeepSeek model choices with configured and reusable-key state', async () => {
+    configs.find.mockResolvedValue([
+      configFixture({
+        id: 'deepseek-config',
+        baseUrl: 'https://api.deepseek.com',
+        modelName: 'deepseek-v4-flash',
+        providerId: null,
+        isDefault: true,
+      }),
+    ]);
+
+    const result = await service.listModelChoices('owner-1', null);
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        modelName: 'deepseek-v4-flash',
+        configured: true,
+        active: true,
+        isDefault: true,
+        requiresApiKey: false,
+        modelConfigId: 'deepseek-config',
+      }),
+      expect.objectContaining({
+        modelName: 'deepseek-v4-pro',
+        configured: false,
+        active: false,
+        requiresApiKey: false,
+      }),
+    ]);
+  });
+
+  it('selects an existing model config and makes it default', async () => {
+    configs.find.mockResolvedValue([
+      configFixture({
+        id: 'deepseek-config',
+        baseUrl: 'https://api.deepseek.com',
+        modelName: 'deepseek-v4-flash',
+        providerId: null,
+        isDefault: false,
+      }),
+    ]);
+
+    const result = await service.selectModel({ id: 'owner-1' } as User, {
+      providerId: 'deepseek',
+      modelName: 'deepseek-v4-flash',
+    });
+
+    expect(queryBuilder.where).toHaveBeenCalledWith('owner_id = :ownerId', { ownerId: 'owner-1' });
+    expect(configs.save).toHaveBeenCalledWith(expect.objectContaining({ id: 'deepseek-config', isDefault: true }));
+    expect(result).toEqual(expect.objectContaining({ id: 'deepseek-config', modelName: 'deepseek-v4-flash' }));
+    expect(result).not.toHaveProperty('encryptedApiKey');
+  });
+
+  it('creates a new DeepSeek model config by reusing an existing provider key', async () => {
+    configs.find.mockResolvedValue([
+      configFixture({
+        id: 'deepseek-config',
+        baseUrl: 'https://api.deepseek.com',
+        modelName: 'deepseek-v4-flash',
+        providerId: null,
+        encryptedApiKey: 'encrypted:reusable-key',
+      }),
+    ]);
+
+    const result = await service.selectModel({ id: 'owner-1' } as User, {
+      providerId: 'deepseek',
+      modelName: 'deepseek-v4-pro',
+    });
+
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(configs.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerId: 'deepseek',
+        modelName: 'deepseek-v4-pro',
+        encryptedApiKey: 'encrypted:reusable-key',
+        isDefault: true,
+      }),
+    );
+    expect(result).toEqual(expect.objectContaining({ modelName: 'deepseek-v4-pro', isDefault: true }));
+  });
+
+  it('requires an API key before creating an unconfigured DeepSeek model', async () => {
+    configs.find.mockResolvedValue([]);
+
+    await expect(
+      service.selectModel({ id: 'owner-1' } as User, {
+        providerId: 'deepseek',
+        modelName: 'deepseek-v4-pro',
+      }),
+    ).rejects.toThrow('API key is required for this model.');
+
+    expect(configs.save).not.toHaveBeenCalled();
+  });
+
+  it('validates a submitted API key before creating a DeepSeek model config', async () => {
+    configs.find.mockResolvedValue([]);
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      text: () =>
+        Promise.resolve(
+          JSON.stringify({
+            data: [{ id: 'deepseek-v4-pro' }],
+          }),
+        ),
+    }) as jest.Mock;
+
+    await service.selectModel({ id: 'owner-1' } as User, {
+      providerId: 'deepseek',
+      modelName: 'deepseek-v4-pro',
+      apiKey: 'sk-deepseek',
+    });
+
+    expect(global.fetch).toHaveBeenCalledWith('https://api.deepseek.com/models', {
+      headers: { Authorization: 'Bearer sk-deepseek' },
+      signal: expect.any(AbortSignal),
+    });
+    expect(configs.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelName: 'deepseek-v4-pro',
+        encryptedApiKey: 'encrypted:sk-deepseek',
+        isDefault: true,
+      }),
+    );
   });
 
   it('rejects unavailable requested models without saving', async () => {
@@ -190,7 +316,7 @@ describe('ModelConfigsService', () => {
   });
 });
 
-function configFixture(): ModelConfig {
+function configFixture(overrides: Partial<ModelConfig> = {}): ModelConfig {
   const createdAt = new Date('2026-06-01T00:00:00.000Z');
   return {
     id: 'config-1',
@@ -204,5 +330,6 @@ function configFixture(): ModelConfig {
     isDefault: true,
     createdAt,
     updatedAt: createdAt,
+    ...overrides,
   } as ModelConfig;
 }

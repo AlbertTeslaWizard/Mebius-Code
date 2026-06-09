@@ -3,6 +3,7 @@ export const oneDark = {
   panel: '#21252b',
   input: '#353b45',
   border: '#4b5263',
+  selection: '#3e4451',
   text: '#abb2bf',
   muted: '#7f848e',
   blue: '#61afef',

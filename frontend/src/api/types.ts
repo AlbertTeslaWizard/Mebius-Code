@@ -60,6 +60,20 @@ export interface ModelConfigTestResult {
   message: string;
 }
 
+export interface ModelChoice {
+  providerId: string;
+  providerName: string;
+  baseUrl: string;
+  modelName: string;
+  displayName: string;
+  configured: boolean;
+  active: boolean;
+  isDefault: boolean;
+  supportsTools: boolean;
+  requiresApiKey: boolean;
+  modelConfigId?: string;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -324,6 +338,10 @@ export type ConnectResult =
   | { type: 'connect.providers'; providers: ConnectProvider[] }
   | { type: 'connect.form'; provider: ConnectProvider; fields: ConnectField[] }
   | { type: 'connect.connected'; modelConfig: ModelConfig; session: Session };
+
+export type ModelsCommandResult =
+  | { type: 'models.list'; models: ModelChoice[] }
+  | { type: 'models.selected'; modelConfig: ModelConfig; session: Session };
 
 export interface SsePayload {
   [key: string]: unknown;

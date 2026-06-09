@@ -50,9 +50,39 @@ export interface Session {
   projectId: string;
   title: string;
   status: string;
-  activeModelConfig: { displayName: string; modelName: string } | null;
+  activeModelConfig: ModelConfig | null;
   agentActivity?: AgentActivity | null;
 }
+
+export interface ModelConfig {
+  id: string;
+  providerId?: string | null;
+  displayName: string;
+  baseUrl: string;
+  modelName: string;
+  supportsTools: boolean;
+  isDefault: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ModelChoice {
+  providerId: string;
+  providerName: string;
+  baseUrl: string;
+  modelName: string;
+  displayName: string;
+  configured: boolean;
+  active: boolean;
+  isDefault: boolean;
+  supportsTools: boolean;
+  requiresApiKey: boolean;
+  modelConfigId?: string;
+}
+
+export type ModelsCommandResult =
+  | { type: 'models.list'; models: ModelChoice[] }
+  | { type: 'models.selected'; modelConfig: ModelConfig; session: Session };
 
 export interface AgentActivity {
   status: 'thinking' | 'responding' | 'using_tools' | 'waiting_for_approval' | 'failed' | string;
