@@ -14,7 +14,6 @@ import type {
   Session,
   SseEvent,
   SystemCapabilities,
-  TreeNode,
   TuiConfig,
 } from './types';
 
@@ -29,7 +28,6 @@ export interface WorkspaceState {
   session: Session;
   sessions: Session[];
   messages: Message[];
-  tree: TreeNode[];
   gitStatus: GitStatus | null;
   approvals: Approval[];
   plan: PlanBundle | null;
@@ -93,9 +91,8 @@ export async function bootstrapWorkspace(input: {
   };
   await saveConfig(nextConfig);
 
-  const [messages, tree, gitStatus, approvals, plan, commandRuns] = await Promise.all([
+  const [messages, gitStatus, approvals, plan, commandRuns] = await Promise.all([
     api.listMessages(session.id),
-    api.tree(project.id, 2).catch(() => []),
     api.gitStatus(project.id).catch(() => null),
     api.pendingApprovals().catch(() => []),
     api.latestPlan(session.id).catch(() => null),
@@ -113,7 +110,6 @@ export async function bootstrapWorkspace(input: {
     session,
     sessions: sessionList.items,
     messages,
-    tree,
     gitStatus,
     approvals,
     plan,

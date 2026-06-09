@@ -1,0 +1,14 @@
+export const oneDark = {
+  background: '#282c34',
+  panel: '#21252b',
+  input: '#353b45',
+  border: '#4b5263',
+  text: '#abb2bf',
+  muted: '#7f848e',
+  blue: '#61afef',
+  green: '#98c379',
+  yellow: '#e5c07b',
+  purple: '#c678dd',
+  red: '#e06c75',
+  softRed: '#e9969d',
+};
