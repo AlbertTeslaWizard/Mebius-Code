@@ -166,7 +166,7 @@ describe('OpenAiCompatibleService', () => {
     );
   });
 
-  it('falls back to non-streaming chat when a streamed response is interrupted', async () => {
+  it('falls back to non-streaming chat when a streamed response is interrupted before content starts', async () => {
     const fetchMock = jest
       .fn()
       .mockResolvedValueOnce({
@@ -190,7 +190,6 @@ describe('OpenAiCompatibleService', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(onStreamFallback).toHaveBeenCalledWith({ reason: 'interrupted' });
-    expect(onToken).toHaveBeenCalledWith({ delta: '', content: '' });
     expect(onToken).toHaveBeenCalledWith({
       delta: 'fallback after interrupt',
       content: 'fallback after interrupt',
@@ -198,7 +197,7 @@ describe('OpenAiCompatibleService', () => {
     expect(result).toEqual({ content: 'fallback after interrupt' });
   });
 
-  it('clears partial streamed text when fallback returns only tool calls', async () => {
+  it('reports interruption without non-streaming fallback after content starts', async () => {
     const fetchMock = jest
       .fn()
       .mockResolvedValueOnce({
@@ -207,52 +206,23 @@ describe('OpenAiCompatibleService', () => {
           ['data: {"choices":[{"delta":{"content":"I will write the file now."}}]}\n\n'],
           new TypeError('terminated'),
         ),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        text: () =>
-          Promise.resolve(
-            JSON.stringify({
-              choices: [
-                {
-                  message: {
-                    tool_calls: [
-                      {
-                        id: 'call-1',
-                        type: 'function',
-                        function: {
-                          name: 'create_patch',
-                          arguments: '{"path":"demo.py","content":"print(1)"}',
-                        },
-                      },
-                    ],
-                  },
-                },
-              ],
-            }),
-          ),
       });
     global.fetch = fetchMock as unknown as typeof fetch;
     const onToken = jest.fn();
+    const onStreamInterrupted = jest.fn();
 
-    const result = await service.streamChat(baseInput(), onToken);
+    await expect(
+      service.streamChat(baseInput(), onToken, { onStreamInterrupted }),
+    ).rejects.toThrow('Model stream was interrupted. Please retry.');
 
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(onToken).toHaveBeenNthCalledWith(1, {
       delta: 'I will write the file now.',
       content: 'I will write the file now.',
     });
-    expect(onToken).toHaveBeenNthCalledWith(2, { delta: '', content: '' });
-    expect(result).toEqual({
-      tool_calls: [
-        {
-          id: 'call-1',
-          type: 'function',
-          function: {
-            name: 'create_patch',
-            arguments: '{"path":"demo.py","content":"print(1)"}',
-          },
-        },
-      ],
+    expect(onStreamInterrupted).toHaveBeenCalledWith({
+      reason: 'interrupted',
+      message: 'Model stream was interrupted. Please retry.',
     });
   });
 

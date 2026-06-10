@@ -9,6 +9,7 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 import { SessionStatus } from '../../common/enums/session-status.enum';
+import { DEFAULT_PERMISSION_MODE, PermissionMode } from '../../common/enums/permission-mode.enum';
 import { ModelConfig } from '../model-configs/model-config.entity';
 import { Project } from '../projects/project.entity';
 import { User } from '../users/user.entity';
@@ -36,10 +37,17 @@ export class Session {
   @Column({ type: 'enum', enum: SessionStatus, default: SessionStatus.Active })
   status: SessionStatus;
 
+  @Column({
+    name: 'permission_mode',
+    type: 'enum',
+    enum: PermissionMode,
+    default: DEFAULT_PERMISSION_MODE,
+  })
+  permissionMode: PermissionMode;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 
   @UpdateDateColumn({ name: 'updated_at' })
   updatedAt: Date;
 }
-

@@ -199,6 +199,11 @@ describe('AgentService', () => {
 
     await service.run(owner, session.id, { message: 'Write a file' });
 
+    expect(events.publish).toHaveBeenCalledWith(session.id, 'stream_fallback', {
+      reason: 'interrupted',
+      provider: 'Test config',
+      model: 'gpt-test',
+    });
     expect(events.publish).toHaveBeenCalledWith(session.id, 'agent_status', {
       status: 'responding',
       activity: 'stream_fallback',
@@ -210,6 +215,32 @@ describe('AgentService', () => {
       'Recovered with non-streaming chat',
       {},
     );
+  });
+
+  it('publishes stream interruption diagnostics when content started before stream failure', async () => {
+    llm.streamChat.mockImplementationOnce(async (_input, onToken, options) => {
+      onToken({ delta: 'Partial', content: 'Partial' });
+      options?.onStreamInterrupted?.({
+        reason: 'interrupted',
+        message: 'Model stream was interrupted. Please retry.',
+      });
+      throw new BadGatewayException('Model stream was interrupted. Please retry.');
+    });
+
+    await expect(service.run(owner, session.id, { message: 'Write a file' })).rejects.toThrow(
+      'Model stream was interrupted. Please retry.',
+    );
+
+    expect(events.publish).toHaveBeenCalledWith(session.id, 'token', {
+      delta: 'Partial',
+      content: 'Partial',
+    });
+    expect(events.publish).toHaveBeenCalledWith(session.id, 'stream_interrupted', {
+      reason: 'interrupted',
+      message: 'Model stream was interrupted. Please retry.',
+      provider: 'Test config',
+      model: 'gpt-test',
+    });
   });
 
   it('publishes failed status and completes the event stream when the model stream is interrupted', async () => {

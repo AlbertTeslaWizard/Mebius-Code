@@ -6,6 +6,7 @@ export interface LayoutPreferences {
 }
 
 export type ThemeMode = 'dark' | 'light';
+export type PermissionMode = 'read_only' | 'ask_first' | 'auto' | 'full_access';
 
 export interface ThemePreferences {
   mode: ThemeMode;
@@ -92,6 +93,7 @@ export interface Session {
   projectId: string;
   title: string;
   status: string;
+  permissionMode: PermissionMode;
   activeModelConfig: ModelConfig | null;
   agentActivity?: {
     status: 'using_tools' | 'waiting_for_approval';

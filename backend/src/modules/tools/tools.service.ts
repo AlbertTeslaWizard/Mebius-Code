@@ -11,6 +11,7 @@ import {
   FilePatchStatus,
   ToolCallStatus,
 } from '../../common/enums/tool-status.enum';
+import { DEFAULT_PERMISSION_MODE } from '../../common/enums/permission-mode.enum';
 import { UserRole } from '../../common/enums/user-role.enum';
 import { CommandInspection, CommandPolicyService } from '../../common/security/command-policy.service';
 import { PathSandboxService } from '../../common/security/path-sandbox.service';
@@ -26,13 +27,21 @@ import { CommandRun } from './command-run.entity';
 import { resolveCommandRuntime } from './command-runtime';
 import { FilePatch } from './file-patch.entity';
 import {
+  commandApprovalPattern,
+  decidePermission,
+  hasExternalToolPath,
+  matchesSessionApprovalRule,
+  type SessionApprovalRuleLike,
+  type ToolPermissionRequest,
+} from './permission-decision';
+import { SessionApprovalRule } from './session-approval-rule.entity';
+import {
   SESSION_SHELL_AUTORUN_GRANT,
   SessionCommandGrant,
 } from './session-command-grant.entity';
 import { ToolApproval } from './tool-approval.entity';
 import { ToolCall } from './tool-call.entity';
 
-const APPROVAL_REQUIRED_TOOLS = new Set(['create_patch']);
 const DIFF_PREVIEW_LIMIT = 20_000;
 type ApprovalMode = 'once' | 'project' | 'session_auto';
 
@@ -97,6 +106,8 @@ export class ToolsService {
     private readonly commandRuns: Repository<CommandRun>,
     @InjectRepository(SessionCommandGrant)
     private readonly sessionCommandGrants: Repository<SessionCommandGrant>,
+    @InjectRepository(SessionApprovalRule)
+    private readonly sessionApprovalRules: Repository<SessionApprovalRule>,
     private readonly sessions: SessionsService,
     private readonly paths: PathSandboxService,
     private readonly commandPolicy: CommandPolicyService,
@@ -114,16 +125,33 @@ export class ToolsService {
     resumeContext?: PendingToolResumeContext;
   }): Promise<ToolCall> {
     const session = await this.sessions.findOwned(input.owner.id, input.sessionId);
-    let commandAuthorized = false;
+    let commandInspection: CommandInspection | undefined;
+    let inspectionError: string | undefined;
     if (input.name === 'run_command') {
       if (typeof input.args.command !== 'string') {
-        throw new BadRequestException('run_command requires command.');
+        return this.rejectToolRequestByPermission(input, session, 'run_command requires command.');
       }
       const project = session.project as Project;
-      await this.commandPolicy.inspect(input.args.command, project.id);
-      commandAuthorized = await this.hasSessionShellAutoRunGrant(session.id);
+      try {
+        commandInspection = await this.commandPolicy.inspect(input.args.command, project.id);
+      } catch (error) {
+        inspectionError = error instanceof Error ? error.message : 'Command is blocked by permission policy.';
+      }
     }
-    const requiresApproval = input.name === 'run_command' ? !commandAuthorized : APPROVAL_REQUIRED_TOOLS.has(input.name);
+    const permissionRequest: ToolPermissionRequest = {
+      name: input.name,
+      args: input.args,
+      commandInspection,
+      inspectionError,
+    };
+    const sessionRules = await this.effectiveSessionApprovalRules(session.id);
+    const decision = decidePermission(session.permissionMode ?? DEFAULT_PERMISSION_MODE, permissionRequest, sessionRules);
+    if (decision === 'deny') {
+      return this.rejectToolRequestByPermission(input, session, inspectionError ?? 'Denied by permission mode.');
+    }
+
+    const requiresApproval = decision === 'ask';
+    const commandAuthorized = input.name === 'run_command' && decision === 'allow';
     const toolCall = await this.toolCalls.save(
       this.toolCalls.create({
         session,
@@ -136,7 +164,7 @@ export class ToolsService {
     );
 
     if (requiresApproval) {
-      if (input.name === 'create_patch') {
+      if (input.name === 'create_patch' && !hasExternalToolPath(permissionRequest)) {
         this.events.publish(
           session.id,
           'agent_status',
@@ -178,6 +206,55 @@ export class ToolsService {
     return saved;
   }
 
+  private async effectiveSessionApprovalRules(sessionId: string): Promise<SessionApprovalRuleLike[]> {
+    const rules = await this.sessionApprovalRules.find({
+      where: { session: { id: sessionId } },
+      order: { createdAt: 'ASC' },
+    });
+    const legacyShellGrant = await this.hasSessionShellAutoRunGrant(sessionId);
+    return [
+      ...rules.map((rule) => ({
+        toolKind: rule.toolKind,
+        pattern: rule.pattern,
+        scope: rule.scope,
+      })),
+      ...(legacyShellGrant ? [{ toolKind: 'run_command', scope: 'session' }] : []),
+    ];
+  }
+
+  private async rejectToolRequestByPermission(
+    input: {
+      owner: User;
+      sessionId: string;
+      name: string;
+      args: Record<string, unknown>;
+    },
+    session: Session,
+    reason: string,
+  ): Promise<ToolCall> {
+    const resultText = reason.startsWith('Denied by permission mode')
+      ? reason
+      : `Denied by permission mode: ${reason}`;
+    const toolCall = await this.toolCalls.save(
+      this.toolCalls.create({
+        session,
+        name: input.name,
+        arguments: input.args,
+        requiresApproval: false,
+        status: ToolCallStatus.Rejected,
+        resultText,
+      }),
+    );
+    this.events.publish(session.id, 'tool_call_result', {
+      toolCallId: toolCall.id,
+      name: toolCall.name,
+      result: resultText,
+      status: toolCall.status,
+      ...this.buildToolMetadata(toolCall.name, toolCall.arguments, 'tool_rejected'),
+    });
+    return toolCall;
+  }
+
   async pending(ownerId: string): Promise<PendingApprovalResponse[]> {
     const approvals = await this.approvals.find({
       where: {
@@ -190,7 +267,7 @@ export class ToolsService {
     return Promise.all(
       approvals.map(async (approval) => ({
         ...approval,
-        preview: await this.buildApprovalPreview(approval),
+        preview: await this.buildApprovalPreview(approval).catch(() => undefined),
       })),
     );
   }
@@ -283,7 +360,7 @@ export class ToolsService {
     const toolCall = approval.toolCall;
     const resumeContext = this.decodeResumeContext(toolCall.resultText);
     let projectCommandToRemember: { project: Project; command: string; normalized: string } | null = null;
-    let sessionAutoRunGrantCreated = false;
+    let sessionApprovalRuleCreated = false;
     if (toolCall.name === 'run_command') {
       const project = toolCall.session.project as Project;
       const command = toolCall.arguments.command;
@@ -302,16 +379,36 @@ export class ToolsService {
       }
       if (mode === 'session_auto') {
         await this.sessions.findOwned(owner.id, toolCall.session.id);
-        sessionAutoRunGrantCreated = await this.ensureSessionShellAutoRunGrant(toolCall.session, owner);
-        if (sessionAutoRunGrantCreated) {
+        sessionApprovalRuleCreated = await this.ensureSessionApprovalRule(toolCall, owner, {
+          toolKind: 'run_command',
+          pattern: commandApprovalPattern(inspection.normalized),
+          scope: 'workspace',
+        });
+        if (sessionApprovalRuleCreated) {
           await this.audit.record({
             actor: owner,
-            action: 'command_policy.session_shell_autorun_granted',
+            action: 'tool.session_approval_rule_granted',
             resourceType: 'session',
             resourceId: toolCall.session.id,
-            metadata: { command },
+            metadata: { toolKind: 'run_command', command, pattern: commandApprovalPattern(inspection.normalized) },
           });
         }
+      }
+    }
+    if (toolCall.name === 'create_patch' && mode === 'session_auto') {
+      await this.sessions.findOwned(owner.id, toolCall.session.id);
+      sessionApprovalRuleCreated = await this.ensureSessionApprovalRule(toolCall, owner, {
+        toolKind: 'create_patch',
+        scope: 'workspace',
+      });
+      if (sessionApprovalRuleCreated) {
+        await this.audit.record({
+          actor: owner,
+          action: 'tool.session_approval_rule_granted',
+          resourceType: 'session',
+          resourceId: toolCall.session.id,
+          metadata: { toolKind: 'create_patch', scope: 'workspace' },
+        });
       }
     }
     approval.status = ApprovalStatus.Approved;
@@ -754,6 +851,35 @@ export class ToolsService {
     return true;
   }
 
+  private async ensureSessionApprovalRule(
+    toolCall: ToolCall,
+    owner: User,
+    input: { toolKind: string; pattern?: string; scope?: string },
+  ): Promise<boolean> {
+    const existingRules = await this.sessionApprovalRules.find({
+      where: {
+        session: { id: toolCall.session.id },
+        toolKind: input.toolKind,
+      },
+    });
+    const existing = existingRules.find(
+      (rule) => (rule.pattern ?? null) === (input.pattern ?? null) && (rule.scope ?? null) === (input.scope ?? null),
+    );
+    if (existing) {
+      return false;
+    }
+    await this.sessionApprovalRules.save(
+      this.sessionApprovalRules.create({
+        session: toolCall.session,
+        createdBy: owner,
+        toolKind: input.toolKind,
+        pattern: input.pattern,
+        scope: input.scope,
+      }),
+    );
+    return true;
+  }
+
   private buildToolActivityPayload(
     toolName: string,
     args: Record<string, unknown>,
@@ -928,7 +1054,14 @@ export class ToolsService {
     if (toolCall.name === 'run_command' && typeof toolCall.arguments.command === 'string') {
       const project = toolCall.session.project as Project;
       const inspection = await this.commandPolicy.inspect(toolCall.arguments.command, project.id);
-      const sessionAutoRunActive = await this.hasSessionShellAutoRunGrant(toolCall.session.id);
+      const sessionAutoRunActive = matchesSessionApprovalRule(
+        {
+          name: 'run_command',
+          args: toolCall.arguments,
+          commandInspection: inspection,
+        },
+        await this.effectiveSessionApprovalRules(toolCall.session.id),
+      );
       return {
         kind: 'command',
         command: toolCall.arguments.command,

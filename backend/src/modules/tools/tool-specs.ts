@@ -50,7 +50,7 @@ const BASE_CODING_TOOL_SPECS = [
     function: {
       name: 'create_patch',
       description:
-        'Replace or create one or more files with proposed full file content. Requires user approval.',
+        'Replace or create one or more files with proposed full file content. Approval depends on the active permission mode.',
       parameters: {
         type: 'object',
         properties: {
@@ -83,7 +83,7 @@ const BASE_CODING_TOOL_SPECS = [
     type: 'function',
     function: {
       name: 'run_command',
-      description: 'Run a command in the project workspace. Requires user approval.',
+      description: 'Run a command in the project workspace. Approval depends on the active permission mode.',
       parameters: {
         type: 'object',
         required: ['command'],
@@ -112,7 +112,7 @@ export function buildCodingToolSpecs(
           function: {
             ...tool.function,
             description:
-              `Run a command in the project workspace. Requires user approval.${commandSummary}` +
+              `Run a command in the project workspace. Approval depends on the active permission mode.${commandSummary}` +
               ` ${commandRuntime.guidance}` +
               ' Prefer an enabled prefix. Shell syntax or other commands can be reviewed by the user, and the user may trust the current session for automatic command execution.',
           },

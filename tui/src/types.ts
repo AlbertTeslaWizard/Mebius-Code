@@ -1,4 +1,5 @@
 export type TuiThemeName = 'onedark' | 'monokai' | 'dracula' | 'catppuccin-mocha' | 'gruvbox-dark';
+export type PermissionMode = 'read_only' | 'ask_first' | 'auto' | 'full_access';
 
 export interface TuiConfig {
   apiBaseUrl: string;
@@ -53,6 +54,7 @@ export interface Session {
   projectId: string;
   title: string;
   status: string;
+  permissionMode: PermissionMode;
   activeModelConfig: ModelConfig | null;
   agentActivity?: AgentActivity | null;
   createdAt: string;
@@ -89,12 +91,24 @@ export type ModelsCommandResult =
   | { type: 'models.list'; models: ModelChoice[] }
   | { type: 'models.selected'; modelConfig: ModelConfig; session: Session };
 
+export type PermissionsCommandResult =
+  | { type: 'permissions.current'; permissionMode: PermissionMode; session: Session }
+  | { type: 'permissions.updated'; permissionMode: PermissionMode; session: Session };
+
 export interface AgentActivity {
   status: 'thinking' | 'responding' | 'using_tools' | 'waiting_for_approval' | 'failed' | string;
   toolName?: string;
   activity?: string;
   targetPaths?: string[];
   command?: string;
+  message?: string;
+}
+
+export interface StreamStatus {
+  mode: 'idle' | 'streaming' | 'fallback' | 'interrupted' | 'error';
+  reason?: string;
+  provider?: string;
+  model?: string;
   message?: string;
 }
 
@@ -105,6 +119,7 @@ export interface Message {
   metadata?: Record<string, unknown>;
   createdAt: string;
   streaming?: boolean;
+  updatedAt?: string;
 }
 
 export interface TreeNode {

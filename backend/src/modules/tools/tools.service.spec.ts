@@ -20,6 +20,7 @@ import { SessionsService } from '../sessions/sessions.service';
 import { User } from '../users/user.entity';
 import { CommandRun } from './command-run.entity';
 import { FilePatch } from './file-patch.entity';
+import { SessionApprovalRule } from './session-approval-rule.entity';
 import { SessionCommandGrant } from './session-command-grant.entity';
 import { ToolApproval } from './tool-approval.entity';
 import { ToolCall } from './tool-call.entity';
@@ -85,6 +86,11 @@ describe('ToolsService', () => {
     remove: jest.fn(async (value) => value),
     save: jest.fn(async (value) => value),
   } as unknown as jest.Mocked<Repository<SessionCommandGrant>>;
+  const sessionApprovalRules = {
+    create: jest.fn((value) => value),
+    find: jest.fn(),
+    save: jest.fn(async (value) => value),
+  } as unknown as jest.Mocked<Repository<SessionApprovalRule>>;
   const sessions = {
     findOwned: jest.fn(),
   } as unknown as jest.Mocked<SessionsService>;
@@ -122,6 +128,7 @@ describe('ToolsService', () => {
     patches,
     commandRuns,
     sessionCommandGrants,
+    sessionApprovalRules,
     sessions,
     paths,
     commandPolicy,
@@ -178,6 +185,7 @@ describe('ToolsService', () => {
     commandPolicy.parseAuthorized.mockReturnValue({ command: 'npm', args: ['test'], executionMode: 'argv' });
     commandPolicy.listAllowedCommands.mockResolvedValue(['npm test']);
     sessionCommandGrants.findOne.mockResolvedValue(null);
+    sessionApprovalRules.find.mockResolvedValue([]);
     commandRuns.save.mockImplementation(async (value: any) => ({
       id: 'run-1',
       stdout: '',
@@ -284,7 +292,7 @@ describe('ToolsService', () => {
     );
   });
 
-  it('grants session command auto-run when approving with session_auto', async () => {
+  it('grants a session command approval rule when approving with session_auto', async () => {
     const commandToolCall = {
       id: 'tool-command-approval',
       session,
@@ -311,16 +319,18 @@ describe('ToolsService', () => {
     const result = await service.approve(owner, 'approval-command', 'session_auto');
 
     expect(result.status).toBe(ToolCallStatus.Succeeded);
-    expect(sessionCommandGrants.save).toHaveBeenCalledWith(
+    expect(sessionApprovalRules.save).toHaveBeenCalledWith(
       expect.objectContaining({
         session,
         createdBy: owner,
-        grantType: 'shell_autorun',
+        toolKind: 'run_command',
+        pattern: 'npm test && npm run build',
+        scope: 'workspace',
       }),
     );
     expect(audit.record).toHaveBeenCalledWith(
       expect.objectContaining({
-        action: 'command_policy.session_shell_autorun_granted',
+        action: 'tool.session_approval_rule_granted',
         resourceType: 'session',
         resourceId: session.id,
       }),

@@ -14,6 +14,7 @@ import type {
   ProjectFile,
   Session,
   SseEvent,
+  StreamStatus,
   SystemCapabilities,
   TuiConfig,
 } from './types';
@@ -36,9 +37,12 @@ export interface WorkspaceState {
   commandRuns: CommandRunView[];
   currentFile: ProjectFile | null;
   events: Array<SseEvent & { time: string }>;
+  streamStatus: StreamStatus;
   activity: string;
   error: string;
 }
+
+const STREAM_TOKEN_FLUSH_MS = 50;
 
 export async function bootstrapWorkspace(input: {
   apiBaseUrl: string;
@@ -120,6 +124,7 @@ export async function bootstrapWorkspace(input: {
     commandRuns,
     currentFile: null,
     events: [],
+    streamStatus: { mode: 'idle' },
     activity: 'Ready',
     error: '',
   };
@@ -133,7 +138,71 @@ export function attachEventStream(input: {
 }): void {
   const api = input.state().api;
   const sessionId = input.state().session.id;
+  let pendingTokenEvent: SseEvent | null = null;
+  let pendingTokenDelta = '';
+  let pendingTokenContent: string | undefined;
+  let tokenFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearTokenFlushTimer = () => {
+    if (!tokenFlushTimer) return;
+    clearTimeout(tokenFlushTimer);
+    tokenFlushTimer = null;
+  };
+
+  const flushPendingToken = () => {
+    if (input.abortSignal.aborted || !pendingTokenEvent) return;
+    clearTokenFlushTimer();
+    const event: SseEvent = {
+      ...pendingTokenEvent,
+      data: {
+        ...pendingTokenEvent.data,
+        delta: pendingTokenDelta,
+        ...(pendingTokenContent === undefined ? {} : { content: pendingTokenContent }),
+      },
+    };
+    pendingTokenEvent = null;
+    pendingTokenDelta = '';
+    pendingTokenContent = undefined;
+    input.setState((state) => reduceEvent(state, event));
+  };
+
+  const queueTokenEvent = (event: SseEvent) => {
+    const content = typeof event.data.content === 'string' ? event.data.content : undefined;
+    const delta = typeof event.data.delta === 'string' ? event.data.delta : '';
+    if (content === undefined && !delta) {
+      input.setState((state) => reduceEvent(state, event));
+      return;
+    }
+
+    pendingTokenEvent = event;
+    pendingTokenDelta += delta;
+    if (content !== undefined) {
+      pendingTokenContent = content;
+    } else if (pendingTokenContent !== undefined) {
+      pendingTokenContent += delta;
+    }
+
+    tokenFlushTimer ??= setTimeout(flushPendingToken, STREAM_TOKEN_FLUSH_MS);
+  };
+
+  input.abortSignal.addEventListener(
+    'abort',
+    () => {
+      clearTokenFlushTimer();
+      pendingTokenEvent = null;
+      pendingTokenDelta = '';
+      pendingTokenContent = undefined;
+    },
+    { once: true },
+  );
+
   void streamEvents(api.eventUrl(sessionId, input.token), (event) => {
+    if (event.type === 'token') {
+      queueTokenEvent(event);
+      return;
+    }
+
+    flushPendingToken();
     input.setState((state) => reduceEvent(state, event));
     if (shouldRefreshReviewData(event.type)) {
       void refreshReviewData(input.state()).then((updates) => {
@@ -141,8 +210,11 @@ export function attachEventStream(input: {
         input.setState((state) => ({ ...state, ...updates }));
       });
     }
-  }, input.abortSignal).catch((error) => {
+  }, input.abortSignal).then(() => {
+    flushPendingToken();
+  }).catch((error) => {
     if (input.abortSignal.aborted) return;
+    flushPendingToken();
     input.setState((state) => ({
       ...state,
       error: error instanceof Error ? error.message : 'Event stream failed.',
@@ -174,20 +246,71 @@ function reduceEvent(state: WorkspaceState, event: SseEvent): WorkspaceState {
     if (content === undefined && !delta) {
       return { ...state, events };
     }
-    const messages = [...state.messages];
-    const streaming = messages.find((message) => message.streaming);
-    if (streaming) {
-      streaming.content = content ?? `${streaming.content}${delta}`;
-    } else {
-      messages.push({
-        id: `streaming-${Date.now()}`,
-        role: 'assistant',
-        content: content ?? delta,
-        createdAt: new Date().toISOString(),
-        streaming: true,
-      });
-    }
-    return { ...state, events, messages, activity: 'Assistant responding' };
+
+    const updatedAt = new Date().toISOString();
+    const hasStreamingMessage = state.messages.some((message) => message.streaming);
+    const messages = hasStreamingMessage
+      ? state.messages.map((message) => {
+          if (!message.streaming) return message;
+          return {
+            ...message,
+            content: content ?? `${message.content}${delta}`,
+            streaming: true,
+            updatedAt,
+          };
+        })
+      : [
+          ...state.messages,
+          {
+            id: `streaming-${Date.now()}`,
+            role: 'assistant' as const,
+            content: content ?? delta,
+            createdAt: updatedAt,
+            updatedAt,
+            streaming: true,
+          },
+        ];
+
+    return {
+      ...state,
+      events,
+      messages,
+      streamStatus: state.streamStatus.mode === 'fallback' ? state.streamStatus : { mode: 'streaming' },
+      activity: 'Assistant responding',
+    };
+  }
+
+  if (event.type === 'stream_fallback') {
+    const streamStatus = streamStatusFromEvent(event, 'fallback');
+    return {
+      ...state,
+      events,
+      streamStatus,
+      activity: `streaming fallback${streamStatus.reason ? `: ${streamStatus.reason}` : ''}`,
+    };
+  }
+
+  if (event.type === 'stream_interrupted' || event.type === 'stream_error') {
+    const mode = event.type === 'stream_interrupted' ? 'interrupted' : 'error';
+    const streamStatus = streamStatusFromEvent(event, mode);
+    const updatedAt = new Date().toISOString();
+    const messages = state.messages.map((message) =>
+      message.streaming
+        ? {
+            ...message,
+            streaming: false,
+            updatedAt,
+          }
+        : message,
+    );
+    return {
+      ...state,
+      events,
+      messages,
+      streamStatus,
+      activity: `stream ${mode}${streamStatus.reason ? `: ${streamStatus.reason}` : ''}`,
+      error: streamStatus.message ?? state.error,
+    };
   }
 
   if (event.type === 'message_created') {
@@ -198,13 +321,28 @@ function reduceEvent(state: WorkspaceState, event: SseEvent): WorkspaceState {
       return { ...state, events, activity: 'Ready' };
     }
 
+    const now = new Date().toISOString();
     const messages = state.messages.filter((message) => {
       if (role === 'assistant' && message.streaming) return false;
       if (role === 'user' && message.id.startsWith('local-user-') && message.content === content) return false;
       return true;
     });
-    messages.push({ id, role, content, createdAt: new Date().toISOString() });
-    return { ...state, events, messages, activity: 'Ready' };
+    messages.push({ id, role, content, createdAt: now, updatedAt: now });
+    return {
+      ...state,
+      events,
+      messages,
+      streamStatus: state.streamStatus.mode === 'streaming' ? { mode: 'idle' } : state.streamStatus,
+      activity: 'Ready',
+    };
+  }
+
+  if (event.type === 'done') {
+    return {
+      ...state,
+      events,
+      streamStatus: state.streamStatus.mode === 'streaming' ? { mode: 'idle' } : state.streamStatus,
+    };
   }
 
   if (event.type === 'agent_status') {
@@ -214,15 +352,34 @@ function reduceEvent(state: WorkspaceState, event: SseEvent): WorkspaceState {
         ...state,
         events,
         messages: [],
+        streamStatus: { mode: 'idle' },
         activity: status === 'context_cleared' ? 'Context cleared' : 'Context compacted',
       };
     }
-    const toolName = typeof event.data.toolName === 'string' ? ` · ${event.data.toolName}` : '';
-    const command = typeof event.data.command === 'string' ? ` · ${event.data.command}` : '';
+    const toolName = typeof event.data.toolName === 'string' ? ` - ${event.data.toolName}` : '';
+    const command = typeof event.data.command === 'string' ? ` - ${event.data.command}` : '';
     return { ...state, events, activity: `${status}${toolName}${command}` };
   }
 
   return { ...state, events };
+}
+
+function streamStatusFromEvent(
+  event: SseEvent,
+  mode: Extract<StreamStatus['mode'], 'fallback' | 'interrupted' | 'error'>,
+): StreamStatus {
+  return {
+    mode,
+    reason: stringField(event, 'reason'),
+    provider: stringField(event, 'provider'),
+    model: stringField(event, 'model'),
+    message: stringField(event, 'message'),
+  };
+}
+
+function stringField(event: SseEvent, key: string): string | undefined {
+  const value = event.data[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
 function isMessageRole(role: string): role is Message['role'] {

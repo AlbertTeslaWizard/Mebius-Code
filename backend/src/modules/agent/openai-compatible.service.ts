@@ -42,9 +42,15 @@ export interface ModelStreamFallbackEvent {
   reason: ModelStreamFallbackReason;
 }
 
+export interface ModelStreamInterruptedEvent {
+  reason: Extract<ModelStreamFallbackReason, 'interrupted' | 'timeout'>;
+  message: string;
+}
+
 export interface StreamChatOptions {
   idleTimeoutMs?: number;
   onStreamFallback?: (event: ModelStreamFallbackEvent) => void;
+  onStreamInterrupted?: (event: ModelStreamInterruptedEvent) => void;
 }
 
 interface StreamToolCallDelta {
@@ -121,16 +127,28 @@ export class OpenAiCompatibleService {
       return this.chatWithTokenFallback(input, onToken, options, 'missing_body');
     }
 
+    let sawAnyContentDelta = false;
+    const trackedOnToken = (event: LlmTokenEvent) => {
+      if (event.delta) {
+        sawAnyContentDelta = true;
+      }
+      onToken(event);
+    };
+
     try {
       return await this.parseStream(
         response.body,
-        onToken,
+        trackedOnToken,
         options.idleTimeoutMs ?? MODEL_STREAM_IDLE_TIMEOUT_MS,
       );
     } catch (error) {
       const interrupted = this.modelStreamInterrupted(error);
       const reason = interrupted.message.includes('timed out') ? 'timeout' : 'interrupted';
-      return this.chatWithTokenFallback(input, onToken, options, reason, true);
+      if (!sawAnyContentDelta) {
+        return this.chatWithTokenFallback(input, onToken, options, reason);
+      }
+      options.onStreamInterrupted?.({ reason, message: interrupted.message });
+      throw interrupted;
     }
   }
 
@@ -139,13 +157,9 @@ export class OpenAiCompatibleService {
     onToken: (event: LlmTokenEvent) => void,
     options: StreamChatOptions = {},
     reason: ModelStreamFallbackReason,
-    resetStreamingContent = false,
   ): Promise<LlmAssistantMessage> {
     options.onStreamFallback?.({ reason });
     const message = await this.chat(input);
-    if (resetStreamingContent) {
-      onToken({ delta: '', content: '' });
-    }
     if (message.content) {
       onToken({ delta: message.content, content: message.content });
     }

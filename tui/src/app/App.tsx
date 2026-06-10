@@ -1,15 +1,25 @@
 /** @jsxImportSource @opentui/solid */
 import { SyntaxStyle, type KeyEvent, type TextareaAction, type TextareaRenderable } from '@opentui/core';
 import { useKeyboard, useRenderer, useTerminalDimensions } from '@opentui/solid';
-import { For, Show, createContext, createEffect, createMemo, createSignal, onCleanup, onMount, useContext } from 'solid-js';
+import { For, Index, Show, createContext, createEffect, createMemo, createSignal, onCleanup, onMount, useContext } from 'solid-js';
 import type { Accessor, JSX } from 'solid-js';
 import { attachEventStream, refreshReviewData, type WorkspaceState } from '../bootstrap';
 import { saveConfig } from '../config';
-import type { Approval, ApprovalPreview, Message, ModelChoice, ModelsCommandResult, Session, TuiThemeName } from '../types';
+import type {
+  Approval,
+  ApprovalPreview,
+  Message,
+  ModelChoice,
+  ModelsCommandResult,
+  PermissionMode,
+  Session,
+  TuiThemeName,
+} from '../types';
 import { ApprovalInlinePanel, type ApprovalChoice } from './ApprovalInlinePanel';
 import { getTuiTheme, resolveTuiThemeName, tuiThemeList, type TuiTheme } from './theme';
 
 const ThemeContext = createContext<Accessor<TuiTheme>>();
+const STREAMING_MARKDOWN_RENDER_MS = 50;
 
 function useTheme(): Accessor<TuiTheme> {
   const theme = useContext(ThemeContext);
@@ -71,6 +81,7 @@ interface CommandPaletteState {
 
 export type SlashCommandContext = {
   openModelSelectModal: () => Promise<void>;
+  openPermissionsModal: () => void;
   openSessionPalette: () => Promise<void>;
   openThemePalette: () => void;
   runCommand: (value: string) => Promise<void>;
@@ -90,6 +101,11 @@ interface ThemePaletteState {
   selectedIndex: number;
 }
 
+interface PermissionPaletteState {
+  selectedIndex: number;
+  error?: string;
+}
+
 interface SessionPaletteState {
   sessions: Session[];
   selectedIndex: number;
@@ -102,7 +118,7 @@ interface CommandPaletteCommand {
   label: string;
   description: string;
   insert?: string;
-  action?: 'models' | 'sessions';
+  action?: 'models' | 'sessions' | 'permissions';
 }
 
 interface ModelChoiceGroupRow {
@@ -127,6 +143,7 @@ interface SessionGroup {
 
 const commandPaletteCommands: CommandPaletteCommand[] = [
   { label: 'Select model', insert: '/models', action: 'models', description: 'Choose or configure the active model' },
+  { label: '/permissions', action: 'permissions', description: 'Change agent permission mode' },
   { label: '/sessions', action: 'sessions', description: 'Switch to a previous session' },
   { label: '/new <title>', insert: '/new ', description: 'Create and switch to a new session' },
   { label: '/clear', insert: '/clear', description: 'Clear the chat and model context' },
@@ -136,6 +153,7 @@ const commandPaletteCommands: CommandPaletteCommand[] = [
   { label: '/plan-approve', insert: '/plan-approve', description: 'Approve the latest plan' },
   { label: '/approve', insert: '/approve', description: 'Approve the active tool request' },
   { label: '/reject', insert: '/reject', description: 'Reject the active tool request' },
+  { label: '/stream-test', insert: '/stream-test', description: 'Test TUI streaming without a model provider' },
   { label: '/run <command>', insert: '/run ', description: 'Request a shell command run' },
   { label: '/open <path>', insert: '/open ', description: 'Open a project file' },
   { label: '/exit', insert: '/exit', description: 'Exit the TUI' },
@@ -156,6 +174,13 @@ const slashCommands: SlashCommand[] = [
     description: 'Switch to a previous session',
     kind: 'immediate',
     run: (ctx) => ctx.openSessionPalette(),
+  },
+  {
+    id: 'permissions',
+    name: '/permissions',
+    description: 'Change agent permission mode',
+    kind: 'immediate',
+    run: (ctx) => ctx.openPermissionsModal(),
   },
   { id: 'new', name: '/new', description: 'Create and switch to a new session', kind: 'input' },
   {
@@ -201,6 +226,13 @@ const slashCommands: SlashCommand[] = [
     kind: 'immediate',
     run: (ctx) => ctx.runCommand('/reject'),
   },
+  {
+    id: 'stream-test',
+    name: '/stream-test',
+    description: 'Test TUI streaming without a model provider',
+    kind: 'immediate',
+    run: (ctx) => ctx.runCommand('/stream-test'),
+  },
   { id: 'run', name: '/run', description: 'Request a shell command run', kind: 'input' },
   { id: 'open', name: '/open', description: 'Open a project file', kind: 'input' },
   { id: 'exit', name: '/exit', description: 'Exit the TUI', kind: 'immediate', run: (ctx) => ctx.exitTui() },
@@ -216,12 +248,45 @@ const composerSubmitKeyBindings: Array<{ name: string; action: TextareaAction }>
   { name: 'linefeed', action: 'submit' },
 ];
 const APPROVAL_CHOICE_ORDER: ApprovalChoice[] = ['allow_once', 'allow_always', 'reject'];
+const DEFAULT_PERMISSION_MODE: PermissionMode = 'ask_first';
+const PERMISSION_MODE_OPTIONS: Array<{
+  mode: PermissionMode;
+  label: string;
+  description: string;
+  danger?: string;
+}> = [
+  {
+    mode: 'read_only',
+    label: 'Read Only',
+    description: 'Agent can read and analyze files, but must ask before edits and commands.',
+  },
+  {
+    mode: 'ask_first',
+    label: 'Ask First',
+    description: 'Agent can read automatically, but must ask before edits, patches, and shell commands.',
+  },
+  {
+    mode: 'auto',
+    label: 'Auto',
+    description:
+      'Agent can edit files inside the workspace automatically, but asks for risky commands, network access, or external paths.',
+  },
+  {
+    mode: 'full_access',
+    label: 'Full Access',
+    description: 'Agent can edit files and run commands with minimal prompts.',
+    danger: 'Dangerous: hard safety guards still apply, but prompts are reduced.',
+  },
+];
 const HIGH_LEVEL_EVENT_TYPES = new Set([
   'agent_status',
   'message_created',
   'model_call_started',
   'model_call_completed',
   'model_call_failed',
+  'stream_fallback',
+  'stream_interrupted',
+  'stream_error',
   'error',
   'done',
 ]);
@@ -253,6 +318,7 @@ export function App(props: AppProps) {
   const [approvalChoice, setApprovalChoice] = createSignal<ApprovalChoice>('allow_once');
   const [lastApprovalId, setLastApprovalId] = createSignal<string | null>(null);
   const [themePalette, setThemePalette] = createSignal<ThemePaletteState | null>(null);
+  const [permissionPalette, setPermissionPalette] = createSignal<PermissionPaletteState | null>(null);
   const [sessionPalette, setSessionPalette] = createSignal<SessionPaletteState | null>(null);
   const [recentModelKeys, setRecentModelKeys] = createSignal<string[]>(initialRecentModelKeys(props.initialState.modelChoices));
   const renderer = useRenderer();
@@ -339,7 +405,14 @@ export function App(props: AppProps) {
   }
 
   function approvalUiActive(): boolean {
-    return Boolean(activeApproval()) && !commandPalette() && !modelPalette() && !themePalette() && !sessionPalette();
+    return (
+      Boolean(activeApproval()) &&
+      !commandPalette() &&
+      !modelPalette() &&
+      !themePalette() &&
+      !permissionPalette() &&
+      !sessionPalette()
+    );
   }
 
   useKeyboard((event) => {
@@ -380,6 +453,12 @@ export function App(props: AppProps) {
         event.preventDefault();
         event.stopPropagation();
         setThemePalette(null);
+        return;
+      }
+      if (permissionPalette()) {
+        event.preventDefault();
+        event.stopPropagation();
+        setPermissionPalette(null);
         return;
       }
       if (slashAutocompleteVisible()) {
@@ -443,6 +522,27 @@ export function App(props: AppProps) {
       }
     }
 
+    if (permissionPalette()) {
+      if (name === 'up') {
+        event.preventDefault();
+        event.stopPropagation();
+        movePermissionSelection(-1);
+        return;
+      }
+      if (name === 'down') {
+        event.preventDefault();
+        event.stopPropagation();
+        movePermissionSelection(1);
+        return;
+      }
+      if (isEnterKey(name)) {
+        event.preventDefault();
+        event.stopPropagation();
+        void choosePermissionMode();
+        return;
+      }
+    }
+
     const sessionState = sessionPalette();
     if (sessionState) {
       if (name === 'up') {
@@ -493,7 +593,15 @@ export function App(props: AppProps) {
       }
     }
 
-    if (name === 'tab' && !activeApproval() && !modelPalette() && !commandPalette() && !themePalette() && !sessionPalette()) {
+    if (
+      name === 'tab' &&
+      !activeApproval() &&
+      !modelPalette() &&
+      !commandPalette() &&
+      !themePalette() &&
+      !permissionPalette() &&
+      !sessionPalette()
+    ) {
       event.preventDefault();
       event.stopPropagation();
       toggleComposerMode();
@@ -507,6 +615,7 @@ export function App(props: AppProps) {
   function openCommandPalette() {
     setModelPalette(null);
     setThemePalette(null);
+    setPermissionPalette(null);
     setSessionPalette(null);
     setCommandPalette({ selectedIndex: 0, query: '' });
   }
@@ -521,6 +630,10 @@ export function App(props: AppProps) {
       await openSessionPalette();
       return;
     }
+    if (command.action === 'permissions') {
+      openPermissionsModal();
+      return;
+    }
     setInput(command.insert ?? '');
   }
 
@@ -532,6 +645,7 @@ export function App(props: AppProps) {
   function slashCommandContext(): SlashCommandContext {
     return {
       openModelSelectModal,
+      openPermissionsModal,
       openSessionPalette: () => openSessionPalette(),
       openThemePalette,
       runCommand: runComposerCommand,
@@ -664,6 +778,7 @@ export function App(props: AppProps) {
     const current = state();
     setCommandPalette(null);
     setThemePalette(null);
+    setPermissionPalette(null);
     setSessionPalette(null);
     let choices = current.modelChoices;
     let error: string | undefined;
@@ -706,6 +821,7 @@ export function App(props: AppProps) {
   function openThemePalette() {
     setCommandPalette(null);
     setModelPalette(null);
+    setPermissionPalette(null);
     setSessionPalette(null);
     const selectedIndex = Math.max(
       tuiThemeList.findIndex((item) => item.name === themeName()),
@@ -714,12 +830,62 @@ export function App(props: AppProps) {
     setThemePalette({ selectedIndex });
   }
 
+  function openPermissionsModal() {
+    setCommandPalette(null);
+    setModelPalette(null);
+    setThemePalette(null);
+    setSessionPalette(null);
+    setInput('');
+    setComposerCursorOffset(0);
+    setPermissionPalette({
+      selectedIndex: permissionModeIndex(currentPermissionMode()),
+    });
+  }
+
+  function movePermissionSelection(delta: number) {
+    setPermissionPalette((current) =>
+      current ? { ...current, selectedIndex: moveIndex(current.selectedIndex, delta, PERMISSION_MODE_OPTIONS.length) } : current,
+    );
+  }
+
+  function currentPermissionMode(): PermissionMode {
+    return state().session.permissionMode ?? DEFAULT_PERMISSION_MODE;
+  }
+
+  function selectedPermissionMode(): PermissionMode | undefined {
+    const palette = permissionPalette();
+    return PERMISSION_MODE_OPTIONS[palette?.selectedIndex ?? 0]?.mode;
+  }
+
+  async function choosePermissionMode(mode = selectedPermissionMode()) {
+    if (!mode || busy()) return;
+    setBusy(true);
+    try {
+      const result = await state().api.setPermissionMode(state().session.id, mode);
+      setPermissionPalette(null);
+      setState((current) => ({
+        ...current,
+        session: result.session,
+        sessions: current.sessions.map((session) => (session.id === result.session.id ? result.session : session)),
+        activity: `Permissions set to ${permissionModeLabel(result.permissionMode)}`,
+        error: '',
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to update permissions.';
+      setPermissionPalette((current) => (current ? { ...current, error: message } : current));
+      setState((current) => ({ ...current, error: message }));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function openSessionPalette(initialQuery = '') {
     const current = state();
     const query = initialQuery.trim();
     setCommandPalette(null);
     setModelPalette(null);
     setThemePalette(null);
+    setPermissionPalette(null);
     setSessionPalette({
       sessions: current.sessions,
       selectedIndex: initialSessionSelectedIndex(current.sessions, query, current.session.id),
@@ -856,12 +1022,14 @@ export function App(props: AppProps) {
   async function approvePendingToolRequest(mode: 'once' | 'session_auto' = 'once') {
     const approval = state().approvals[0];
     if (!approval) throw new Error('No pending approval.');
+    setState((prev) => ({ ...prev, streamStatus: { mode: 'idle' }, error: '' }));
     await state().api.approve(approval.id, mode);
   }
 
   async function rejectPendingToolRequest() {
     const approval = state().approvals[0];
     if (!approval) throw new Error('No pending approval.');
+    setState((prev) => ({ ...prev, streamStatus: { mode: 'idle' }, error: '' }));
     await state().api.reject(approval.id);
   }
 
@@ -885,7 +1053,7 @@ export function App(props: AppProps) {
     }
     if (value === '/clear') {
       await current.api.runSessionCommand(current.session.id, '/clear');
-      setState((prev) => ({ ...prev, messages: [], activity: 'Context cleared' }));
+      setState((prev) => ({ ...prev, messages: [], streamStatus: { mode: 'idle' }, activity: 'Context cleared' }));
       return;
     }
     if (value.startsWith('/clear ')) {
@@ -893,7 +1061,7 @@ export function App(props: AppProps) {
     }
     if (value === '/compact') {
       await current.api.runSessionCommand(current.session.id, '/compact');
-      setState((prev) => ({ ...prev, messages: [], activity: 'Context compacted' }));
+      setState((prev) => ({ ...prev, messages: [], streamStatus: { mode: 'idle' }, activity: 'Context compacted' }));
       return;
     }
     if (value.startsWith('/compact ')) {
@@ -910,6 +1078,14 @@ export function App(props: AppProps) {
       setState((prev) => ({ ...prev, plan: { ...plan, plan: approved } }));
       return;
     }
+    if (value === '/stream-test') {
+      setState((prev) => ({ ...prev, streamStatus: { mode: 'idle' }, error: '' }));
+      await current.api.runSessionCommand(current.session.id, '/stream-test');
+      return;
+    }
+    if (value.startsWith('/stream-test ')) {
+      throw new Error('/stream-test does not accept arguments.');
+    }
     if (value.startsWith('/run ')) {
       await current.api.requestCommand(current.session.id, value.slice('/run '.length));
       return;
@@ -921,6 +1097,10 @@ export function App(props: AppProps) {
     }
     if (value === '/models' || value.startsWith('/models ')) {
       await openModelSelectModal();
+      return;
+    }
+    if (value === '/permissions' || value.startsWith('/permissions ')) {
+      openPermissionsModal();
       return;
     }
     if (value === '/themes' || value.startsWith('/themes ')) {
@@ -990,6 +1170,7 @@ export function App(props: AppProps) {
         plan,
         commandRuns,
         events: [],
+        streamStatus: { mode: 'idle' },
         activity: `Session: ${session.title}`,
         error: '',
       }));
@@ -1029,7 +1210,9 @@ export function App(props: AppProps) {
           createdAt: new Date().toISOString(),
         },
       ],
+      streamStatus: { mode: 'idle' },
       activity: 'Thinking',
+      error: '',
     }));
     await current.api.runAgent(current.session.id, value);
   }
@@ -1126,8 +1309,15 @@ export function App(props: AppProps) {
               mode: composerMode(),
               accentColor: composerAccentColor(),
               modelInfo: activeModelInfo(),
+              permissionMode: currentPermissionMode(),
               value: input(),
-              focused: !activeApproval() && !modelPalette() && !commandPalette() && !themePalette() && !sessionPalette(),
+              focused:
+                !activeApproval() &&
+                !modelPalette() &&
+                !commandPalette() &&
+                !themePalette() &&
+                !permissionPalette() &&
+                !sessionPalette(),
               onInput: setInput,
               onCursorOffsetChange: setComposerCursorOffset,
               onSubmit: () => {
@@ -1217,6 +1407,25 @@ export function App(props: AppProps) {
                 }
                 onChoose={(name) => {
                   void chooseTheme(name);
+                }}
+              />
+            </ModalShell>
+          )}
+        </Show>
+
+        <Show when={permissionPalette()}>
+          {(palette) => (
+            <ModalShell title="Select permissions" onClose={() => setPermissionPalette(null)}>
+              <PermissionsPanel
+                palette={palette()}
+                currentMode={currentPermissionMode()}
+                busy={busy()}
+                onClose={() => setPermissionPalette(null)}
+                onSelectedIndex={(selectedIndex) =>
+                  setPermissionPalette((current) => (current ? { ...current, selectedIndex, error: undefined } : current))
+                }
+                onChoose={(mode) => {
+                  void choosePermissionMode(mode);
                 }}
               />
             </ModalShell>
@@ -1567,10 +1776,84 @@ function ThemesPanel(props: {
   );
 }
 
+function PermissionsPanel(props: {
+  palette: PermissionPaletteState;
+  currentMode: PermissionMode;
+  busy: boolean;
+  onClose: () => void;
+  onSelectedIndex: (index: number) => void;
+  onChoose: (mode: PermissionMode) => void;
+}) {
+  const theme = useTheme();
+  return (
+    <box
+      style={{ flexGrow: 1, minHeight: 0, flexDirection: 'column', backgroundColor: theme().input }}
+      onKeyDown={(event) => {
+        if (event.name === 'escape') {
+          props.onClose();
+        }
+      }}
+    >
+      <text fg={props.busy ? theme().yellow : theme().muted}>
+        {props.busy ? 'Updating permissions...' : 'Enter selects. Esc closes.'}
+      </text>
+      <Show when={props.palette.error}>
+        <text fg={theme().red}>{props.palette.error}</text>
+      </Show>
+      <box style={{ flexDirection: 'column', flexGrow: 1, minHeight: 0, marginTop: 1 }}>
+        <For each={PERMISSION_MODE_OPTIONS}>
+          {(option, index) => {
+            const selected = createMemo(() => index() === props.palette.selectedIndex);
+            const current = createMemo(() => option.mode === props.currentMode);
+            return (
+              <box
+                style={{
+                  width: '100%',
+                  minHeight: option.danger ? 4 : 3,
+                  flexDirection: 'column',
+                  paddingX: 1,
+                  marginBottom: 1,
+                  backgroundColor: selected() ? theme().selection : theme().input,
+                }}
+                onMouseDown={() => {
+                  props.onSelectedIndex(index());
+                  props.onChoose(option.mode);
+                }}
+              >
+                <box style={{ width: '100%', height: 1, minHeight: 1, flexDirection: 'row' }}>
+                  <text fg={current() ? theme().green : theme().muted} style={{ width: 2, flexShrink: 0 }}>
+                    {current() ? '*' : ' '}
+                  </text>
+                  <text fg={selected() ? theme().text : theme().text}>{option.label}</text>
+                  <Show when={option.danger}>
+                    <text fg={theme().red}> dangerous</text>
+                  </Show>
+                </box>
+                <text fg={selected() ? theme().text : theme().muted} wrapMode="word" style={{ width: '100%', minWidth: 0 }}>
+                  {option.description}
+                </text>
+                <Show when={option.danger}>
+                  {(danger) => (
+                    <text fg={theme().red} wrapMode="word" style={{ width: '100%', minWidth: 0 }}>
+                      {danger()}
+                    </text>
+                  )}
+                </Show>
+              </box>
+            );
+          }}
+        </For>
+      </box>
+      <PaletteFooter items={[['Enter', 'select'], ['Esc', 'close'], ['Up/Down', 'navigate']]} />
+    </box>
+  );
+}
+
 function Composer(props: {
   mode: ComposerMode;
   accentColor: string;
   modelInfo: ActiveModelInfo;
+  permissionMode: PermissionMode;
   value: string;
   focused: boolean;
   onInput: (value: string) => void;
@@ -1631,7 +1914,10 @@ function Composer(props: {
         />
         <box style={{ width: '100%', height: 1, flexShrink: 0, flexDirection: 'row' }}>
           <text fg={props.accentColor}>{composerModeLabel(props.mode)}</text>
-          <text fg={theme().muted}> - {props.modelInfo.modelName} - {props.modelInfo.providerDisplay}</text>
+          <text fg={theme().muted} truncate style={{ flexGrow: 1, minWidth: 0 }}>
+            {' '}
+            - {props.modelInfo.modelName} - {props.modelInfo.providerDisplay} - {permissionModeLabel(props.permissionMode)}
+          </text>
         </box>
       </box>
     </box>
@@ -1771,6 +2057,7 @@ function ChatPanel(props: {
     mode: ComposerMode;
     accentColor: string;
     modelInfo: ActiveModelInfo;
+    permissionMode: PermissionMode;
     value: string;
     focused: boolean;
     onInput: (value: string) => void;
@@ -1814,9 +2101,9 @@ function ChatPanel(props: {
         <Show when={props.error}>
           <text fg={theme().red}>{props.error}</text>
         </Show>
-        <For each={props.messages}>
+        <Index each={props.messages}>
           {(message) => <MessageBlock message={message} />}
-        </For>
+        </Index>
       </scrollbox>
       <Show when={!approvalPending() && props.slashAutocomplete.visible}>
         <SlashCommandAutocomplete
@@ -1908,10 +2195,12 @@ function SlashCommandAutocomplete(props: {
   );
 }
 
-function MessageBlock(props: { message: Message }) {
+function MessageBlock(props: { message: Accessor<Message> }) {
   const theme = useTheme();
-  const isUserMessage = createMemo(() => props.message.role === 'user');
-  const accentColor = createMemo(() => (isUserMessage() ? theme().blue : roleColor(props.message.role, theme())));
+  const role = createMemo(() => props.message().role);
+  const isUserMessage = createMemo(() => role() === 'user');
+  const accentColor = createMemo(() => (isUserMessage() ? theme().blue : roleColor(role(), theme())));
+  const streamingLabel = createMemo(() => (props.message().streaming ? ' - streaming' : ''));
   return (
     <box
       style={{
@@ -1929,8 +2218,8 @@ function MessageBlock(props: { message: Message }) {
       <box style={{ width: 1, flexShrink: 0, alignSelf: 'stretch', backgroundColor: accentColor() }} />
       <box style={{ width: '100%', flexGrow: 1, minWidth: 0, paddingX: 1, flexDirection: 'column' }}>
         <text fg={accentColor()} style={{ width: '100%', minWidth: 0, flexShrink: 0 }}>
-          {props.message.role}
-          {props.message.streaming ? ' - streaming' : ''}
+          {role()}
+          {streamingLabel()}
         </text>
         <MessageBody message={props.message} />
       </box>
@@ -1938,31 +2227,85 @@ function MessageBlock(props: { message: Message }) {
   );
 }
 
-function MessageBody(props: { message: Message }) {
+function MessageBody(props: { message: Accessor<Message> }) {
   const theme = useTheme();
+  const content = createThrottledMessageContent(props.message);
+  const markdownMessage = createMemo(() => {
+    const role = props.message().role;
+    return role === 'assistant' || role === 'system';
+  });
   const messageMarkdownStyle = createMemo(() => createMessageMarkdownStyle(theme()));
   const markdownTableOptions = createMemo(() => createMarkdownTableOptions(theme()));
-  if (props.message.role === 'assistant' || props.message.role === 'system') {
-    return (
+  return (
+    <Show
+      when={markdownMessage()}
+      fallback={
+        <text fg={theme().text} wrapMode="word" style={{ width: '100%', minWidth: 0, flexShrink: 0 }}>
+          {content()}
+        </text>
+      }
+    >
       <markdown
-        content={props.message.content || ' '}
+        content={content()}
         syntaxStyle={messageMarkdownStyle()}
         fg={theme().text}
         conceal={true}
         concealCode={false}
-        streaming={props.message.streaming ?? false}
+        streaming={props.message().streaming ?? false}
         internalBlockMode="top-level"
         tableOptions={markdownTableOptions()}
         style={{ width: '100%', minWidth: 0, flexShrink: 0 }}
       />
-    );
-  }
-
-  return (
-    <text fg={theme().text} wrapMode="word" style={{ width: '100%', minWidth: 0, flexShrink: 0 }}>
-      {props.message.content || ' '}
-    </text>
+    </Show>
   );
+}
+
+function createThrottledMessageContent(message: Accessor<Message>): Accessor<string> {
+  const initialContent = normalizeMessageContent(message());
+  const [content, setContent] = createSignal(initialContent);
+  let latestContent = initialContent;
+  let renderedContent = initialContent;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearTimer = () => {
+    if (!timer) return;
+    clearTimeout(timer);
+    timer = null;
+  };
+
+  const publish = (value: string) => {
+    renderedContent = value;
+    setContent(value);
+  };
+
+  const flush = () => {
+    timer = null;
+    if (latestContent !== renderedContent) {
+      publish(latestContent);
+    }
+  };
+
+  createEffect(() => {
+    const currentMessage = message();
+    const nextContent = normalizeMessageContent(currentMessage);
+    latestContent = nextContent;
+
+    if (!currentMessage.streaming) {
+      clearTimer();
+      if (nextContent !== renderedContent) publish(nextContent);
+      return;
+    }
+
+    if (timer || nextContent === renderedContent) return;
+    timer = setTimeout(flush, STREAMING_MARKDOWN_RENDER_MS);
+  });
+
+  onCleanup(clearTimer);
+  return content;
+}
+
+function normalizeMessageContent(message: Message): string {
+  return message.content || ' ';
 }
 
 function RightPanel(props: {
@@ -2053,7 +2396,9 @@ function StatusPanel(props: { state: WorkspaceState; mode: ComposerMode; busy: b
         <StatusRow label="Name" value={props.state.session.title} />
         <StatusRow label="ID" value={shortId(props.state.session.id)} />
         <StatusRow label="Mode" value={composerModeLabel(props.mode)} />
+        <StatusRow label="Perms" value={permissionModeLabel(props.state.session.permissionMode)} />
         <StatusRow label="Task" value={taskStatus()} valueColor={statusColor(taskStatus(), theme())} />
+        <StatusRow label="Stream" value={formatStreamStatus(props.state)} valueColor={streamStatusColor(props.state, theme())} />
       </StatusSection>
 
       <StatusSection title="Model">
@@ -2160,7 +2505,8 @@ function isHighLevelEvent(event: StatusEvent): boolean {
 
 function isErrorEvent(event: StatusEvent | undefined): boolean {
   if (!event) return false;
-  if (event.type === 'error' || event.type === 'model_call_failed') return true;
+  if (event.type === 'error' || event.type === 'model_call_failed' || event.type === 'stream_error') return true;
+  if (event.type === 'stream_interrupted') return true;
   return event.type === 'agent_status' && ERROR_AGENT_STATUSES.has(eventString(event, 'status') ?? '');
 }
 
@@ -2174,6 +2520,7 @@ function statusColor(status: TaskStatus, theme: TuiTheme): string {
 function eventColor(event: StatusEvent, theme: TuiTheme): string {
   if (isErrorEvent(event)) return theme.red;
   if (event.type === 'done' || event.type === 'model_call_completed') return theme.green;
+  if (event.type === 'stream_fallback') return theme.yellow;
   if (event.type === 'model_call_started') return theme.yellow;
   const status = eventString(event, 'status');
   if (status && COMPLETED_AGENT_STATUSES.has(status)) return theme.green;
@@ -2196,6 +2543,14 @@ function formatEvent(event: StatusEvent): string {
       event.type === 'model_call_failed' ? eventString(event, 'message') : undefined,
     );
   }
+  if (event.type === 'stream_fallback' || event.type === 'stream_interrupted' || event.type === 'stream_error') {
+    return eventSummary(
+      event,
+      eventString(event, 'reason'),
+      eventString(event, 'model'),
+      eventString(event, 'message'),
+    );
+  }
   if (event.type === 'error') {
     return eventSummary(event, eventString(event, 'message'));
   }
@@ -2214,6 +2569,21 @@ function eventString(event: StatusEvent, key: string): string | undefined {
 
 function shortId(value: string): string {
   return value.length > 8 ? value.slice(0, 8) : value || '-';
+}
+
+function formatStreamStatus(state: WorkspaceState): string {
+  const status = state.streamStatus;
+  if (status.mode === 'idle') return '-';
+  if (status.mode === 'streaming') return 'streaming';
+  const detail = status.reason ?? status.message ?? status.model;
+  return detail ? `${status.mode}: ${detail}` : status.mode;
+}
+
+function streamStatusColor(state: WorkspaceState, theme: TuiTheme): string {
+  if (state.streamStatus.mode === 'fallback') return theme.yellow;
+  if (state.streamStatus.mode === 'interrupted' || state.streamStatus.mode === 'error') return theme.red;
+  if (state.streamStatus.mode === 'streaming') return theme.green;
+  return theme.muted;
 }
 
 function parseNewSessionTitle(value: string): string | undefined {
@@ -2248,6 +2618,17 @@ function composerModeAccent(mode: ComposerMode, theme: TuiTheme): string {
 
 function composerModeLabel(mode: ComposerMode): string {
   return mode === 'build' ? 'Build' : 'Plan';
+}
+
+function permissionModeLabel(mode: PermissionMode | undefined): string {
+  return PERMISSION_MODE_OPTIONS.find((option) => option.mode === mode)?.label ?? permissionModeLabel(DEFAULT_PERMISSION_MODE);
+}
+
+function permissionModeIndex(mode: PermissionMode | undefined): number {
+  return Math.max(
+    PERMISSION_MODE_OPTIONS.findIndex((option) => option.mode === mode),
+    0,
+  );
 }
 
 function roleColor(role: Message['role'], theme: TuiTheme): string {

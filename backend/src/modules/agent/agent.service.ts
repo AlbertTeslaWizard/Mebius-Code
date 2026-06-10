@@ -290,10 +290,23 @@ export class AgentService {
             },
             {
               onStreamFallback: ({ reason }) => {
+                this.events.publish(session.id, 'stream_fallback', {
+                  reason,
+                  provider: config.providerId ?? config.displayName,
+                  model: config.modelName,
+                });
                 this.events.publish(session.id, 'agent_status', {
                   status: 'responding',
                   activity: 'stream_fallback',
                   reason,
+                });
+              },
+              onStreamInterrupted: ({ reason, message }) => {
+                this.events.publish(session.id, 'stream_interrupted', {
+                  reason,
+                  message,
+                  provider: config.providerId ?? config.displayName,
+                  model: config.modelName,
                 });
               },
             },
@@ -339,15 +352,13 @@ export class AgentService {
             sessionId: session.id,
             name: toolCall.function.name,
             args: parsedArgs,
-            resumeContext: this.requiresApproval(toolCall.function.name)
-              ? {
-                  assistantContent: response.content ?? null,
-                  assistantReasoningContent: response.reasoning_content ?? null,
-                  assistantToolCalls: toolCalls,
-                  priorToolMessages: [...completedToolMessages],
-                  approvedToolCallId: toolCall.id,
-                }
-              : undefined,
+            resumeContext: {
+              assistantContent: response.content ?? null,
+              assistantReasoningContent: response.reasoning_content ?? null,
+              assistantToolCalls: toolCalls,
+              priorToolMessages: [...completedToolMessages],
+              approvedToolCallId: toolCall.id,
+            },
           });
         } catch (error) {
           const failedToolMessage =
@@ -422,10 +433,6 @@ export class AgentService {
   private getProjectId(session: Message['session']): string | undefined {
     const project = (session as Message['session'] & { project?: { id?: string } }).project;
     return project?.id;
-  }
-
-  private requiresApproval(toolName: string): boolean {
-    return toolName === 'create_patch' || toolName === 'run_command';
   }
 
   private async withModelDiagnostics<T>(

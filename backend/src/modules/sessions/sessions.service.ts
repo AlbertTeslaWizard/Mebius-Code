@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { InjectRepository } from '@nestjs/typeorm';
 import { FindOptionsWhere, Repository } from 'typeorm';
 import { MessageRole } from '../../common/enums/message-role.enum';
+import { DEFAULT_PERMISSION_MODE, PermissionMode } from '../../common/enums/permission-mode.enum';
 import { SessionStatus } from '../../common/enums/session-status.enum';
 import { ApprovalStatus, ToolCallStatus } from '../../common/enums/tool-status.enum';
 import { EventsService } from '../events/events.service';
@@ -18,11 +19,15 @@ import { SlashCommandDto } from './dto/slash-command.dto';
 import { Message } from './message.entity';
 import { Session } from './session.entity';
 
+const STREAM_TEST_TEXT = 'This is a Mebius Code TUI streaming renderer test.';
+const STREAM_TEST_TOKEN_DELAY_MS = 75;
+
 export interface SessionView {
   id: string;
   projectId: string;
   title: string;
   status: SessionStatus;
+  permissionMode: PermissionMode;
   activeModelConfig: SanitizedModelConfig | null;
   agentActivity?: {
     status: 'using_tools' | 'waiting_for_approval';
@@ -218,6 +223,30 @@ export class SessionsService {
       return this.modelsCommand(session, ownerId, dto.args, parts);
     }
 
+    if (name === '/permissions') {
+      return this.permissionsCommand(session, dto.args, parts);
+    }
+
+    if (name === '/stream-test') {
+      void this.runStreamTest(session).catch((error) => {
+        const message = error instanceof Error ? error.message : 'Stream test failed.';
+        this.events.publish(session.id, 'stream_error', {
+          reason: 'stream_test_failed',
+          message,
+        });
+        this.events.publish(session.id, 'agent_status', {
+          status: 'failed',
+          message,
+        });
+        this.events.complete(session.id);
+      });
+      return {
+        type: 'stream_test.started',
+        delayMs: STREAM_TEST_TOKEN_DELAY_MS,
+        text: STREAM_TEST_TEXT,
+      };
+    }
+
     if (name === '/connect') {
       return this.connectModel(session, parts.join(' '), dto.args);
     }
@@ -264,6 +293,7 @@ export class SessionsService {
       projectId: session.project.id,
       title: session.title,
       status: session.status,
+      permissionMode: session.permissionMode ?? DEFAULT_PERMISSION_MODE,
       activeModelConfig: session.activeModelConfig
         ? this.modelConfigs.sanitize(session.activeModelConfig)
         : null,
@@ -329,6 +359,36 @@ export class SessionsService {
     return rawPaths
       .filter((path): path is string => typeof path === 'string' && path.trim().length > 0)
       .map((path) => path.trim().replaceAll('\\', '/'));
+  }
+
+  private async permissionsCommand(
+    session: Session,
+    args: Record<string, unknown> | undefined,
+    parts: string[],
+  ): Promise<unknown> {
+    const requestedMode = typeof args?.mode === 'string' ? args.mode : parts[0];
+    if (!requestedMode) {
+      return {
+        type: 'permissions.current',
+        permissionMode: session.permissionMode ?? DEFAULT_PERMISSION_MODE,
+        session: this.toView(session),
+      };
+    }
+    if (!isPermissionMode(requestedMode)) {
+      throw new BadRequestException(`Unsupported permission mode: ${requestedMode}`);
+    }
+
+    session.permissionMode = requestedMode;
+    const saved = await this.sessions.save(session);
+    this.events.publish(session.id, 'agent_status', {
+      status: 'permissions_updated',
+      permissionMode: requestedMode,
+    });
+    return {
+      type: 'permissions.updated',
+      permissionMode: requestedMode,
+      session: this.toView(saved),
+    };
   }
 
   private async connectModel(
@@ -448,4 +508,37 @@ export class SessionsService {
       session: this.toView({ ...saved, activeModelConfig: modelConfig } as unknown as Session),
     };
   }
+
+  private async runStreamTest(session: Session): Promise<void> {
+    this.events.publish(session.id, 'agent_status', {
+      status: 'responding',
+      activity: 'stream_test',
+    });
+
+    let content = '';
+    for (const delta of STREAM_TEST_TEXT) {
+      content += delta;
+      this.events.publish(session.id, 'token', { delta, content });
+      await sleep(STREAM_TEST_TOKEN_DELAY_MS);
+    }
+
+    const message = await this.addMessage(session, MessageRole.Assistant, STREAM_TEST_TEXT, {
+      kind: 'stream_test',
+    });
+    this.events.publish(session.id, 'message_created', {
+      id: message.id,
+      role: message.role,
+      content: message.content,
+    });
+    this.events.publish(session.id, 'agent_status', { status: 'completed' });
+    this.events.complete(session.id);
+  }
+}
+
+function isPermissionMode(value: string): value is PermissionMode {
+  return Object.values(PermissionMode).includes(value as PermissionMode);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

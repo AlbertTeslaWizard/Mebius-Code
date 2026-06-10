@@ -1,5 +1,6 @@
 import { Repository } from 'typeorm';
 import { ApprovalStatus, ToolCallStatus } from '../../common/enums/tool-status.enum';
+import { PermissionMode } from '../../common/enums/permission-mode.enum';
 import { SessionStatus } from '../../common/enums/session-status.enum';
 import { ModelConfigsService } from '../model-configs/model-configs.service';
 import { ProjectsService } from '../projects/projects.service';
@@ -139,6 +140,7 @@ describe('SessionsService', () => {
   } as unknown as jest.Mocked<ModelConfigsService>;
   const events = {
     publish: jest.fn(),
+    complete: jest.fn(),
   };
   const service = new SessionsService(
     sessions,
@@ -152,6 +154,7 @@ describe('SessionsService', () => {
   );
 
   beforeEach(() => {
+    jest.useRealTimers();
     jest.clearAllMocks();
     projects.findOwned.mockResolvedValue({ id: 'project-1' } as never);
     sessions.findAndCount.mockResolvedValue([[sessionFixture()], 1]);
@@ -162,6 +165,53 @@ describe('SessionsService', () => {
       { role: 'user', content: 'Build the feature' },
       { role: 'assistant', content: 'I will inspect the code first.' },
     ] as Message[]);
+  });
+
+  it('starts a fake stream test with timed token events and finalizes the assistant message', async () => {
+    jest.useFakeTimers();
+
+    const result = await service.handleCommand('owner-1', 'session-1', {
+      command: '/stream-test',
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        type: 'stream_test.started',
+        delayMs: expect.any(Number),
+      }),
+    );
+    expect(events.publish).toHaveBeenCalledWith('session-1', 'agent_status', {
+      status: 'responding',
+      activity: 'stream_test',
+    });
+    expect(events.publish).toHaveBeenCalledWith(
+      'session-1',
+      'token',
+      expect.objectContaining({
+        delta: 'T',
+        content: 'T',
+      }),
+    );
+
+    await jest.advanceTimersByTimeAsync(10_000);
+
+    expect(messages.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'This is a Mebius Code TUI streaming renderer test.',
+        metadata: { kind: 'stream_test' },
+      }),
+    );
+    expect(events.publish).toHaveBeenCalledWith(
+      'session-1',
+      'message_created',
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'This is a Mebius Code TUI streaming renderer test.',
+      }),
+    );
+    expect(events.publish).toHaveBeenCalledWith('session-1', 'agent_status', { status: 'completed' });
+    expect(events.complete).toHaveBeenCalledWith('session-1');
   });
 
   it('lists sessions for an owned project with pagination and status filters', async () => {
@@ -373,6 +423,30 @@ describe('SessionsService', () => {
     expect((result as { modelConfig?: unknown }).modelConfig).not.toHaveProperty('apiKey');
   });
 
+  it('updates the current session permission mode with /permissions', async () => {
+    const result = await service.handleCommand('owner-1', 'session-1', {
+      command: '/permissions',
+      args: { mode: PermissionMode.Auto },
+    });
+
+    expect(sessions.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        permissionMode: PermissionMode.Auto,
+      }),
+    );
+    expect(events.publish).toHaveBeenCalledWith('session-1', 'agent_status', {
+      status: 'permissions_updated',
+      permissionMode: PermissionMode.Auto,
+    });
+    expect(result).toEqual(
+      expect.objectContaining({
+        type: 'permissions.updated',
+        permissionMode: PermissionMode.Auto,
+        session: expect.objectContaining({ permissionMode: PermissionMode.Auto }),
+      }),
+    );
+  });
+
   it('clears session messages and summaries with /clear', async () => {
     const result = await service.handleCommand('owner-1', 'session-1', {
       command: '/clear',
@@ -443,6 +517,7 @@ function sessionFixture(): Session {
     project: { id: 'project-1' },
     title: 'Feature work',
     status: SessionStatus.Active,
+    permissionMode: PermissionMode.AskFirst,
     activeModelConfig: {
       id: 'model-1',
       displayName: 'OpenAI compatible',

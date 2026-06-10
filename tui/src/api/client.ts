@@ -7,6 +7,8 @@ import type {
   Message,
   ModelChoice,
   ModelsCommandResult,
+  PermissionMode,
+  PermissionsCommandResult,
   PlanBundle,
   Project,
   ProjectFile,
@@ -84,6 +86,13 @@ export class ApiClient {
     return this.request<ModelsCommandResult>(`/sessions/${sessionId}/commands`, {
       method: 'POST',
       body: JSON.stringify({ command: '/models', args: input }),
+    });
+  }
+
+  async setPermissionMode(sessionId: string, mode: PermissionMode): Promise<PermissionsCommandResult> {
+    return this.request<PermissionsCommandResult>(`/sessions/${sessionId}/commands`, {
+      method: 'POST',
+      body: JSON.stringify({ command: '/permissions', args: { mode } }),
     });
   }
 
