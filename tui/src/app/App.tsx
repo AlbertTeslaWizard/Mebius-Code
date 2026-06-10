@@ -1,11 +1,12 @@
 /** @jsxImportSource @opentui/solid */
-import { SyntaxStyle, type TextareaAction, type TextareaRenderable } from '@opentui/core';
+import { SyntaxStyle, type KeyEvent, type TextareaAction, type TextareaRenderable } from '@opentui/core';
 import { useKeyboard, useRenderer, useTerminalDimensions } from '@opentui/solid';
 import { For, Show, createContext, createEffect, createMemo, createSignal, onCleanup, onMount, useContext } from 'solid-js';
 import type { Accessor, JSX } from 'solid-js';
 import { attachEventStream, refreshReviewData, type WorkspaceState } from '../bootstrap';
 import { saveConfig } from '../config';
 import type { Approval, ApprovalPreview, Message, ModelChoice, ModelsCommandResult, Session, TuiThemeName } from '../types';
+import { ApprovalInlinePanel, type ApprovalChoice } from './ApprovalInlinePanel';
 import { getTuiTheme, resolveTuiThemeName, tuiThemeList, type TuiTheme } from './theme';
 
 const ThemeContext = createContext<Accessor<TuiTheme>>();
@@ -214,6 +215,7 @@ const composerSubmitKeyBindings: Array<{ name: string; action: TextareaAction }>
   { name: 'kpenter', action: 'submit' },
   { name: 'linefeed', action: 'submit' },
 ];
+const APPROVAL_CHOICE_ORDER: ApprovalChoice[] = ['allow_once', 'allow_always', 'reject'];
 const HIGH_LEVEL_EVENT_TYPES = new Set([
   'agent_status',
   'message_created',
@@ -248,6 +250,8 @@ export function App(props: AppProps) {
   const [slashSelectedIndex, setSlashSelectedIndex] = createSignal(0);
   const [dismissedSlashQuery, setDismissedSlashQuery] = createSignal<string | null>(null);
   const [lastSlashQuery, setLastSlashQuery] = createSignal<string | null>(null);
+  const [approvalChoice, setApprovalChoice] = createSignal<ApprovalChoice>('allow_once');
+  const [lastApprovalId, setLastApprovalId] = createSignal<string | null>(null);
   const [themePalette, setThemePalette] = createSignal<ThemePaletteState | null>(null);
   const [sessionPalette, setSessionPalette] = createSignal<SessionPaletteState | null>(null);
   const [recentModelKeys, setRecentModelKeys] = createSignal<string[]>(initialRecentModelKeys(props.initialState.modelChoices));
@@ -279,7 +283,14 @@ export function App(props: AppProps) {
   });
   const slashAutocompleteVisible = createMemo(() => {
     const query = slashQuery();
-    return query !== null && dismissedSlashQuery() !== query;
+    return !activeApproval() && query !== null && dismissedSlashQuery() !== query;
+  });
+
+  createEffect(() => {
+    const nextApprovalId = activeApproval()?.id ?? null;
+    if (nextApprovalId === lastApprovalId()) return;
+    setLastApprovalId(nextApprovalId);
+    setApprovalChoice('allow_once');
   });
 
   createEffect(() => {
@@ -327,12 +338,22 @@ export function App(props: AppProps) {
     eventStreamAbort = null;
   }
 
+  function approvalUiActive(): boolean {
+    return Boolean(activeApproval()) && !commandPalette() && !modelPalette() && !themePalette() && !sessionPalette();
+  }
+
   useKeyboard((event) => {
     const name = event.name.toLowerCase();
     if (event.ctrl && name === 'p') {
       event.preventDefault();
       event.stopPropagation();
       openCommandPalette();
+      return;
+    }
+
+    if (approvalUiActive() && handleApprovalKeyDown(event)) {
+      event.preventDefault();
+      event.stopPropagation();
       return;
     }
 
@@ -472,7 +493,7 @@ export function App(props: AppProps) {
       }
     }
 
-    if (name === 'tab' && !modelPalette() && !commandPalette() && !themePalette() && !sessionPalette()) {
+    if (name === 'tab' && !activeApproval() && !modelPalette() && !commandPalette() && !themePalette() && !sessionPalette()) {
       event.preventDefault();
       event.stopPropagation();
       toggleComposerMode();
@@ -532,6 +553,90 @@ export function App(props: AppProps) {
     setInput('');
     setComposerCursorOffset(0);
     void command.run?.(slashCommandContext());
+  }
+
+  function handleApprovalKeyDown(event: KeyEvent): boolean {
+    const name = event.name.toLowerCase();
+    if (name === 'left' || name === 'arrowleft') {
+      moveApprovalChoice(-1);
+      return true;
+    }
+    if (name === 'right' || name === 'arrowright') {
+      moveApprovalChoice(1);
+      return true;
+    }
+    if (isEnterKey(name)) {
+      void confirmSelectedApprovalChoice();
+      return true;
+    }
+    if (name === 'a' && (event.shift || event.ctrl)) {
+      void allowAlwaysPendingRequest();
+      return true;
+    }
+    if (name === 'a') {
+      void allowOncePendingRequest();
+      return true;
+    }
+    if (name === 'r') {
+      void rejectPendingRequest();
+      return true;
+    }
+    if (name === 'escape') {
+      return true;
+    }
+    return false;
+  }
+
+  function moveApprovalChoice(delta: number) {
+    setApprovalChoice((current) => {
+      const currentIndex = APPROVAL_CHOICE_ORDER.indexOf(current);
+      const nextIndex = moveIndex(currentIndex >= 0 ? currentIndex : 0, delta, APPROVAL_CHOICE_ORDER.length);
+      return APPROVAL_CHOICE_ORDER[nextIndex];
+    });
+  }
+
+  async function confirmSelectedApprovalChoice() {
+    const choice = approvalChoice();
+    if (choice === 'allow_once') {
+      await allowOncePendingRequest();
+      return;
+    }
+    if (choice === 'allow_always') {
+      await allowAlwaysPendingRequest();
+      return;
+    }
+    await rejectPendingRequest();
+  }
+
+  async function allowOncePendingRequest() {
+    await runInlineApprovalAction(() => approvePendingToolRequest('once'));
+  }
+
+  async function allowAlwaysPendingRequest() {
+    await runInlineApprovalAction(() => approvePendingToolRequest('session_auto'));
+  }
+
+  async function rejectPendingRequest() {
+    await runInlineApprovalAction(() => rejectPendingToolRequest());
+  }
+
+  async function runInlineApprovalAction(action: () => Promise<void>) {
+    if (busy()) return;
+    setBusy(true);
+    try {
+      await action();
+      const updates = await refreshReviewData(state());
+      setState((current) => ({ ...current, ...updates }));
+    } catch (error) {
+      const updates = await refreshReviewData(state()).catch(() => ({}));
+      setState((current) => ({
+        ...current,
+        ...updates,
+        error: error instanceof Error ? error.message : 'Operation failed.',
+      }));
+    } finally {
+      setBusy(false);
+    }
   }
 
   function moveCommandSelection(delta: number) {
@@ -724,8 +829,10 @@ export function App(props: AppProps) {
       const updates = await refreshReviewData(state());
       setState((current) => ({ ...current, ...updates }));
     } catch (error) {
+      const updates = await refreshReviewData(state()).catch(() => ({}));
       setState((current) => ({
         ...current,
+        ...updates,
         error: error instanceof Error ? error.message : 'Operation failed.',
       }));
     } finally {
@@ -746,20 +853,28 @@ export function App(props: AppProps) {
     await runAgentPrompt(value);
   }
 
+  async function approvePendingToolRequest(mode: 'once' | 'session_auto' = 'once') {
+    const approval = state().approvals[0];
+    if (!approval) throw new Error('No pending approval.');
+    await state().api.approve(approval.id, mode);
+  }
+
+  async function rejectPendingToolRequest() {
+    const approval = state().approvals[0];
+    if (!approval) throw new Error('No pending approval.');
+    await state().api.reject(approval.id);
+  }
+
   async function handleCommand(value: string) {
-    const current = state();
     if (value === '/approve') {
-      const approval = current.approvals[0];
-      if (!approval) throw new Error('No pending approval.');
-      await current.api.approve(approval.id, 'once');
+      await approvePendingToolRequest('once');
       return;
     }
     if (value === '/reject') {
-      const approval = current.approvals[0];
-      if (!approval) throw new Error('No pending approval.');
-      await current.api.reject(approval.id);
+      await rejectPendingToolRequest();
       return;
     }
+    const current = state();
     if (value === '/new' || value.startsWith('/new ')) {
       await createNewSessionFromCommand(value);
       return;
@@ -1012,13 +1127,32 @@ export function App(props: AppProps) {
               accentColor: composerAccentColor(),
               modelInfo: activeModelInfo(),
               value: input(),
-              focused: !modelPalette() && !commandPalette() && !themePalette() && !sessionPalette(),
+              focused: !activeApproval() && !modelPalette() && !commandPalette() && !themePalette() && !sessionPalette(),
               onInput: setInput,
               onCursorOffsetChange: setComposerCursorOffset,
               onSubmit: () => {
                 void submit();
               },
             }}
+            approvalInline={
+              activeApproval()
+                ? {
+                    approval: activeApproval()!,
+                    selectedChoice: approvalChoice(),
+                    busy: busy(),
+                    onSelectChoice: setApprovalChoice,
+                    onAllowOnce: () => {
+                      void allowOncePendingRequest();
+                    },
+                    onAllowAlways: () => {
+                      void allowAlwaysPendingRequest();
+                    },
+                    onReject: () => {
+                      void rejectPendingRequest();
+                    },
+                  }
+                : undefined
+            }
           />
           <RightPanel title={rightTitle()} approval={activeApproval()} state={state()} mode={composerMode()} busy={busy()} />
         </box>
@@ -1643,8 +1777,18 @@ function ChatPanel(props: {
     onCursorOffsetChange: (offset: number) => void;
     onSubmit: () => void;
   };
+  approvalInline?: {
+    approval: Approval;
+    selectedChoice: ApprovalChoice;
+    busy: boolean;
+    onSelectChoice: (choice: ApprovalChoice) => void;
+    onAllowOnce: () => void;
+    onAllowAlways: () => void;
+    onReject: () => void;
+  };
 }) {
   const theme = useTheme();
+  const approvalPending = createMemo(() => Boolean(props.approvalInline));
   return (
     <box
       border
@@ -1674,14 +1818,30 @@ function ChatPanel(props: {
           {(message) => <MessageBlock message={message} />}
         </For>
       </scrollbox>
-      <Show when={props.slashAutocomplete.visible}>
+      <Show when={!approvalPending() && props.slashAutocomplete.visible}>
         <SlashCommandAutocomplete
           suggestions={props.slashAutocomplete.suggestions}
           selectedIndex={props.slashAutocomplete.selectedIndex}
           onChoose={props.slashAutocomplete.onChoose}
         />
       </Show>
-      <Composer {...props.composer} />
+      <Show
+        when={props.approvalInline}
+        fallback={<Composer {...props.composer} />}
+      >
+        {(approvalInline) => (
+          <ApprovalInlinePanel
+            approval={approvalInline().approval}
+            selectedChoice={approvalInline().selectedChoice}
+            busy={approvalInline().busy}
+            theme={theme()}
+            onSelectChoice={approvalInline().onSelectChoice}
+            onAllowOnce={approvalInline().onAllowOnce}
+            onAllowAlways={approvalInline().onAllowAlways}
+            onReject={approvalInline().onReject}
+          />
+        )}
+      </Show>
     </box>
   );
 }
@@ -1839,7 +1999,8 @@ function ApprovalView(props: { approval: Approval }) {
   return (
     <scrollbox style={{ flexGrow: 1 }}>
       <text fg={theme().yellow}>Pending {props.approval.toolCall.name}</text>
-      <text fg={theme().muted}>Type /approve or /reject in the prompt.</text>
+      <text fg={theme().muted}>Use the bottom approval bar to allow or reject.</text>
+      <text fg={theme().muted}>You can also type /approve or /reject.</text>
       <Show when={preview}>
         {(value) => <Preview preview={value()} />}
       </Show>

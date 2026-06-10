@@ -135,6 +135,12 @@ export function attachEventStream(input: {
   const sessionId = input.state().session.id;
   void streamEvents(api.eventUrl(sessionId, input.token), (event) => {
     input.setState((state) => reduceEvent(state, event));
+    if (shouldRefreshReviewData(event.type)) {
+      void refreshReviewData(input.state()).then((updates) => {
+        if (input.abortSignal.aborted) return;
+        input.setState((state) => ({ ...state, ...updates }));
+      });
+    }
   }, input.abortSignal).catch((error) => {
     if (input.abortSignal.aborted) return;
     input.setState((state) => ({
@@ -154,6 +160,10 @@ export async function refreshReviewData(state: WorkspaceState): Promise<Partial<
     state.api.listModels(state.session.id).catch(() => state.modelChoices),
   ]);
   return { approvals, plan, commandRuns, gitStatus, session, modelChoices };
+}
+
+function shouldRefreshReviewData(eventType: string): boolean {
+  return eventType === 'tool_call_requested' || eventType === 'tool_call_result' || eventType === 'command_output';
 }
 
 function reduceEvent(state: WorkspaceState, event: SseEvent): WorkspaceState {
