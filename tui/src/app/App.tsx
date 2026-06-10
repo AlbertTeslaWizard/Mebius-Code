@@ -68,6 +68,12 @@ interface CommandPaletteState {
   query: string;
 }
 
+interface SlashCommandSuggestion {
+  name: string;
+  description: string;
+  insert: string;
+}
+
 interface ThemePaletteState {
   selectedIndex: number;
 }
@@ -124,6 +130,23 @@ const commandPaletteCommands: CommandPaletteCommand[] = [
   { label: '/quit', insert: '/quit', description: 'Exit the TUI' },
 ];
 
+const slashCommandSuggestions: SlashCommandSuggestion[] = [
+  { name: '/models', insert: '/models', description: 'Choose or configure the active model' },
+  { name: '/sessions', insert: '/sessions', description: 'Switch to a previous session' },
+  { name: '/new', insert: '/new ', description: 'Create and switch to a new session' },
+  { name: '/clear', insert: '/clear', description: 'Clear the chat and model context' },
+  { name: '/compact', insert: '/compact', description: 'Compact the chat into model context' },
+  { name: '/themes', insert: '/themes', description: 'Switch the TUI theme' },
+  { name: '/plan', insert: '/plan ', description: 'Create a plan for a goal' },
+  { name: '/plan-approve', insert: '/plan-approve', description: 'Approve the latest plan' },
+  { name: '/approve', insert: '/approve', description: 'Approve the active tool request' },
+  { name: '/reject', insert: '/reject', description: 'Reject the active tool request' },
+  { name: '/run', insert: '/run ', description: 'Request a shell command run' },
+  { name: '/open', insert: '/open ', description: 'Open a project file' },
+  { name: '/exit', insert: '/exit', description: 'Exit the TUI' },
+  { name: '/quit', insert: '/quit', description: 'Exit the TUI' },
+];
+
 const RIGHT_RAIL_WIDTH = 32;
 const MAIN_COLUMN_MIN_WIDTH = 48;
 const COMPOSER_HEIGHT = 6;
@@ -155,6 +178,7 @@ type StatusEvent = WorkspaceState['events'][number];
 export function App(props: AppProps) {
   const [state, setState] = createSignal(props.initialState);
   const [input, setInput] = createSignal('');
+  const [composerCursorOffset, setComposerCursorOffset] = createSignal(0);
   const [composerMode, setComposerMode] = createSignal<ComposerMode>('build');
   const [themeName, setThemeName] = createSignal<TuiThemeName>(
     resolveTuiThemeName(props.initialState.config.preferences?.theme),
@@ -162,6 +186,9 @@ export function App(props: AppProps) {
   const [busy, setBusy] = createSignal(false);
   const [modelPalette, setModelPalette] = createSignal<ModelPaletteState | null>(null);
   const [commandPalette, setCommandPalette] = createSignal<CommandPaletteState | null>(null);
+  const [slashSelectedIndex, setSlashSelectedIndex] = createSignal(0);
+  const [dismissedSlashQuery, setDismissedSlashQuery] = createSignal<string | null>(null);
+  const [lastSlashQuery, setLastSlashQuery] = createSignal<string | null>(null);
   const [themePalette, setThemePalette] = createSignal<ThemePaletteState | null>(null);
   const [sessionPalette, setSessionPalette] = createSignal<SessionPaletteState | null>(null);
   const [recentModelKeys, setRecentModelKeys] = createSignal<string[]>(initialRecentModelKeys(props.initialState.modelChoices));
@@ -182,6 +209,44 @@ export function App(props: AppProps) {
     const approval = activeApproval();
     if (approval) return `Approval - ${approval.toolCall.name}`;
     return 'Status';
+  });
+  const slashQuery = createMemo(() => {
+    if (modelPalette() || commandPalette() || themePalette() || sessionPalette()) return null;
+    return getSlashQuery(input(), composerCursorOffset());
+  });
+  const filteredSlashSuggestions = createMemo(() => {
+    const query = slashQuery();
+    return query === null ? [] : filteredSlashCommandSuggestions(query);
+  });
+  const slashAutocompleteVisible = createMemo(() => {
+    const query = slashQuery();
+    return query !== null && dismissedSlashQuery() !== query;
+  });
+
+  createEffect(() => {
+    const query = slashQuery();
+    if (query !== lastSlashQuery()) {
+      setLastSlashQuery(query);
+      setSlashSelectedIndex(0);
+    }
+    const dismissed = dismissedSlashQuery();
+    if (query === null) {
+      if (dismissed !== null) setDismissedSlashQuery(null);
+      return;
+    }
+    if (dismissed !== null && dismissed !== query) {
+      setDismissedSlashQuery(null);
+    }
+  });
+
+  createEffect(() => {
+    const query = slashQuery();
+    const count = filteredSlashSuggestions().length;
+    if (query === null) {
+      if (slashSelectedIndex() !== 0) setSlashSelectedIndex(0);
+      return;
+    }
+    setSlashSelectedIndex((current) => clamp(current, 0, Math.max(count - 1, 0)));
   });
 
   function startEventStream() {
@@ -235,6 +300,41 @@ export function App(props: AppProps) {
         event.preventDefault();
         event.stopPropagation();
         setThemePalette(null);
+        return;
+      }
+      if (slashAutocompleteVisible()) {
+        event.preventDefault();
+        event.stopPropagation();
+        setDismissedSlashQuery(slashQuery());
+        return;
+      }
+    }
+
+    if (slashAutocompleteVisible()) {
+      if (name === 'up') {
+        event.preventDefault();
+        event.stopPropagation();
+        moveSlashSelection(-1);
+        return;
+      }
+      if (name === 'down') {
+        event.preventDefault();
+        event.stopPropagation();
+        moveSlashSelection(1);
+        return;
+      }
+      if (name === 'tab') {
+        event.preventDefault();
+        event.stopPropagation();
+        if (filteredSlashSuggestions().length > 0) {
+          chooseSlashSuggestion();
+        }
+        return;
+      }
+      if (isEnterKey(name) && filteredSlashSuggestions().length > 0) {
+        event.preventDefault();
+        event.stopPropagation();
+        chooseSlashSuggestion();
         return;
       }
     }
@@ -342,6 +442,18 @@ export function App(props: AppProps) {
       return;
     }
     setInput(command.insert ?? '');
+  }
+
+  function moveSlashSelection(delta: number) {
+    const count = filteredSlashSuggestions().length;
+    setSlashSelectedIndex((current) => moveIndex(current, delta, count));
+  }
+
+  function chooseSlashSuggestion(suggestion = filteredSlashSuggestions()[slashSelectedIndex()]) {
+    if (!suggestion) return;
+    setInput(suggestion.insert);
+    setComposerCursorOffset(suggestion.insert.length);
+    setDismissedSlashQuery(getSlashQuery(suggestion.insert, suggestion.insert.length));
   }
 
   function moveCommandSelection(delta: number) {
@@ -806,6 +918,12 @@ export function App(props: AppProps) {
           <ChatPanel
             messages={state().messages}
             error={state().error}
+            slashAutocomplete={{
+              visible: slashAutocompleteVisible(),
+              suggestions: filteredSlashSuggestions(),
+              selectedIndex: slashSelectedIndex(),
+              onChoose: chooseSlashSuggestion,
+            }}
             composer={{
               mode: composerMode(),
               accentColor: composerAccentColor(),
@@ -813,6 +931,7 @@ export function App(props: AppProps) {
               value: input(),
               focused: !modelPalette() && !commandPalette() && !themePalette() && !sessionPalette(),
               onInput: setInput,
+              onCursorOffsetChange: setComposerCursorOffset,
               onSubmit: () => {
                 void submit();
               },
@@ -1238,16 +1357,23 @@ function Composer(props: {
   value: string;
   focused: boolean;
   onInput: (value: string) => void;
+  onCursorOffsetChange: (offset: number) => void;
   onSubmit: () => void;
 }) {
   const theme = useTheme();
   let textareaRef: TextareaRenderable | undefined;
+
+  function syncComposerState() {
+    props.onInput(textareaRef?.plainText ?? '');
+    props.onCursorOffsetChange(textareaRef?.cursorOffset ?? 0);
+  }
 
   createEffect(() => {
     const value = props.value;
     if (!textareaRef || textareaRef.plainText === value) return;
     textareaRef.setText(value);
     textareaRef.cursorOffset = value.length;
+    props.onCursorOffsetChange(value.length);
   });
 
   return (
@@ -1282,7 +1408,8 @@ function Composer(props: {
           wrapMode="word"
           keyBindings={composerSubmitKeyBindings}
           style={{ width: '100%', flexGrow: 1, minHeight: 3, minWidth: 0, flexShrink: 1 }}
-          onContentChange={() => props.onInput(textareaRef?.plainText ?? '')}
+          onContentChange={syncComposerState}
+          onCursorChange={() => props.onCursorOffsetChange(textareaRef?.cursorOffset ?? 0)}
           onSubmit={props.onSubmit}
         />
         <box style={{ width: '100%', height: 1, flexShrink: 0, flexDirection: 'row' }}>
@@ -1417,6 +1544,12 @@ function ModelChoiceRow(props: { choice: ModelChoice; selected: boolean; onChoos
 function ChatPanel(props: {
   messages: Message[];
   error: string;
+  slashAutocomplete: {
+    visible: boolean;
+    suggestions: SlashCommandSuggestion[];
+    selectedIndex: number;
+    onChoose: (suggestion: SlashCommandSuggestion) => void;
+  };
   composer: {
     mode: ComposerMode;
     accentColor: string;
@@ -1424,6 +1557,7 @@ function ChatPanel(props: {
     value: string;
     focused: boolean;
     onInput: (value: string) => void;
+    onCursorOffsetChange: (offset: number) => void;
     onSubmit: () => void;
   };
 }) {
@@ -1457,7 +1591,76 @@ function ChatPanel(props: {
           {(message) => <MessageBlock message={message} />}
         </For>
       </scrollbox>
+      <Show when={props.slashAutocomplete.visible}>
+        <SlashCommandAutocomplete
+          suggestions={props.slashAutocomplete.suggestions}
+          selectedIndex={props.slashAutocomplete.selectedIndex}
+          onChoose={props.slashAutocomplete.onChoose}
+        />
+      </Show>
       <Composer {...props.composer} />
+    </box>
+  );
+}
+
+function SlashCommandAutocomplete(props: {
+  suggestions: SlashCommandSuggestion[];
+  selectedIndex: number;
+  onChoose: (suggestion: SlashCommandSuggestion) => void;
+}) {
+  const theme = useTheme();
+  const dimensions = useTerminalDimensions();
+  const rowCount = createMemo(() => Math.max(props.suggestions.length, 1));
+  const listHeight = createMemo(() => clamp(rowCount(), 1, Math.max(3, Math.min(12, dimensions().height - COMPOSER_HEIGHT - 8))));
+
+  return (
+    <box
+      border
+      borderStyle="rounded"
+      borderColor={theme().border}
+      style={{
+        width: '100%',
+        height: listHeight() + 2,
+        minHeight: 3,
+        flexShrink: 0,
+        marginBottom: 1,
+        flexDirection: 'column',
+        backgroundColor: theme().input,
+      }}
+    >
+      <scrollbox
+        scrollY
+        style={{ width: '100%', height: listHeight(), minHeight: 1, flexShrink: 0 }}
+        contentOptions={{ width: '100%', minWidth: '100%', flexDirection: 'column' }}
+      >
+        <Show when={props.suggestions.length > 0} fallback={<text fg={theme().muted}>No slash commands found</text>}>
+          <For each={props.suggestions}>
+            {(suggestion, index) => {
+              const selected = createMemo(() => index() === props.selectedIndex);
+              return (
+                <box
+                  style={{
+                    width: '100%',
+                    height: 1,
+                    minHeight: 1,
+                    paddingX: 1,
+                    flexDirection: 'row',
+                    backgroundColor: selected() ? theme().selection : theme().input,
+                  }}
+                  onMouseDown={() => props.onChoose(suggestion)}
+                >
+                  <text fg={theme().text} truncate style={{ width: 18, flexShrink: 0 }}>
+                    {suggestion.name}
+                  </text>
+                  <text fg={selected() ? theme().text : theme().muted} truncate style={{ flexGrow: 1, minWidth: 0 }}>
+                    {suggestion.description}
+                  </text>
+                </box>
+              );
+            }}
+          </For>
+        </Show>
+      </scrollbox>
     </box>
   );
 }
@@ -1904,6 +2107,21 @@ function filteredCommandPaletteCommands(query: string): CommandPaletteCommand[] 
   return commandPaletteCommands.filter((command) =>
     [command.label, command.description, command.insert ?? ''].some((value) => normalizeSearch(value).includes(normalizedQuery)),
   );
+}
+
+function getSlashQuery(input: string, cursorOffset = input.length): string | null {
+  if (!input.startsWith('/')) return null;
+  if (/\s/.test(input)) return null;
+  const clampedOffset = clamp(cursorOffset, 0, input.length);
+  if (clampedOffset === 0) return null;
+  return input.slice(1, clampedOffset);
+}
+
+function filteredSlashCommandSuggestions(query: string): SlashCommandSuggestion[] {
+  const normalizedQuery = normalizeSearch(query);
+  if (!normalizedQuery) return slashCommandSuggestions;
+  const prefixedQuery = `/${normalizedQuery}`;
+  return slashCommandSuggestions.filter((suggestion) => normalizeSearch(suggestion.name).startsWith(prefixedQuery));
 }
 
 function buildModelChoiceGroups(choices: ModelChoice[], query: string, recentModelKeys: string[]): ModelChoiceGroup[] {
