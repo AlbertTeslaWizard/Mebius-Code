@@ -68,11 +68,22 @@ interface CommandPaletteState {
   query: string;
 }
 
-interface SlashCommandSuggestion {
+export type SlashCommandContext = {
+  openModelSelectModal: () => Promise<void>;
+  openSessionPalette: () => Promise<void>;
+  openThemePalette: () => void;
+  runCommand: (value: string) => Promise<void>;
+  exitTui: () => void;
+};
+
+export type SlashCommand = {
+  id: string;
   name: string;
   description: string;
-  insert: string;
-}
+  aliases?: string[];
+  kind: 'immediate' | 'input';
+  run?: (ctx: SlashCommandContext) => void | Promise<void>;
+};
 
 interface ThemePaletteState {
   selectedIndex: number;
@@ -130,21 +141,69 @@ const commandPaletteCommands: CommandPaletteCommand[] = [
   { label: '/quit', insert: '/quit', description: 'Exit the TUI' },
 ];
 
-const slashCommandSuggestions: SlashCommandSuggestion[] = [
-  { name: '/models', insert: '/models', description: 'Choose or configure the active model' },
-  { name: '/sessions', insert: '/sessions', description: 'Switch to a previous session' },
-  { name: '/new', insert: '/new ', description: 'Create and switch to a new session' },
-  { name: '/clear', insert: '/clear', description: 'Clear the chat and model context' },
-  { name: '/compact', insert: '/compact', description: 'Compact the chat into model context' },
-  { name: '/themes', insert: '/themes', description: 'Switch the TUI theme' },
-  { name: '/plan', insert: '/plan ', description: 'Create a plan for a goal' },
-  { name: '/plan-approve', insert: '/plan-approve', description: 'Approve the latest plan' },
-  { name: '/approve', insert: '/approve', description: 'Approve the active tool request' },
-  { name: '/reject', insert: '/reject', description: 'Reject the active tool request' },
-  { name: '/run', insert: '/run ', description: 'Request a shell command run' },
-  { name: '/open', insert: '/open ', description: 'Open a project file' },
-  { name: '/exit', insert: '/exit', description: 'Exit the TUI' },
-  { name: '/quit', insert: '/quit', description: 'Exit the TUI' },
+const slashCommands: SlashCommand[] = [
+  {
+    id: 'models',
+    name: '/models',
+    description: 'Choose or configure the active model',
+    kind: 'immediate',
+    run: (ctx) => ctx.openModelSelectModal(),
+  },
+  {
+    id: 'sessions',
+    name: '/sessions',
+    description: 'Switch to a previous session',
+    kind: 'immediate',
+    run: (ctx) => ctx.openSessionPalette(),
+  },
+  { id: 'new', name: '/new', description: 'Create and switch to a new session', kind: 'input' },
+  {
+    id: 'clear',
+    name: '/clear',
+    description: 'Clear the chat and model context',
+    kind: 'immediate',
+    run: (ctx) => ctx.runCommand('/clear'),
+  },
+  {
+    id: 'compact',
+    name: '/compact',
+    description: 'Compact the chat into model context',
+    kind: 'immediate',
+    run: (ctx) => ctx.runCommand('/compact'),
+  },
+  {
+    id: 'themes',
+    name: '/themes',
+    description: 'Switch the TUI theme',
+    kind: 'immediate',
+    run: (ctx) => ctx.openThemePalette(),
+  },
+  { id: 'plan', name: '/plan', description: 'Create a plan for a goal', kind: 'input' },
+  {
+    id: 'plan-approve',
+    name: '/plan-approve',
+    description: 'Approve the latest plan',
+    kind: 'immediate',
+    run: (ctx) => ctx.runCommand('/plan-approve'),
+  },
+  {
+    id: 'approve',
+    name: '/approve',
+    description: 'Approve the active tool request',
+    kind: 'immediate',
+    run: (ctx) => ctx.runCommand('/approve'),
+  },
+  {
+    id: 'reject',
+    name: '/reject',
+    description: 'Reject the active tool request',
+    kind: 'immediate',
+    run: (ctx) => ctx.runCommand('/reject'),
+  },
+  { id: 'run', name: '/run', description: 'Request a shell command run', kind: 'input' },
+  { id: 'open', name: '/open', description: 'Open a project file', kind: 'input' },
+  { id: 'exit', name: '/exit', description: 'Exit the TUI', kind: 'immediate', run: (ctx) => ctx.exitTui() },
+  { id: 'quit', name: '/quit', description: 'Exit the TUI', kind: 'immediate', run: (ctx) => ctx.exitTui() },
 ];
 
 const RIGHT_RAIL_WIDTH = 32;
@@ -449,11 +508,30 @@ export function App(props: AppProps) {
     setSlashSelectedIndex((current) => moveIndex(current, delta, count));
   }
 
-  function chooseSlashSuggestion(suggestion = filteredSlashSuggestions()[slashSelectedIndex()]) {
-    if (!suggestion) return;
-    setInput(suggestion.insert);
-    setComposerCursorOffset(suggestion.insert.length);
-    setDismissedSlashQuery(getSlashQuery(suggestion.insert, suggestion.insert.length));
+  function slashCommandContext(): SlashCommandContext {
+    return {
+      openModelSelectModal,
+      openSessionPalette: () => openSessionPalette(),
+      openThemePalette,
+      runCommand: runComposerCommand,
+      exitTui,
+    };
+  }
+
+  function chooseSlashSuggestion(command = filteredSlashSuggestions()[slashSelectedIndex()]) {
+    if (!command) return;
+    setDismissedSlashQuery(null);
+    if (command.kind === 'input') {
+      const insert = `${command.name} `;
+      setInput(insert);
+      setComposerCursorOffset(insert.length);
+      setDismissedSlashQuery(getSlashQuery(insert, insert.length));
+      return;
+    }
+
+    setInput('');
+    setComposerCursorOffset(0);
+    void command.run?.(slashCommandContext());
   }
 
   function moveCommandSelection(delta: number) {
@@ -631,6 +709,11 @@ export function App(props: AppProps) {
     }
     if (busy()) return;
     setInput('');
+    await runComposerCommand(value);
+  }
+
+  async function runComposerCommand(value: string) {
+    if (busy()) return;
     setBusy(true);
     try {
       if (value.startsWith('/')) {
@@ -1546,9 +1629,9 @@ function ChatPanel(props: {
   error: string;
   slashAutocomplete: {
     visible: boolean;
-    suggestions: SlashCommandSuggestion[];
+    suggestions: SlashCommand[];
     selectedIndex: number;
-    onChoose: (suggestion: SlashCommandSuggestion) => void;
+    onChoose: (command: SlashCommand) => void;
   };
   composer: {
     mode: ComposerMode;
@@ -1604,9 +1687,9 @@ function ChatPanel(props: {
 }
 
 function SlashCommandAutocomplete(props: {
-  suggestions: SlashCommandSuggestion[];
+  suggestions: SlashCommand[];
   selectedIndex: number;
-  onChoose: (suggestion: SlashCommandSuggestion) => void;
+  onChoose: (command: SlashCommand) => void;
 }) {
   const theme = useTheme();
   const dimensions = useTerminalDimensions();
@@ -2117,11 +2200,13 @@ function getSlashQuery(input: string, cursorOffset = input.length): string | nul
   return input.slice(1, clampedOffset);
 }
 
-function filteredSlashCommandSuggestions(query: string): SlashCommandSuggestion[] {
+function filteredSlashCommandSuggestions(query: string): SlashCommand[] {
   const normalizedQuery = normalizeSearch(query);
-  if (!normalizedQuery) return slashCommandSuggestions;
+  if (!normalizedQuery) return slashCommands;
   const prefixedQuery = `/${normalizedQuery}`;
-  return slashCommandSuggestions.filter((suggestion) => normalizeSearch(suggestion.name).startsWith(prefixedQuery));
+  return slashCommands.filter((command) =>
+    [command.name, ...(command.aliases ?? [])].some((value) => normalizeSearch(value).startsWith(prefixedQuery)),
+  );
 }
 
 function buildModelChoiceGroups(choices: ModelChoice[], query: string, recentModelKeys: string[]): ModelChoiceGroup[] {
