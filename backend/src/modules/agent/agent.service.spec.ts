@@ -94,14 +94,16 @@ describe('AgentService', () => {
     } satisfies RuntimeModelConfig);
   });
 
-  it('creates a pending plan with the original goal and publishes plan decision events', async () => {
+  it('creates a plan with the original goal and publishes transcript plan events', async () => {
     llm.chat.mockResolvedValueOnce({
       content: JSON.stringify({
         summary: 'Fix the Plan Mode approval flow.',
+        markdown: '# Plan\n\nFix the Plan Mode approval flow.',
         steps: [
           { title: 'Inspect Plan Mode', detail: 'Find the current TUI state machine.' },
           { title: 'Add approval panel', detail: 'Render choices after the plan is ready.' },
         ],
+        questions: [],
       }),
     });
     plans.save.mockImplementationOnce(async (value) => ({
@@ -122,9 +124,9 @@ describe('AgentService', () => {
     expect(plans.create).toHaveBeenCalledWith(
       expect.objectContaining({
         session,
-        status: PlanStatus.PendingApproval,
+        status: PlanStatus.PlanningGenerating,
         goal: 'Fix Plan Mode approval UX',
-        summary: 'Fix the Plan Mode approval flow.',
+        summary: '',
       }),
     );
     expect(planSteps.create).toHaveBeenNthCalledWith(
@@ -138,16 +140,22 @@ describe('AgentService', () => {
     );
     expect(sessions.addMessage).toHaveBeenCalledWith(
       session,
+      MessageRole.User,
+      'Fix Plan Mode approval UX',
+      { type: 'plan_prompt', planId: 'plan-1' },
+    );
+    expect(sessions.addMessage).toHaveBeenCalledWith(
+      session,
       MessageRole.Assistant,
-      'Fix the Plan Mode approval flow.',
-      { type: 'plan', planId: 'plan-1' },
+      '# Plan\n\nFix the Plan Mode approval flow.',
+      { type: 'plan_draft', planId: 'plan-1' },
     );
     expect(events.publish).toHaveBeenCalledWith(
       session.id,
       'message_created',
       expect.objectContaining({
         role: MessageRole.Assistant,
-        content: 'Fix the Plan Mode approval flow.',
+        content: '# Plan\n\nFix the Plan Mode approval flow.',
       }),
     );
     expect(events.publish).toHaveBeenCalledWith(
@@ -155,7 +163,7 @@ describe('AgentService', () => {
       'plan_updated',
       expect.objectContaining({
         planId: 'plan-1',
-        status: PlanStatus.PendingApproval,
+        status: PlanStatus.PlanReadyPendingApproval,
         summary: 'Fix the Plan Mode approval flow.',
       }),
     );
@@ -164,13 +172,19 @@ describe('AgentService', () => {
   });
 
   it('approves an owned plan and publishes a plan update', async () => {
-    const plan = planFixture({ id: 'plan-1', status: PlanStatus.PendingApproval });
+    const plan = planFixture({ id: 'plan-1', status: PlanStatus.PlanReadyPendingApproval });
     plans.findOne.mockResolvedValueOnce(plan);
 
     const result = await service.approvePlan(owner, plan.id);
 
     expect(result.status).toBe(PlanStatus.Approved);
     expect(plans.save).toHaveBeenCalledWith(expect.objectContaining({ id: plan.id, status: PlanStatus.Approved }));
+    expect(sessions.addMessage).toHaveBeenCalledWith(
+      plan.session,
+      MessageRole.Assistant,
+      expect.stringContaining('# Approved Plan Snapshot'),
+      { type: 'plan_final', planId: plan.id },
+    );
     expect(events.publish).toHaveBeenCalledWith(session.id, 'plan_updated', {
       planId: plan.id,
       status: PlanStatus.Approved,
@@ -178,7 +192,7 @@ describe('AgentService', () => {
   });
 
   it('cancels an owned plan and publishes a plan update', async () => {
-    const plan = planFixture({ id: 'plan-1', status: PlanStatus.PendingApproval });
+    const plan = planFixture({ id: 'plan-1', status: PlanStatus.PlanReadyPendingApproval });
     plans.findOne.mockResolvedValueOnce(plan);
 
     const result = await service.cancelPlan(owner, plan.id);
@@ -191,9 +205,9 @@ describe('AgentService', () => {
     });
   });
 
-  it('runs an approved plan by marking it running and then completed', async () => {
+  it('runs an approved plan without mutating plan lifecycle status', async () => {
     const plan = planFixture({ id: 'plan-1', status: PlanStatus.Approved, goal: 'Fix Plan Mode approval UX' });
-    plans.findOne.mockResolvedValueOnce(plan).mockResolvedValueOnce(plan);
+    plans.findOne.mockResolvedValueOnce(plan);
     sessions.listMessages.mockResolvedValueOnce([
       messageFixture('message-plan-goal', MessageRole.User, plan.goal),
     ]);
@@ -204,14 +218,11 @@ describe('AgentService', () => {
       approvedPlanId: plan.id,
     });
 
-    expect(events.publish).toHaveBeenCalledWith(session.id, 'plan_updated', {
-      planId: plan.id,
-      status: PlanStatus.Running,
-    });
-    expect(events.publish).toHaveBeenCalledWith(session.id, 'plan_updated', {
-      planId: plan.id,
-      status: PlanStatus.Completed,
-    });
+    expect(events.publish).not.toHaveBeenCalledWith(
+      session.id,
+      'plan_updated',
+      expect.objectContaining({ planId: plan.id }),
+    );
     expect(llm.streamChat.mock.calls[0][0].messages).toEqual(
       expect.arrayContaining([expect.objectContaining({ role: 'user', content: plan.goal })]),
     );
@@ -219,7 +230,7 @@ describe('AgentService', () => {
   });
 
   it('rejects executing a plan that has not been approved', async () => {
-    const plan = planFixture({ id: 'plan-1', status: PlanStatus.PendingApproval });
+    const plan = planFixture({ id: 'plan-1', status: PlanStatus.PlanReadyPendingApproval });
     plans.findOne.mockResolvedValueOnce(plan);
 
     await expect(
@@ -747,6 +758,11 @@ function planFixture(input: {
     status: input.status,
     goal: input.goal ?? 'Fix Plan Mode approval UX',
     summary: input.summary ?? 'Fix the Plan Mode approval flow.',
+    draftMarkdown: '# Plan\n\nFix the Plan Mode approval flow.',
+    finalMarkdown: null,
+    questions: [],
+    answers: [],
+    clientRequestId: null,
     createdAt: new Date('2026-06-02T00:00:00.000Z'),
     updatedAt: new Date('2026-06-02T00:00:00.000Z'),
   } as Plan;

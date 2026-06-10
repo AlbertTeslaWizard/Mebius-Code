@@ -1184,7 +1184,7 @@ async function submitManualCommand() {
     });
     manualCommand.value = '';
     await approvals.loadPending();
-    activeWorkbenchTab.value = result?.status === 'pending_approval' ? 'review' : 'runs';
+    activeWorkbenchTab.value = isPlanPendingApproval(result?.status) ? 'review' : 'runs';
   });
 }
 
@@ -1594,6 +1594,10 @@ function canGrantSessionCommandAutoRun(approval: Approval) {
     approval.preview.canGrantSessionAutoRun &&
     !approval.preview.sessionAutoRunActive
   );
+}
+
+function isPlanPendingApproval(status: string | undefined) {
+  return status === 'pending_approval' || status === 'plan_ready_pending_approval' || status === 'plan_review';
 }
 
 function commandPolicyText(approval: Approval) {
@@ -2527,7 +2531,7 @@ function projectDescription(project: { description?: string; sourceType: string;
                         <n-button
                           size="small"
                           type="primary"
-                          :disabled="workspace.activePlan.plan.status !== 'pending_approval' || busy"
+                          :disabled="!isPlanPendingApproval(workspace.activePlan.plan.status) || busy"
                           :loading="busy"
                           @click="approveActivePlan"
                         >

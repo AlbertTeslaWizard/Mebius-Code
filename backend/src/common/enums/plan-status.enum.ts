@@ -1,9 +1,9 @@
 export enum PlanStatus {
-  PendingApproval = 'pending_approval',
+  PlanningGenerating = 'planning_generating',
+  PlanReadyPendingApproval = 'plan_ready_pending_approval',
+  PlanCustomizing = 'plan_customizing',
+  PlanReview = 'plan_review',
   Approved = 'approved',
-  Rejected = 'rejected',
-  Running = 'running',
-  Completed = 'completed',
   Failed = 'failed',
   Cancelled = 'cancelled',
 }

@@ -1,10 +1,11 @@
-import { Body, Controller, Get, Param, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
 import { RequestWithUser } from '../../common/types/request-with-user';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { UsersService } from '../users/users.service';
 import { AgentService } from './agent.service';
 import { CreatePlanDto } from './dto/create-plan.dto';
 import { RunAgentDto } from './dto/run-agent.dto';
+import { UpdatePlanAnswersDto } from './dto/update-plan-answers.dto';
 
 @Controller()
 @UseGuards(JwtAuthGuard)
@@ -33,6 +34,22 @@ export class AgentController {
   async approvePlan(@Req() request: RequestWithUser, @Param('id') id: string) {
     const owner = await this.users.findById(request.user.sub);
     return this.agent.approvePlan(owner, id);
+  }
+
+  @Patch('plans/:id/answers')
+  async updatePlanAnswers(
+    @Req() request: RequestWithUser,
+    @Param('id') id: string,
+    @Body() dto: UpdatePlanAnswersDto,
+  ) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.agent.updatePlanAnswers(owner, id, dto);
+  }
+
+  @Post('plans/:id/finalize')
+  async finalizePlan(@Req() request: RequestWithUser, @Param('id') id: string) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.agent.finalizePlan(owner, id);
   }
 
   @Post('plans/:id/cancel')

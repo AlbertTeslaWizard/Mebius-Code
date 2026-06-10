@@ -170,9 +170,57 @@ export interface Approval {
   };
 }
 
+export type PlanStatus =
+  | 'planning_generating'
+  | 'plan_ready_pending_approval'
+  | 'plan_customizing'
+  | 'plan_review'
+  | 'approved'
+  | 'cancelled'
+  | 'failed'
+  | string;
+
+export interface PlanQuestionChoice {
+  id: string;
+  label: string;
+  description?: string;
+  notes?: string;
+}
+
+export interface PlanQuestion {
+  id: string;
+  title: string;
+  prompt: string;
+  choices: PlanQuestionChoice[];
+  recommendedChoiceId?: string;
+  allowCustomAnswer: boolean;
+  notes?: string;
+  required?: boolean;
+  multiSelect?: boolean;
+}
+
+export interface PlanQuestionAnswer {
+  questionId: string;
+  choiceId?: string;
+  choiceIds?: string[];
+  customAnswer?: string;
+  notes?: string;
+}
+
 export interface PlanBundle {
-  plan: { id: string; goal: string; summary: string; status: string };
+  plan: {
+    id: string;
+    goal: string;
+    summary: string;
+    status: PlanStatus;
+    draftMarkdown?: string;
+    finalMarkdown?: string | null;
+    questions?: PlanQuestion[];
+    answers?: PlanQuestionAnswer[];
+  };
   steps: Array<{ id: string; order: number; title: string; detail?: string; status: string }>;
+  questions?: PlanQuestion[];
+  answers?: PlanQuestionAnswer[];
 }
 
 export interface CommandRunView {

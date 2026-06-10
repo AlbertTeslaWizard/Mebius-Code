@@ -1,6 +1,6 @@
 import { BadRequestException, forwardRef, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, In, MoreThan, Repository } from 'typeorm';
 import { MessageRole } from '../../common/enums/message-role.enum';
 import { PlanStatus } from '../../common/enums/plan-status.enum';
 import { PlanStepStatus } from '../../common/enums/plan-step-status.enum';
@@ -17,12 +17,22 @@ import { buildCodingToolSpecs } from '../tools/tool-specs';
 import { PendingToolMessage, PendingToolResumeContext } from './agent-resume.types';
 import { CreatePlanDto } from './dto/create-plan.dto';
 import { RunAgentDto } from './dto/run-agent.dto';
+import { UpdatePlanAnswersDto } from './dto/update-plan-answers.dto';
 import { LlmMessage, LlmToolCall, OpenAiCompatibleService } from './openai-compatible.service';
 import { PlanStep } from './plan-step.entity';
 import { Plan } from './plan.entity';
+import { PlanQuestion, PlanQuestionAnswer } from './plan-workflow.types';
 
 interface ParsedPlan {
   summary: string;
+  markdown: string;
+  steps: Array<{ title: string; detail?: string }>;
+  questions: PlanQuestion[];
+}
+
+interface FinalizedPlan {
+  summary: string;
+  markdown: string;
   steps: Array<{ title: string; detail?: string }>;
 }
 
@@ -40,6 +50,9 @@ interface ToolResultMessageMetadata extends Record<string, unknown> {
 }
 
 const MAX_TOOL_TURNS = 4;
+const PLAN_IDEMPOTENCY_WINDOW_MS = 15_000;
+const LEGACY_PENDING_APPROVAL_STATUS = 'pending_approval';
+const LEGACY_REJECTED_STATUS = 'rejected';
 
 @Injectable()
 export class AgentService {
@@ -61,67 +74,86 @@ export class AgentService {
     steps: PlanStep[];
   }> {
     const session = await this.sessions.findOwned(owner.id, sessionId);
+    const existingPlan = await this.findIdempotentPlan(session.id, dto);
+    if (existingPlan) {
+      return this.planBundle(existingPlan);
+    }
+
+    const { plan: initialPlan, userMessage } = await this.createInitialPlan(session, dto);
+    this.events.publish(session.id, 'message_created', {
+      id: userMessage.id,
+      role: userMessage.role,
+      content: userMessage.content,
+    });
+    this.events.publish(session.id, 'plan_updated', {
+      planId: initialPlan.id,
+      status: initialPlan.status,
+      summary: initialPlan.summary,
+    });
+
     const modelConfigId = dto.modelConfigId ?? session.activeModelConfig?.id;
     const config = await this.modelConfigs.findRuntime(owner.id, modelConfigId);
-    const response = await this.withModelDiagnostics(session.id, config, 'plan', 0, () =>
-      this.llm.chat({
-        config,
-        temperature: 0.1,
-        messages: [
-          {
-            role: 'system',
-            content:
-              'You are Mebius Code Plan Mode. Return strict JSON with keys summary and steps. steps must be an array of {title, detail}. Do not execute tools.',
-          },
-          {
-            role: 'user',
-            content: dto.goal,
-          },
-        ],
-      }),
-    );
-    const parsed = this.parsePlan(response.content ?? '', dto.goal);
-    const plan = await this.plans.save(
-      this.plans.create({
-        session,
-        status: PlanStatus.PendingApproval,
-        goal: dto.goal,
-        summary: parsed.summary,
-      }),
-    );
-    const steps = await this.planSteps.save(
-      parsed.steps.map((step, index) =>
-        this.planSteps.create({
-          plan,
-          order: index + 1,
-          title: step.title,
-          detail: step.detail,
-          status: PlanStepStatus.Pending,
+    let parsed: ParsedPlan;
+    try {
+      const response = await this.withModelDiagnostics(session.id, config, 'plan', 0, () =>
+        this.llm.chat({
+          config,
+          temperature: 0.1,
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are Mebius Code Plan Mode. Return strict JSON with keys summary, markdown, steps, and questions. ' +
+                'markdown must be a complete Markdown plan with sections: requirements understanding, technical choices, target outcome, modules, file structure, implementation steps, risks/tradeoffs. ' +
+                'steps must be an array of {title, detail}. questions must be an array and may be empty. Each question must be data-driven with id, title, prompt, choices, recommendedChoiceId, allowCustomAnswer, notes, required, and multiSelect when useful. Do not execute tools.',
+            },
+            {
+              role: 'user',
+              content: dto.goal,
+            },
+          ],
         }),
-      ),
-    );
-    const message = await this.sessions.addMessage(session, MessageRole.Assistant, parsed.summary, {
-      type: 'plan',
-      planId: plan.id,
-    });
+      );
+      parsed = this.parsePlan(response.content ?? '', dto.goal);
+    } catch (error) {
+      parsed = this.fallbackDraftPlan(dto.goal, error instanceof Error ? error.message : undefined);
+    }
+
+    const { plan, steps, assistantMessage } = await this.saveDraftPlan(session, initialPlan, parsed);
     this.events.publish(session.id, 'message_created', {
-      id: message.id,
-      role: message.role,
-      content: message.content,
+      id: assistantMessage.id,
+      role: assistantMessage.role,
+      content: assistantMessage.content,
     });
     this.events.publish(session.id, 'plan_updated', {
       planId: plan.id,
       status: plan.status,
       summary: plan.summary,
       steps,
+      questions: plan.questions,
+      answers: plan.answers,
     });
     return { plan, steps };
   }
 
   async approvePlan(owner: User, planId: string): Promise<Plan> {
     const plan = await this.findOwnedPlan(owner.id, planId);
-    plan.status = PlanStatus.Approved;
-    const saved = await this.plans.save(plan);
+    if (this.normalizePlanStatus(plan.status) === PlanStatus.Approved) {
+      return plan;
+    }
+    if (!this.isApprovablePlan(plan.status)) {
+      throw new BadRequestException(`Plan is ${plan.status} and cannot be approved.`);
+    }
+    const steps = await this.planSteps.find({
+      where: { plan: { id: plan.id } },
+      order: { order: 'ASC' },
+    });
+    const { saved, message } = await this.approvePlanWithSnapshot(plan, steps);
+    this.events.publish(plan.session.id, 'message_created', {
+      id: message.id,
+      role: message.role,
+      content: message.content,
+    });
     this.events.publish(plan.session.id, 'plan_updated', {
       planId: plan.id,
       status: saved.status,
@@ -136,6 +168,75 @@ export class AgentService {
     this.events.publish(plan.session.id, 'plan_updated', {
       planId: plan.id,
       status: saved.status,
+    });
+    return saved;
+  }
+
+  async updatePlanAnswers(owner: User, planId: string, dto: UpdatePlanAnswersDto): Promise<{
+    plan: Plan;
+    steps: PlanStep[];
+  }> {
+    const plan = await this.findOwnedPlan(owner.id, planId);
+    if (this.normalizePlanStatus(plan.status) === PlanStatus.Approved) {
+      throw new BadRequestException('Approved plans cannot be customized.');
+    }
+    plan.answers = this.sanitizePlanAnswers(dto.answers ?? []);
+    plan.status = PlanStatus.PlanCustomizing;
+    const saved = await this.plans.save(plan);
+    this.events.publish(plan.session.id, 'plan_updated', {
+      planId: saved.id,
+      status: saved.status,
+      answers: saved.answers,
+    });
+    return this.planBundle(saved);
+  }
+
+  async finalizePlan(owner: User, planId: string): Promise<{
+    plan: Plan;
+    steps: PlanStep[];
+  }> {
+    const plan = await this.findOwnedPlan(owner.id, planId);
+    const steps = await this.planSteps.find({
+      where: { plan: { id: plan.id } },
+      order: { order: 'ASC' },
+    });
+    const session = await this.sessions.findOwned(owner.id, plan.session.id);
+    const modelConfigId = session.activeModelConfig?.id;
+    const config = await this.modelConfigs.findRuntime(owner.id, modelConfigId);
+    let finalized: FinalizedPlan;
+
+    try {
+      const response = await this.withModelDiagnostics(session.id, config, 'plan', 1, () =>
+        this.llm.chat({
+          config,
+          temperature: 0.1,
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are finalizing a Mebius Code Plan Mode draft after user clarification answers. ' +
+                'Return strict JSON with keys summary, markdown, and steps. markdown must be a complete Markdown plan and include the user selections. Do not execute tools.',
+            },
+            {
+              role: 'user',
+              content: this.buildFinalizePrompt(plan, steps),
+            },
+          ],
+        }),
+      );
+      finalized = this.parseFinalPlan(response.content ?? '', plan, steps);
+    } catch (error) {
+      finalized = this.fallbackFinalPlan(plan, steps, error instanceof Error ? error.message : undefined);
+    }
+
+    const saved = await this.saveFinalPlan(plan, finalized);
+    this.events.publish(plan.session.id, 'plan_updated', {
+      planId: saved.plan.id,
+      status: saved.plan.status,
+      summary: saved.plan.summary,
+      steps: saved.steps,
+      questions: saved.plan.questions,
+      answers: saved.plan.answers,
     });
     return saved;
   }
@@ -156,7 +257,7 @@ export class AgentService {
       where: { plan: { id: plan.id } },
       order: { order: 'ASC' },
     });
-    return { plan, steps };
+    return { plan: this.normalizePlanForResponse(plan), steps };
   }
 
   async run(owner: User, sessionId: string, dto: RunAgentDto): Promise<{
@@ -170,7 +271,7 @@ export class AgentService {
     if (approvedPlan && approvedPlan.session.id !== session.id) {
       throw new BadRequestException('Approved plan does not belong to this session.');
     }
-    if (approvedPlan && approvedPlan.status !== PlanStatus.Approved) {
+    if (approvedPlan && this.normalizePlanStatus(approvedPlan.status) !== PlanStatus.Approved) {
       throw new BadRequestException('Only approved plans can be executed.');
     }
     const pendingApproval = await this.sessions.findPendingApprovalTool(session.id);
@@ -180,14 +281,6 @@ export class AgentService {
       );
     }
     try {
-      if (approvedPlan) {
-        approvedPlan.status = PlanStatus.Running;
-        await this.plans.save(approvedPlan);
-        this.events.publish(session.id, 'plan_updated', {
-          planId: approvedPlan.id,
-          status: approvedPlan.status,
-        });
-      }
       if (dto.message) {
         const userMessage = await this.sessions.addMessage(session, MessageRole.User, dto.message);
         this.events.publish(session.id, 'message_created', {
@@ -204,11 +297,14 @@ export class AgentService {
         this.sessions.listMessages(owner.id, session.id),
       ]);
       const messages = this.buildModelMessages(summary?.content, history);
+      if (approvedPlan && !dto.message) {
+        messages.push({
+          role: 'user',
+          content: this.buildApprovedPlanExecutionPrompt(approvedPlan),
+        });
+      }
       return await this.continueRun(owner, session, config, messages, []);
     } catch (error) {
-      if (approvedPlan) {
-        await this.markPlanStatus(approvedPlan, PlanStatus.Failed);
-      }
       this.events.publish(session.id, 'agent_status', {
         status: 'failed',
         message: error instanceof Error ? error.message : 'Agent run failed.',
@@ -333,7 +429,6 @@ export class AgentService {
       const toolCalls = response.tool_calls ?? [];
       if (toolCalls.length === 0) {
         const assistant = await this.saveAssistantResponse(session, response.content ?? '');
-        await this.markLatestRunningPlan(session.id, PlanStatus.Completed);
         this.events.publish(session.id, 'agent_status', { status: 'completed' });
         this.events.complete(session.id);
         return { assistant, toolCalls: createdToolCalls };
@@ -427,14 +522,263 @@ export class AgentService {
       session,
       'I inspected the project, but the tool workflow did not finish within the configured turn limit. Please narrow the request or ask me to continue from the latest tool results.',
     );
-    await this.markLatestRunningPlan(session.id, PlanStatus.Failed);
     this.events.publish(session.id, 'agent_status', { status: 'completed' });
     this.events.complete(session.id);
     return { assistant, toolCalls: createdToolCalls };
   }
 
   async markLatestRunningPlanFailed(sessionId: string): Promise<void> {
-    await this.markLatestRunningPlan(sessionId, PlanStatus.Failed);
+    void sessionId;
+  }
+
+  private async findIdempotentPlan(sessionId: string, dto: CreatePlanDto): Promise<Plan | null> {
+    if (dto.clientRequestId) {
+      const existing = await this.plans.findOne({
+        where: { session: { id: sessionId }, clientRequestId: dto.clientRequestId },
+        relations: { session: true },
+        order: { createdAt: 'DESC' },
+      });
+      if (existing) return this.normalizePlanForResponse(existing);
+    }
+
+    const since = new Date(Date.now() - PLAN_IDEMPOTENCY_WINDOW_MS);
+    const existing = await this.plans.findOne({
+      where: {
+        session: { id: sessionId },
+        goal: dto.goal,
+        status: In([
+          PlanStatus.PlanningGenerating,
+          PlanStatus.PlanCustomizing,
+          PlanStatus.PlanReadyPendingApproval,
+          PlanStatus.PlanReview,
+        ]),
+        createdAt: MoreThan(since),
+      },
+      relations: { session: true },
+      order: { createdAt: 'DESC' },
+    });
+    return existing ? this.normalizePlanForResponse(existing) : null;
+  }
+
+  private async createInitialPlan(
+    session: Message['session'],
+    dto: CreatePlanDto,
+  ): Promise<{ plan: Plan; userMessage: Message }> {
+    const action = async (manager: EntityManager): Promise<{ plan: Plan; userMessage: Message }> => {
+      const planRepo = manager.getRepository(Plan);
+      const messageRepo = manager.getRepository(Message);
+      const plan = await planRepo.save(
+        planRepo.create({
+          session,
+          status: PlanStatus.PlanningGenerating,
+          goal: dto.goal,
+          clientRequestId: dto.clientRequestId ?? null,
+          summary: '',
+          draftMarkdown: '',
+          finalMarkdown: null,
+          questions: [],
+          answers: [],
+        }),
+      );
+      const userMessage = await messageRepo.save(
+        messageRepo.create({
+          session,
+          role: MessageRole.User,
+          content: dto.goal,
+          metadata: {
+            type: 'plan_prompt',
+            planId: plan.id,
+            ...(dto.clientRequestId ? { clientRequestId: dto.clientRequestId } : {}),
+          },
+        }),
+      );
+      return { plan, userMessage };
+    };
+
+    if (this.plans.manager?.transaction) {
+      return this.plans.manager.transaction(action);
+    }
+
+    const plan = await this.plans.save(
+      this.plans.create({
+        session,
+        status: PlanStatus.PlanningGenerating,
+        goal: dto.goal,
+        clientRequestId: dto.clientRequestId ?? null,
+        summary: '',
+        draftMarkdown: '',
+        finalMarkdown: null,
+        questions: [],
+        answers: [],
+      }),
+    );
+    const userMessage = await this.sessions.addMessage(session as Message['session'], MessageRole.User, dto.goal, {
+      type: 'plan_prompt',
+      planId: plan.id,
+      ...(dto.clientRequestId ? { clientRequestId: dto.clientRequestId } : {}),
+    });
+    return { plan, userMessage };
+  }
+
+  private async saveDraftPlan(
+    session: Message['session'],
+    plan: Plan,
+    parsed: ParsedPlan,
+  ): Promise<{ plan: Plan; steps: PlanStep[]; assistantMessage: Message }> {
+    const status = parsed.questions.length > 0 ? PlanStatus.PlanCustomizing : PlanStatus.PlanReadyPendingApproval;
+    const action = async (
+      manager: EntityManager,
+    ): Promise<{ plan: Plan; steps: PlanStep[]; assistantMessage: Message }> => {
+      const planRepo = manager.getRepository(Plan);
+      const stepRepo = manager.getRepository(PlanStep);
+      const messageRepo = manager.getRepository(Message);
+      plan.status = status;
+      plan.summary = parsed.summary;
+      plan.draftMarkdown = parsed.markdown;
+      plan.finalMarkdown = parsed.questions.length > 0 ? null : parsed.markdown;
+      plan.questions = parsed.questions;
+      plan.answers = [];
+      const savedPlan = await planRepo.save(plan);
+      await manager.createQueryBuilder().delete().from(PlanStep).where('plan_id = :planId', { planId: plan.id }).execute();
+      const steps = await stepRepo.save(
+        parsed.steps.map((step, index) =>
+          stepRepo.create({
+            plan: savedPlan,
+            order: index + 1,
+            title: step.title,
+            detail: step.detail,
+            status: PlanStepStatus.Pending,
+          }),
+        ),
+      );
+      const assistantMessage = await messageRepo.save(
+        messageRepo.create({
+          session,
+          role: MessageRole.Assistant,
+          content: parsed.markdown,
+          metadata: { type: 'plan_draft', planId: savedPlan.id },
+        }),
+      );
+      return { plan: this.normalizePlanForResponse(savedPlan), steps, assistantMessage };
+    };
+
+    if (this.plans.manager?.transaction) {
+      return this.plans.manager.transaction(action);
+    }
+
+    plan.status = status;
+    plan.summary = parsed.summary;
+    plan.draftMarkdown = parsed.markdown;
+    plan.finalMarkdown = parsed.questions.length > 0 ? null : parsed.markdown;
+    plan.questions = parsed.questions;
+    plan.answers = [];
+    const savedPlan = await this.plans.save(plan);
+    if (typeof (this.planSteps as Repository<PlanStep> & { delete?: unknown }).delete === 'function') {
+      await (this.planSteps as Repository<PlanStep>).delete({ plan: { id: plan.id } } as never);
+    }
+    const steps = await this.planSteps.save(
+      parsed.steps.map((step, index) =>
+        this.planSteps.create({
+          plan: savedPlan,
+          order: index + 1,
+          title: step.title,
+          detail: step.detail,
+          status: PlanStepStatus.Pending,
+        }),
+      ),
+    );
+    const assistantMessage = await this.sessions.addMessage(session as Message['session'], MessageRole.Assistant, parsed.markdown, {
+      type: 'plan_draft',
+      planId: savedPlan.id,
+    });
+    return { plan: this.normalizePlanForResponse(savedPlan), steps, assistantMessage };
+  }
+
+  private async saveFinalPlan(plan: Plan, finalized: FinalizedPlan): Promise<{ plan: Plan; steps: PlanStep[] }> {
+    const action = async (manager: EntityManager): Promise<{ plan: Plan; steps: PlanStep[] }> => {
+      const planRepo = manager.getRepository(Plan);
+      const stepRepo = manager.getRepository(PlanStep);
+      plan.status = PlanStatus.PlanReview;
+      plan.summary = finalized.summary;
+      plan.finalMarkdown = finalized.markdown;
+      const savedPlan = await planRepo.save(plan);
+      await manager.createQueryBuilder().delete().from(PlanStep).where('plan_id = :planId', { planId: plan.id }).execute();
+      const steps = await stepRepo.save(
+        finalized.steps.map((step, index) =>
+          stepRepo.create({
+            plan: savedPlan,
+            order: index + 1,
+            title: step.title,
+            detail: step.detail,
+            status: PlanStepStatus.Pending,
+          }),
+        ),
+      );
+      return { plan: this.normalizePlanForResponse(savedPlan), steps };
+    };
+
+    if (this.plans.manager?.transaction) {
+      return this.plans.manager.transaction(action);
+    }
+
+    plan.status = PlanStatus.PlanReview;
+    plan.summary = finalized.summary;
+    plan.finalMarkdown = finalized.markdown;
+    const savedPlan = await this.plans.save(plan);
+    if (typeof (this.planSteps as Repository<PlanStep> & { delete?: unknown }).delete === 'function') {
+      await (this.planSteps as Repository<PlanStep>).delete({ plan: { id: plan.id } } as never);
+    }
+    const steps = await this.planSteps.save(
+      finalized.steps.map((step, index) =>
+        this.planSteps.create({
+          plan: savedPlan,
+          order: index + 1,
+          title: step.title,
+          detail: step.detail,
+          status: PlanStepStatus.Pending,
+        }),
+      ),
+    );
+    return { plan: this.normalizePlanForResponse(savedPlan), steps };
+  }
+
+  private async approvePlanWithSnapshot(plan: Plan, steps: PlanStep[]): Promise<{ saved: Plan; message: Message }> {
+    const content = this.buildFinalPlanSnapshot(plan, steps);
+    const action = async (manager: EntityManager): Promise<{ saved: Plan; message: Message }> => {
+      const planRepo = manager.getRepository(Plan);
+      const messageRepo = manager.getRepository(Message);
+      plan.status = PlanStatus.Approved;
+      const saved = await planRepo.save(plan);
+      const message = await messageRepo.save(
+        messageRepo.create({
+          session: plan.session,
+          role: MessageRole.Assistant,
+          content,
+          metadata: { type: 'plan_final', planId: plan.id },
+        }),
+      );
+      return { saved: this.normalizePlanForResponse(saved), message };
+    };
+
+    if (this.plans.manager?.transaction) {
+      return this.plans.manager.transaction(action);
+    }
+
+    plan.status = PlanStatus.Approved;
+    const saved = await this.plans.save(plan);
+    const message = await this.sessions.addMessage(plan.session, MessageRole.Assistant, content, {
+      type: 'plan_final',
+      planId: plan.id,
+    });
+    return { saved: this.normalizePlanForResponse(saved), message };
+  }
+
+  private async planBundle(plan: Plan): Promise<{ plan: Plan; steps: PlanStep[] }> {
+    const steps = await this.planSteps.find({
+      where: { plan: { id: plan.id } },
+      order: { order: 'ASC' },
+    });
+    return { plan: this.normalizePlanForResponse(plan), steps };
   }
 
   private getSessionId(session: Message['session']): string {
@@ -759,49 +1103,276 @@ export class AgentService {
     if (!plan) {
       throw new NotFoundException('Plan not found.');
     }
-    return plan;
-  }
-
-  private async markLatestRunningPlan(sessionId: string, status: PlanStatus.Completed | PlanStatus.Failed) {
-    const plan = await this.plans.findOne({
-      where: { session: { id: sessionId }, status: PlanStatus.Running },
-      relations: { session: true },
-      order: { updatedAt: 'DESC' },
-    });
-    if (!plan) {
-      return;
-    }
-    await this.markPlanStatus(plan, status);
-  }
-
-  private async markPlanStatus(plan: Plan, status: PlanStatus): Promise<void> {
-    plan.status = status;
-    const saved = await this.plans.save(plan);
-    this.events.publish(plan.session.id, 'plan_updated', {
-      planId: plan.id,
-      status: saved.status,
-    });
+    return this.normalizePlanForResponse(plan);
   }
 
   private parsePlan(content: string, goal: string): ParsedPlan {
     try {
-      const parsed = JSON.parse(content) as ParsedPlan;
-      if (parsed.summary && Array.isArray(parsed.steps)) {
-        return parsed;
+      const parsed = JSON.parse(content) as Partial<ParsedPlan>;
+      if (typeof parsed.summary === 'string' && Array.isArray(parsed.steps)) {
+        const steps = this.sanitizePlanSteps(parsed.steps);
+        const questions = this.sanitizePlanQuestions(parsed.questions);
+        const markdown =
+          typeof parsed.markdown === 'string' && parsed.markdown.trim()
+            ? parsed.markdown.trim()
+            : this.buildDraftMarkdown(goal, parsed.summary, steps, questions);
+        return {
+          summary: parsed.summary.trim(),
+          markdown,
+          steps,
+          questions,
+        };
       }
     } catch {
       // Fall through to deterministic plan.
     }
 
+    return this.fallbackDraftPlan(goal, content || undefined);
+  }
+
+  private parseFinalPlan(content: string, plan: Plan, steps: PlanStep[]): FinalizedPlan {
+    try {
+      const parsed = JSON.parse(content) as Partial<FinalizedPlan>;
+      if (typeof parsed.summary === 'string' && typeof parsed.markdown === 'string' && Array.isArray(parsed.steps)) {
+        return {
+          summary: parsed.summary.trim(),
+          markdown: parsed.markdown.trim(),
+          steps: this.sanitizePlanSteps(parsed.steps),
+        };
+      }
+    } catch {
+      // Fall through to deterministic final plan.
+    }
+    return this.fallbackFinalPlan(plan, steps, content || undefined);
+  }
+
+  private fallbackDraftPlan(goal: string, reason?: string): ParsedPlan {
+    const summary = `Plan for: ${goal}`;
+    const steps = [
+      { title: 'Understand the target project', detail: 'Inspect files and identify relevant modules.' },
+      { title: 'Design the change', detail: 'Describe the implementation path before editing.' },
+      { title: 'Apply approved edits', detail: 'Use patch tools only after approval.' },
+      { title: 'Verify behavior', detail: 'Run focused checks and summarize results.' },
+    ];
     return {
-      summary: content || `Plan for: ${goal}`,
-      steps: [
-        { title: 'Understand the target project', detail: 'Inspect files and identify relevant modules.' },
-        { title: 'Design the change', detail: 'Describe the implementation path before editing.' },
-        { title: 'Apply approved edits', detail: 'Use patch tools only after approval.' },
-        { title: 'Verify behavior', detail: 'Run allowlisted checks and summarize results.' },
-      ],
+      summary,
+      markdown: this.buildDraftMarkdown(goal, summary, steps, [], reason),
+      steps,
+      questions: [],
     };
+  }
+
+  private fallbackFinalPlan(plan: Plan, steps: PlanStep[], reason?: string): FinalizedPlan {
+    const summary = plan.summary || `Plan for: ${plan.goal}`;
+    const markdown = [
+      plan.draftMarkdown || this.buildDraftMarkdown(plan.goal, summary, steps, plan.questions ?? []),
+      '',
+      '## User Selections',
+      this.formatPlanAnswers(plan).trim() || '- No clarification answers were provided.',
+      ...(reason ? ['', '## Finalization Note', `- Deterministic fallback used because model finalization failed: ${reason}`] : []),
+    ].join('\n');
+    return {
+      summary,
+      markdown,
+      steps: steps.map((step) => ({ title: step.title, detail: step.detail })),
+    };
+  }
+
+  private buildDraftMarkdown(
+    goal: string,
+    summary: string,
+    steps: Array<{ title: string; detail?: string }>,
+    questions: PlanQuestion[],
+    reason?: string,
+  ): string {
+    return [
+      '# Plan',
+      '',
+      '## Requirements Understanding',
+      `- Original prompt: ${goal}`,
+      `- Summary: ${summary}`,
+      '',
+      '## Technical Choices',
+      '- Follow the existing project architecture and local patterns.',
+      '- Use the smallest API and UI changes needed for the requested behavior.',
+      '',
+      '## Target Outcome',
+      '- Preserve the user prompt in the transcript.',
+      '- Present a complete plan before implementation begins.',
+      '',
+      '## Modules',
+      '- Backend Plan Mode lifecycle and persistence.',
+      '- TUI plan approval, clarification, and review panels.',
+      '',
+      '## File Structure',
+      '- Update the existing backend agent module and TUI app components in place.',
+      '',
+      '## Implementation Steps',
+      ...steps.map((step, index) => `- ${index + 1}. ${step.title}${step.detail ? `: ${step.detail}` : ''}`),
+      '',
+      '## Risks / Tradeoffs',
+      '- Keep the clarification UI fully data-driven to avoid task-specific behavior.',
+      ...(questions.length > 0 ? ['- Clarification answers may change the final plan before approval.'] : []),
+      ...(reason ? [`- Fallback generated because the model response was not usable: ${reason}`] : []),
+    ].join('\n');
+  }
+
+  private buildFinalizePrompt(plan: Plan, steps: PlanStep[]): string {
+    return [
+      `Original prompt:\n${plan.goal}`,
+      '',
+      `Draft plan:\n${plan.draftMarkdown || plan.summary}`,
+      '',
+      'Draft steps:',
+      ...steps.map((step) => `${step.order}. ${step.title}${step.detail ? ` - ${step.detail}` : ''}`),
+      '',
+      'Clarification questions and answers:',
+      this.formatPlanAnswers(plan),
+    ].join('\n');
+  }
+
+  private buildApprovedPlanExecutionPrompt(plan: Plan): string {
+    return [
+      'Implement the approved plan for this session.',
+      '',
+      `Original prompt: ${plan.goal}`,
+      '',
+      plan.finalMarkdown || plan.draftMarkdown || plan.summary,
+    ].join('\n');
+  }
+
+  private buildFinalPlanSnapshot(plan: Plan, steps: PlanStep[]): string {
+    const content = plan.finalMarkdown || plan.draftMarkdown || this.buildDraftMarkdown(plan.goal, plan.summary, steps, plan.questions ?? []);
+    return ['# Approved Plan Snapshot', '', content, '', '## User Selections', this.formatPlanAnswers(plan)].join('\n');
+  }
+
+  private formatPlanAnswers(plan: Plan): string {
+    const questions = plan.questions ?? [];
+    const answers = plan.answers ?? [];
+    if (questions.length === 0) return '- No clarification questions.';
+    return questions
+      .map((question) => {
+        const answer = answers.find((item) => item.questionId === question.id);
+        if (!answer) return `- ${question.title}: unanswered`;
+        const labels = this.answerChoiceLabels(question, answer);
+        const custom = answer.customAnswer?.trim();
+        const notes = answer.notes?.trim();
+        const value = [labels, custom, notes].filter(Boolean).join(' | ') || 'answered';
+        return `- ${question.title}: ${value}`;
+      })
+      .join('\n');
+  }
+
+  private answerChoiceLabels(question: PlanQuestion, answer: PlanQuestionAnswer): string {
+    const ids = answer.choiceIds?.length ? answer.choiceIds : answer.choiceId ? [answer.choiceId] : [];
+    const labels = ids.map((id) => question.choices.find((choice) => choice.id === id)?.label ?? id);
+    return labels.join(', ');
+  }
+
+  private sanitizePlanSteps(steps: unknown): Array<{ title: string; detail?: string }> {
+    if (!Array.isArray(steps)) {
+      return [];
+    }
+    const sanitized = steps
+      .map((step) => (step && typeof step === 'object' ? (step as Record<string, unknown>) : null))
+      .filter((step): step is Record<string, unknown> => Boolean(step))
+      .map((step) => ({
+        title: typeof step.title === 'string' && step.title.trim() ? step.title.trim() : 'Plan step',
+        detail: typeof step.detail === 'string' && step.detail.trim() ? step.detail.trim() : undefined,
+      }));
+    return sanitized.length > 0
+      ? sanitized
+      : [
+          { title: 'Understand the target project', detail: 'Inspect files and identify relevant modules.' },
+          { title: 'Apply the approved plan', detail: 'Make the requested changes after approval.' },
+          { title: 'Verify behavior', detail: 'Run focused checks and summarize results.' },
+        ];
+  }
+
+  private sanitizePlanQuestions(value: unknown): PlanQuestion[] {
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((item, index) => (item && typeof item === 'object' ? this.sanitizePlanQuestion(item as Record<string, unknown>, index) : null))
+      .filter((item): item is PlanQuestion => Boolean(item));
+  }
+
+  private sanitizePlanQuestion(input: Record<string, unknown>, index: number): PlanQuestion | null {
+    const choices = Array.isArray(input.choices)
+      ? input.choices
+          .map((choice, choiceIndex) =>
+            choice && typeof choice === 'object'
+              ? this.sanitizePlanQuestionChoice(choice as Record<string, unknown>, choiceIndex)
+              : null,
+          )
+          .filter((choice): choice is NonNullable<PlanQuestion['choices'][number]> => Boolean(choice))
+      : [];
+    const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : '';
+    if (!prompt && choices.length === 0) return null;
+    const id = typeof input.id === 'string' && input.id.trim() ? input.id.trim() : `question-${index + 1}`;
+    return {
+      id,
+      title: typeof input.title === 'string' && input.title.trim() ? input.title.trim() : `Question ${index + 1}`,
+      prompt,
+      choices,
+      recommendedChoiceId:
+        typeof input.recommendedChoiceId === 'string' && input.recommendedChoiceId.trim()
+          ? input.recommendedChoiceId.trim()
+          : undefined,
+      allowCustomAnswer: input.allowCustomAnswer === true,
+      notes: typeof input.notes === 'string' && input.notes.trim() ? input.notes.trim() : undefined,
+      required: typeof input.required === 'boolean' ? input.required : undefined,
+      multiSelect: typeof input.multiSelect === 'boolean' ? input.multiSelect : undefined,
+    };
+  }
+
+  private sanitizePlanQuestionChoice(input: Record<string, unknown>, index: number): PlanQuestion['choices'][number] | null {
+    const label = typeof input.label === 'string' ? input.label.trim() : '';
+    if (!label) return null;
+    return {
+      id: typeof input.id === 'string' && input.id.trim() ? input.id.trim() : `choice-${index + 1}`,
+      label,
+      description: typeof input.description === 'string' && input.description.trim() ? input.description.trim() : undefined,
+      notes: typeof input.notes === 'string' && input.notes.trim() ? input.notes.trim() : undefined,
+    };
+  }
+
+  private sanitizePlanAnswers(value: unknown): PlanQuestionAnswer[] {
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((item) => (item && typeof item === 'object' ? (item as Record<string, unknown>) : null))
+      .filter((item): item is Record<string, unknown> => item !== null && typeof item.questionId === 'string')
+      .map((item) => ({
+        questionId: String(item.questionId),
+        choiceId: typeof item.choiceId === 'string' && item.choiceId.trim() ? item.choiceId.trim() : undefined,
+        choiceIds: Array.isArray(item.choiceIds)
+          ? item.choiceIds.filter((choiceId): choiceId is string => typeof choiceId === 'string' && choiceId.trim().length > 0)
+          : undefined,
+        customAnswer:
+          typeof item.customAnswer === 'string' && item.customAnswer.trim() ? item.customAnswer.trim() : undefined,
+        notes: typeof item.notes === 'string' && item.notes.trim() ? item.notes.trim() : undefined,
+      }));
+  }
+
+  private normalizePlanForResponse(plan: Plan): Plan {
+    plan.status = this.normalizePlanStatus(plan.status);
+    plan.draftMarkdown ??= '';
+    plan.finalMarkdown ??= null;
+    plan.questions = this.sanitizePlanQuestions(plan.questions ?? []);
+    plan.answers = this.sanitizePlanAnswers(plan.answers ?? []);
+    return plan;
+  }
+
+  private normalizePlanStatus(status: PlanStatus | string): PlanStatus {
+    if (status === LEGACY_PENDING_APPROVAL_STATUS) return PlanStatus.PlanReadyPendingApproval;
+    if (status === LEGACY_REJECTED_STATUS) return PlanStatus.Cancelled;
+    if (status === 'running' || status === 'completed') return PlanStatus.Approved;
+    if (Object.values(PlanStatus).includes(status as PlanStatus)) return status as PlanStatus;
+    return PlanStatus.Failed;
+  }
+
+  private isApprovablePlan(status: PlanStatus | string): boolean {
+    const normalized = this.normalizePlanStatus(status);
+    return normalized === PlanStatus.PlanReadyPendingApproval || normalized === PlanStatus.PlanReview;
   }
 
   private parseToolArguments(payload: string): Record<string, unknown> {

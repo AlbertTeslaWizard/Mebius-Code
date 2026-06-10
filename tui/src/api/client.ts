@@ -10,6 +10,7 @@ import type {
   PermissionMode,
   PermissionsCommandResult,
   PlanBundle,
+  PlanQuestionAnswer,
   Project,
   ProjectFile,
   Session,
@@ -107,17 +108,17 @@ export class ApiClient {
     return this.request<Message[]>(`/sessions/${sessionId}/messages`);
   }
 
-  async runAgent(sessionId: string, message: string, approvedPlanId?: string): Promise<unknown> {
+  async runAgent(sessionId: string, message?: string, approvedPlanId?: string): Promise<unknown> {
     return this.request(`/sessions/${sessionId}/run`, {
       method: 'POST',
-      body: JSON.stringify({ message, approvedPlanId }),
+      body: JSON.stringify({ ...(message ? { message } : {}), ...(approvedPlanId ? { approvedPlanId } : {}) }),
     });
   }
 
-  async createPlan(sessionId: string, goal: string): Promise<PlanBundle> {
+  async createPlan(sessionId: string, goal: string, clientRequestId?: string): Promise<PlanBundle> {
     return this.request<PlanBundle>(`/sessions/${sessionId}/plan`, {
       method: 'POST',
-      body: JSON.stringify({ goal }),
+      body: JSON.stringify({ goal, ...(clientRequestId ? { clientRequestId } : {}) }),
     });
   }
 
@@ -127,6 +128,17 @@ export class ApiClient {
 
   async approvePlan(planId: string): Promise<PlanBundle['plan']> {
     return this.request<PlanBundle['plan']>(`/plans/${planId}/approve`, { method: 'POST' });
+  }
+
+  async updatePlanAnswers(planId: string, answers: PlanQuestionAnswer[]): Promise<PlanBundle> {
+    return this.request<PlanBundle>(`/plans/${planId}/answers`, {
+      method: 'PATCH',
+      body: JSON.stringify({ answers }),
+    });
+  }
+
+  async finalizePlan(planId: string): Promise<PlanBundle> {
+    return this.request<PlanBundle>(`/plans/${planId}/finalize`, { method: 'POST' });
   }
 
   async cancelPlan(planId: string): Promise<PlanBundle['plan']> {

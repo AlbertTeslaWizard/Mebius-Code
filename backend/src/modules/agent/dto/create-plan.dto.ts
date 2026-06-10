@@ -8,5 +8,8 @@ export class CreatePlanDto {
   @IsOptional()
   @IsString()
   modelConfigId?: string;
-}
 
+  @IsOptional()
+  @IsString()
+  clientRequestId?: string;
+}

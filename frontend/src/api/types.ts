@@ -196,15 +196,49 @@ export interface PlanStep {
 
 export interface Plan {
   id: string;
+  goal?: string;
   summary: string;
   status: string;
+  draftMarkdown?: string;
+  finalMarkdown?: string | null;
+  questions?: PlanQuestion[];
+  answers?: PlanQuestionAnswer[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface PlanQuestionChoice {
+  id: string;
+  label: string;
+  description?: string;
+  notes?: string;
+}
+
+export interface PlanQuestion {
+  id: string;
+  title: string;
+  prompt: string;
+  choices: PlanQuestionChoice[];
+  recommendedChoiceId?: string;
+  allowCustomAnswer: boolean;
+  notes?: string;
+  required?: boolean;
+  multiSelect?: boolean;
+}
+
+export interface PlanQuestionAnswer {
+  questionId: string;
+  choiceId?: string;
+  choiceIds?: string[];
+  customAnswer?: string;
+  notes?: string;
 }
 
 export interface PlanBundle {
   plan: Plan;
   steps: PlanStep[];
+  questions?: PlanQuestion[];
+  answers?: PlanQuestionAnswer[];
 }
 
 export interface FilePatch {
