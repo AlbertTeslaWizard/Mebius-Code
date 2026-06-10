@@ -35,6 +35,12 @@ export class AgentController {
     return this.agent.approvePlan(owner, id);
   }
 
+  @Post('plans/:id/cancel')
+  async cancelPlan(@Req() request: RequestWithUser, @Param('id') id: string) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.agent.cancelPlan(owner, id);
+  }
+
   @Post('sessions/:id/run')
   async run(@Req() request: RequestWithUser, @Param('id') id: string, @Body() dto: RunAgentDto) {
     const owner = await this.users.findById(request.user.sub);

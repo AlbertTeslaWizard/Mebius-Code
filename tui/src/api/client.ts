@@ -129,6 +129,10 @@ export class ApiClient {
     return this.request<PlanBundle['plan']>(`/plans/${planId}/approve`, { method: 'POST' });
   }
 
+  async cancelPlan(planId: string): Promise<PlanBundle['plan']> {
+    return this.request<PlanBundle['plan']>(`/plans/${planId}/cancel`, { method: 'POST' });
+  }
+
   async pendingApprovals(): Promise<Approval[]> {
     return this.request<Approval[]>('/approvals/pending');
   }

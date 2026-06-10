@@ -235,7 +235,12 @@ export async function refreshReviewData(state: WorkspaceState): Promise<Partial<
 }
 
 function shouldRefreshReviewData(eventType: string): boolean {
-  return eventType === 'tool_call_requested' || eventType === 'tool_call_result' || eventType === 'command_output';
+  return (
+    eventType === 'tool_call_requested' ||
+    eventType === 'tool_call_result' ||
+    eventType === 'command_output' ||
+    eventType === 'plan_updated'
+  );
 }
 
 function reduceEvent(state: WorkspaceState, event: SseEvent): WorkspaceState {

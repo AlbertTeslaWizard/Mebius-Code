@@ -171,7 +171,7 @@ export interface Approval {
 }
 
 export interface PlanBundle {
-  plan: { id: string; summary: string; status: string };
+  plan: { id: string; goal: string; summary: string; status: string };
   steps: Array<{ id: string; order: number; title: string; detail?: string; status: string }>;
 }
 

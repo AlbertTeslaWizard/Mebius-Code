@@ -85,6 +85,7 @@ export class AgentService {
       this.plans.create({
         session,
         status: PlanStatus.PendingApproval,
+        goal: dto.goal,
         summary: parsed.summary,
       }),
     );
@@ -99,9 +100,14 @@ export class AgentService {
         }),
       ),
     );
-    await this.sessions.addMessage(session, MessageRole.Assistant, parsed.summary, {
+    const message = await this.sessions.addMessage(session, MessageRole.Assistant, parsed.summary, {
       type: 'plan',
       planId: plan.id,
+    });
+    this.events.publish(session.id, 'message_created', {
+      id: message.id,
+      role: message.role,
+      content: message.content,
     });
     this.events.publish(session.id, 'plan_updated', {
       planId: plan.id,
@@ -115,6 +121,17 @@ export class AgentService {
   async approvePlan(owner: User, planId: string): Promise<Plan> {
     const plan = await this.findOwnedPlan(owner.id, planId);
     plan.status = PlanStatus.Approved;
+    const saved = await this.plans.save(plan);
+    this.events.publish(plan.session.id, 'plan_updated', {
+      planId: plan.id,
+      status: saved.status,
+    });
+    return saved;
+  }
+
+  async cancelPlan(owner: User, planId: string): Promise<Plan> {
+    const plan = await this.findOwnedPlan(owner.id, planId);
+    plan.status = PlanStatus.Cancelled;
     const saved = await this.plans.save(plan);
     this.events.publish(plan.session.id, 'plan_updated', {
       planId: plan.id,

@@ -1,6 +1,7 @@
 import { BadGatewayException } from '@nestjs/common';
 import { Repository } from 'typeorm';
 import { MessageRole } from '../../common/enums/message-role.enum';
+import { PlanStatus } from '../../common/enums/plan-status.enum';
 import { ApprovalStatus, ToolCallStatus } from '../../common/enums/tool-status.enum';
 import { EventsService } from '../events/events.service';
 import { ModelConfigsService, RuntimeModelConfig } from '../model-configs/model-configs.service';
@@ -22,10 +23,15 @@ describe('AgentService', () => {
   const userMessage = messageFixture('message-user', MessageRole.User, 'Explain this project');
 
   const plans = {
+    create: jest.fn((value) => value),
     findOne: jest.fn(),
     save: jest.fn(async (value) => value),
   } as unknown as jest.Mocked<Repository<Plan>>;
-  const planSteps = {} as jest.Mocked<Repository<PlanStep>>;
+  const planSteps = {
+    create: jest.fn((value) => value),
+    find: jest.fn(),
+    save: jest.fn(async (value) => value),
+  } as unknown as jest.Mocked<Repository<PlanStep>>;
   const sessions = {
     findOwned: jest.fn(),
     addMessage: jest.fn(),
@@ -37,6 +43,7 @@ describe('AgentService', () => {
     findRuntime: jest.fn(),
   } as unknown as jest.Mocked<ModelConfigsService>;
   const llm = {
+    chat: jest.fn(),
     streamChat: jest.fn(),
   } as unknown as jest.Mocked<OpenAiCompatibleService>;
   const tools = {
@@ -68,7 +75,11 @@ describe('AgentService', () => {
     sessions.findPendingApprovalTool.mockResolvedValue(null);
     tools.listAllowedCommands.mockResolvedValue([]);
     plans.findOne.mockResolvedValue(null);
+    plans.create.mockImplementation((value) => value as Plan);
     plans.save.mockImplementation(async (value) => value as Plan);
+    planSteps.create.mockImplementation((value) => value as PlanStep);
+    planSteps.find.mockResolvedValue([]);
+    (planSteps.save as jest.Mock).mockImplementation(async (value: unknown) => value);
     modelConfigs.findRuntime.mockResolvedValue({
       id: 'config-1',
       displayName: 'Test config',
@@ -81,6 +92,145 @@ describe('AgentService', () => {
       createdAt: new Date('2026-06-02T00:00:00.000Z'),
       updatedAt: new Date('2026-06-02T00:00:00.000Z'),
     } satisfies RuntimeModelConfig);
+  });
+
+  it('creates a pending plan with the original goal and publishes plan decision events', async () => {
+    llm.chat.mockResolvedValueOnce({
+      content: JSON.stringify({
+        summary: 'Fix the Plan Mode approval flow.',
+        steps: [
+          { title: 'Inspect Plan Mode', detail: 'Find the current TUI state machine.' },
+          { title: 'Add approval panel', detail: 'Render choices after the plan is ready.' },
+        ],
+      }),
+    });
+    plans.save.mockImplementationOnce(async (value) => ({
+      ...(value as Plan),
+      id: 'plan-1',
+      createdAt: new Date('2026-06-02T00:00:00.000Z'),
+      updatedAt: new Date('2026-06-02T00:00:00.000Z'),
+    }));
+    (planSteps.save as jest.Mock).mockImplementationOnce(async (value: PlanStep[]) =>
+      (value as PlanStep[]).map((step, index) => ({
+        ...step,
+        id: `step-${index + 1}`,
+      }) as PlanStep),
+    );
+
+    const result = await service.createPlan(owner, session.id, { goal: 'Fix Plan Mode approval UX' });
+
+    expect(plans.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        session,
+        status: PlanStatus.PendingApproval,
+        goal: 'Fix Plan Mode approval UX',
+        summary: 'Fix the Plan Mode approval flow.',
+      }),
+    );
+    expect(planSteps.create).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        plan: expect.objectContaining({ id: 'plan-1' }),
+        order: 1,
+        title: 'Inspect Plan Mode',
+        detail: 'Find the current TUI state machine.',
+      }),
+    );
+    expect(sessions.addMessage).toHaveBeenCalledWith(
+      session,
+      MessageRole.Assistant,
+      'Fix the Plan Mode approval flow.',
+      { type: 'plan', planId: 'plan-1' },
+    );
+    expect(events.publish).toHaveBeenCalledWith(
+      session.id,
+      'message_created',
+      expect.objectContaining({
+        role: MessageRole.Assistant,
+        content: 'Fix the Plan Mode approval flow.',
+      }),
+    );
+    expect(events.publish).toHaveBeenCalledWith(
+      session.id,
+      'plan_updated',
+      expect.objectContaining({
+        planId: 'plan-1',
+        status: PlanStatus.PendingApproval,
+        summary: 'Fix the Plan Mode approval flow.',
+      }),
+    );
+    expect(result.plan).toEqual(expect.objectContaining({ id: 'plan-1', goal: 'Fix Plan Mode approval UX' }));
+    expect(result.steps).toHaveLength(2);
+  });
+
+  it('approves an owned plan and publishes a plan update', async () => {
+    const plan = planFixture({ id: 'plan-1', status: PlanStatus.PendingApproval });
+    plans.findOne.mockResolvedValueOnce(plan);
+
+    const result = await service.approvePlan(owner, plan.id);
+
+    expect(result.status).toBe(PlanStatus.Approved);
+    expect(plans.save).toHaveBeenCalledWith(expect.objectContaining({ id: plan.id, status: PlanStatus.Approved }));
+    expect(events.publish).toHaveBeenCalledWith(session.id, 'plan_updated', {
+      planId: plan.id,
+      status: PlanStatus.Approved,
+    });
+  });
+
+  it('cancels an owned plan and publishes a plan update', async () => {
+    const plan = planFixture({ id: 'plan-1', status: PlanStatus.PendingApproval });
+    plans.findOne.mockResolvedValueOnce(plan);
+
+    const result = await service.cancelPlan(owner, plan.id);
+
+    expect(result.status).toBe(PlanStatus.Cancelled);
+    expect(plans.save).toHaveBeenCalledWith(expect.objectContaining({ id: plan.id, status: PlanStatus.Cancelled }));
+    expect(events.publish).toHaveBeenCalledWith(session.id, 'plan_updated', {
+      planId: plan.id,
+      status: PlanStatus.Cancelled,
+    });
+  });
+
+  it('runs an approved plan by marking it running and then completed', async () => {
+    const plan = planFixture({ id: 'plan-1', status: PlanStatus.Approved, goal: 'Fix Plan Mode approval UX' });
+    plans.findOne.mockResolvedValueOnce(plan).mockResolvedValueOnce(plan);
+    sessions.listMessages.mockResolvedValueOnce([
+      messageFixture('message-plan-goal', MessageRole.User, plan.goal),
+    ]);
+    llm.streamChat.mockResolvedValueOnce({ content: 'Implemented the approved plan.' });
+
+    const result = await service.run(owner, session.id, {
+      message: plan.goal,
+      approvedPlanId: plan.id,
+    });
+
+    expect(events.publish).toHaveBeenCalledWith(session.id, 'plan_updated', {
+      planId: plan.id,
+      status: PlanStatus.Running,
+    });
+    expect(events.publish).toHaveBeenCalledWith(session.id, 'plan_updated', {
+      planId: plan.id,
+      status: PlanStatus.Completed,
+    });
+    expect(llm.streamChat.mock.calls[0][0].messages).toEqual(
+      expect.arrayContaining([expect.objectContaining({ role: 'user', content: plan.goal })]),
+    );
+    expect(result.assistant).toEqual(expect.objectContaining({ content: 'Implemented the approved plan.' }));
+  });
+
+  it('rejects executing a plan that has not been approved', async () => {
+    const plan = planFixture({ id: 'plan-1', status: PlanStatus.PendingApproval });
+    plans.findOne.mockResolvedValueOnce(plan);
+
+    await expect(
+      service.run(owner, session.id, {
+        message: 'Fix Plan Mode approval UX',
+        approvedPlanId: plan.id,
+      }),
+    ).rejects.toThrow('Only approved plans can be executed.');
+
+    expect(sessions.addMessage).not.toHaveBeenCalled();
+    expect(llm.streamChat).not.toHaveBeenCalled();
   });
 
   it('continues the model turn after a non-approval tool call and saves a final answer', async () => {
@@ -584,6 +734,23 @@ describe('AgentService', () => {
     );
   });
 });
+
+function planFixture(input: {
+  id: string;
+  status: PlanStatus;
+  goal?: string;
+  summary?: string;
+}): Plan {
+  return {
+    id: input.id,
+    session: { id: 'session-1' } as Session,
+    status: input.status,
+    goal: input.goal ?? 'Fix Plan Mode approval UX',
+    summary: input.summary ?? 'Fix the Plan Mode approval flow.',
+    createdAt: new Date('2026-06-02T00:00:00.000Z'),
+    updatedAt: new Date('2026-06-02T00:00:00.000Z'),
+  } as Plan;
+}
 
 function messageFixture(
   id: string,

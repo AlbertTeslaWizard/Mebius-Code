@@ -12,10 +12,12 @@ import type {
   ModelChoice,
   ModelsCommandResult,
   PermissionMode,
+  PlanBundle,
   Session,
   TuiThemeName,
 } from '../types';
 import { ApprovalInlinePanel, type ApprovalChoice } from './ApprovalInlinePanel';
+import { PlanApprovalPanel, type PlanDecisionChoice } from './PlanApprovalPanel';
 import { getTuiTheme, resolveTuiThemeName, tuiThemeList, type TuiTheme } from './theme';
 
 const ThemeContext = createContext<Accessor<TuiTheme>>();
@@ -248,6 +250,7 @@ const composerSubmitKeyBindings: Array<{ name: string; action: TextareaAction }>
   { name: 'linefeed', action: 'submit' },
 ];
 const APPROVAL_CHOICE_ORDER: ApprovalChoice[] = ['allow_once', 'allow_always', 'reject'];
+const PLAN_DECISION_CHOICE_ORDER: PlanDecisionChoice[] = ['start', 'modify', 'discuss', 'cancel'];
 const DEFAULT_PERMISSION_MODE: PermissionMode = 'ask_first';
 const PERMISSION_MODE_OPTIONS: Array<{
   mode: PermissionMode;
@@ -284,13 +287,21 @@ const HIGH_LEVEL_EVENT_TYPES = new Set([
   'model_call_started',
   'model_call_completed',
   'model_call_failed',
+  'plan_updated',
   'stream_fallback',
   'stream_interrupted',
   'stream_error',
   'error',
   'done',
 ]);
-const RUNNING_AGENT_STATUSES = new Set(['thinking', 'responding', 'using_tools', 'waiting_for_approval', 'working']);
+const RUNNING_AGENT_STATUSES = new Set([
+  'thinking',
+  'responding',
+  'using_tools',
+  'waiting_for_approval',
+  'working',
+  'awaiting_plan_decision',
+]);
 const COMPLETED_AGENT_STATUSES = new Set(['completed']);
 const ERROR_AGENT_STATUSES = new Set(['failed', 'error']);
 const MIN_SESSION_TITLE_LENGTH = 2;
@@ -298,7 +309,7 @@ const MAX_SESSION_TITLE_LENGTH = 120;
 const SESSION_WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const SESSION_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-type TaskStatus = 'idle' | 'running' | 'completed' | 'error';
+type TaskStatus = 'idle' | 'running' | 'completed' | 'error' | 'awaiting_plan_decision';
 type StatusEvent = WorkspaceState['events'][number];
 
 export function App(props: AppProps) {
@@ -317,6 +328,9 @@ export function App(props: AppProps) {
   const [lastSlashQuery, setLastSlashQuery] = createSignal<string | null>(null);
   const [approvalChoice, setApprovalChoice] = createSignal<ApprovalChoice>('allow_once');
   const [lastApprovalId, setLastApprovalId] = createSignal<string | null>(null);
+  const [planDecisionChoice, setPlanDecisionChoice] = createSignal<PlanDecisionChoice>('start');
+  const [lastPlanDecisionId, setLastPlanDecisionId] = createSignal<string | null>(null);
+  const [dismissedPlanDecisionId, setDismissedPlanDecisionId] = createSignal<string | null>(null);
   const [themePalette, setThemePalette] = createSignal<ThemePaletteState | null>(null);
   const [permissionPalette, setPermissionPalette] = createSignal<PermissionPaletteState | null>(null);
   const [sessionPalette, setSessionPalette] = createSignal<SessionPaletteState | null>(null);
@@ -331,16 +345,27 @@ export function App(props: AppProps) {
   onCleanup(() => stopEventStream());
 
   const activeApproval = createMemo(() => state().approvals[0]);
+  const latestPendingPlan = createMemo(() => {
+    const plan = state().plan;
+    return plan?.plan.status === 'pending_approval' ? plan : undefined;
+  });
+  const planDecisionPlan = createMemo(() => {
+    const plan = latestPendingPlan();
+    if (!plan || activeApproval() || dismissedPlanDecisionId() === plan.plan.id) return undefined;
+    if (modelPalette() || commandPalette() || themePalette() || permissionPalette() || sessionPalette()) return undefined;
+    return plan;
+  });
   const activeModelInfo = createMemo(() => getActiveModelInfo(state()));
   const theme = createMemo(() => getTuiTheme(themeName()));
   const composerAccentColor = createMemo(() => composerModeAccent(composerMode(), theme()));
   const rightTitle = createMemo(() => {
     const approval = activeApproval();
     if (approval) return `Approval - ${approval.toolCall.name}`;
+    if (planDecisionPlan()) return 'Plan Approval';
     return 'Status';
   });
   const slashQuery = createMemo(() => {
-    if (modelPalette() || commandPalette() || themePalette() || sessionPalette()) return null;
+    if (modelPalette() || commandPalette() || themePalette() || permissionPalette() || sessionPalette() || planDecisionPlan()) return null;
     return getSlashQuery(input(), composerCursorOffset());
   });
   const filteredSlashSuggestions = createMemo(() => {
@@ -349,7 +374,7 @@ export function App(props: AppProps) {
   });
   const slashAutocompleteVisible = createMemo(() => {
     const query = slashQuery();
-    return !activeApproval() && query !== null && dismissedSlashQuery() !== query;
+    return !activeApproval() && !planDecisionPlan() && query !== null && dismissedSlashQuery() !== query;
   });
 
   createEffect(() => {
@@ -357,6 +382,16 @@ export function App(props: AppProps) {
     if (nextApprovalId === lastApprovalId()) return;
     setLastApprovalId(nextApprovalId);
     setApprovalChoice('allow_once');
+  });
+
+  createEffect(() => {
+    const nextPlanId = latestPendingPlan()?.plan.id ?? null;
+    if (nextPlanId === lastPlanDecisionId()) return;
+    setLastPlanDecisionId(nextPlanId);
+    setPlanDecisionChoice('start');
+    if (nextPlanId !== dismissedPlanDecisionId()) {
+      setDismissedPlanDecisionId(null);
+    }
   });
 
   createEffect(() => {
@@ -415,6 +450,10 @@ export function App(props: AppProps) {
     );
   }
 
+  function planDecisionUiActive(): boolean {
+    return Boolean(planDecisionPlan());
+  }
+
   useKeyboard((event) => {
     const name = event.name.toLowerCase();
     if (event.ctrl && name === 'p') {
@@ -425,6 +464,12 @@ export function App(props: AppProps) {
     }
 
     if (approvalUiActive() && handleApprovalKeyDown(event)) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
+    if (planDecisionUiActive() && handlePlanDecisionKeyDown(event)) {
       event.preventDefault();
       event.stopPropagation();
       return;
@@ -701,11 +746,40 @@ export function App(props: AppProps) {
     return false;
   }
 
+  function handlePlanDecisionKeyDown(event: KeyEvent): boolean {
+    const name = event.name.toLowerCase();
+    if (name === 'up' || name === 'arrowup' || name === 'left' || name === 'arrowleft') {
+      movePlanDecisionChoice(-1);
+      return true;
+    }
+    if (name === 'down' || name === 'arrowdown' || name === 'right' || name === 'arrowright') {
+      movePlanDecisionChoice(1);
+      return true;
+    }
+    if (isEnterKey(name)) {
+      void confirmSelectedPlanDecisionChoice();
+      return true;
+    }
+    if (name === 'escape') {
+      dismissPlanDecision();
+      return true;
+    }
+    return false;
+  }
+
   function moveApprovalChoice(delta: number) {
     setApprovalChoice((current) => {
       const currentIndex = APPROVAL_CHOICE_ORDER.indexOf(current);
       const nextIndex = moveIndex(currentIndex >= 0 ? currentIndex : 0, delta, APPROVAL_CHOICE_ORDER.length);
       return APPROVAL_CHOICE_ORDER[nextIndex];
+    });
+  }
+
+  function movePlanDecisionChoice(delta: number) {
+    setPlanDecisionChoice((current) => {
+      const currentIndex = PLAN_DECISION_CHOICE_ORDER.indexOf(current);
+      const nextIndex = moveIndex(currentIndex >= 0 ? currentIndex : 0, delta, PLAN_DECISION_CHOICE_ORDER.length);
+      return PLAN_DECISION_CHOICE_ORDER[nextIndex];
     });
   }
 
@@ -732,6 +806,80 @@ export function App(props: AppProps) {
 
   async function rejectPendingRequest() {
     await runInlineApprovalAction(() => rejectPendingToolRequest());
+  }
+
+  async function confirmSelectedPlanDecisionChoice(choice = planDecisionChoice()) {
+    if (choice === 'start') {
+      await startWritingFromPendingPlan();
+      return;
+    }
+    if (choice === 'modify') {
+      openPlanRevisionComposer();
+      return;
+    }
+    if (choice === 'discuss') {
+      openPlanDiscussionComposer();
+      return;
+    }
+    await cancelPendingPlanDecision();
+  }
+
+  function dismissPlanDecision() {
+    const plan = planDecisionPlan();
+    if (!plan) return;
+    setDismissedPlanDecisionId(plan.plan.id);
+    setState((prev) => ({ ...prev, activity: 'Plan decision dismissed' }));
+  }
+
+  function openPlanRevisionComposer() {
+    const plan = planDecisionPlan();
+    if (!plan) return;
+    setDismissedPlanDecisionId(plan.plan.id);
+    setComposerMode('plan');
+    setInput('');
+    setComposerCursorOffset(0);
+    setState((prev) => ({ ...prev, activity: 'Revise plan', error: '' }));
+  }
+
+  function openPlanDiscussionComposer() {
+    const plan = planDecisionPlan();
+    if (!plan) return;
+    setDismissedPlanDecisionId(plan.plan.id);
+    setComposerMode('build');
+    setInput('');
+    setComposerCursorOffset(0);
+    setState((prev) => ({ ...prev, activity: 'Ready', error: '' }));
+  }
+
+  async function startWritingFromPendingPlan() {
+    const plan = planDecisionPlan();
+    if (!plan) return;
+    await runInlinePlanDecisionAction(() => approveAndRunPlan(plan));
+  }
+
+  async function cancelPendingPlanDecision() {
+    const plan = planDecisionPlan();
+    if (!plan) return;
+    await runInlinePlanDecisionAction(() => cancelPlan(plan));
+  }
+
+  async function runInlinePlanDecisionAction(action: () => Promise<void>) {
+    if (busy()) return;
+    setBusy(true);
+    try {
+      await action();
+      const updates = await refreshReviewData(state());
+      setState((current) => ({ ...current, ...updates }));
+    } catch (error) {
+      const updates = await refreshReviewData(state()).catch(() => ({}));
+      setState((current) => ({
+        ...current,
+        ...updates,
+        error: error instanceof Error ? error.message : 'Operation failed.',
+      }));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function runInlineApprovalAction(action: () => Promise<void>) {
@@ -1074,8 +1222,7 @@ export function App(props: AppProps) {
     if (value === '/plan-approve') {
       const plan = current.plan;
       if (!plan) throw new Error('No plan to approve.');
-      const approved = await current.api.approvePlan(plan.plan.id);
-      setState((prev) => ({ ...prev, plan: { ...plan, plan: approved } }));
+      await approveAndRunPlan(plan);
       return;
     }
     if (value === '/stream-test') {
@@ -1194,10 +1341,38 @@ export function App(props: AppProps) {
     const current = state();
     setState((prev) => ({ ...prev, activity: 'Planning' }));
     const plan = await current.api.createPlan(current.session.id, goal);
-    setState((prev) => ({ ...prev, plan, activity: 'Ready' }));
+    setState((prev) => ({ ...prev, plan, activity: 'awaiting_plan_decision' }));
   }
 
-  async function runAgentPrompt(value: string) {
+  async function approveAndRunPlan(plan: PlanBundle) {
+    if (plan.plan.status !== 'pending_approval' && plan.plan.status !== 'approved') {
+      throw new Error(`Plan is ${plan.plan.status} and cannot be started.`);
+    }
+    const approved = plan.plan.status === 'approved' ? plan.plan : await state().api.approvePlan(plan.plan.id);
+    setDismissedPlanDecisionId(plan.plan.id);
+    setState((prev) => ({
+      ...prev,
+      plan: { ...plan, plan: approved },
+      streamStatus: { mode: 'idle' },
+      activity: 'Starting approved plan',
+      error: '',
+    }));
+    await runAgentPrompt(plan.plan.goal || plan.plan.summary, plan.plan.id);
+  }
+
+  async function cancelPlan(plan: PlanBundle) {
+    const cancelled = await state().api.cancelPlan(plan.plan.id);
+    setDismissedPlanDecisionId(plan.plan.id);
+    setState((prev) => ({
+      ...prev,
+      plan: { ...plan, plan: cancelled },
+      streamStatus: { mode: 'idle' },
+      activity: 'Plan cancelled',
+      error: '',
+    }));
+  }
+
+  async function runAgentPrompt(value: string, approvedPlanId?: string) {
     const current = state();
     setState((prev) => ({
       ...prev,
@@ -1214,7 +1389,7 @@ export function App(props: AppProps) {
       activity: 'Thinking',
       error: '',
     }));
-    await current.api.runAgent(current.session.id, value);
+    await current.api.runAgent(current.session.id, value, approvedPlanId);
   }
 
   async function chooseModel(choice: ModelChoice, apiKey?: string) {
@@ -1313,6 +1488,7 @@ export function App(props: AppProps) {
               value: input(),
               focused:
                 !activeApproval() &&
+                !planDecisionPlan() &&
                 !modelPalette() &&
                 !commandPalette() &&
                 !themePalette() &&
@@ -1343,8 +1519,28 @@ export function App(props: AppProps) {
                   }
                 : undefined
             }
+            planApproval={
+              planDecisionPlan()
+                ? {
+                    plan: planDecisionPlan()!,
+                    selectedChoice: planDecisionChoice(),
+                    busy: busy(),
+                    onSelectChoice: setPlanDecisionChoice,
+                    onConfirmChoice: (choice) => {
+                      void confirmSelectedPlanDecisionChoice(choice);
+                    },
+                  }
+                : undefined
+            }
           />
-          <RightPanel title={rightTitle()} approval={activeApproval()} state={state()} mode={composerMode()} busy={busy()} />
+          <RightPanel
+            title={rightTitle()}
+            approval={activeApproval()}
+            state={state()}
+            mode={composerMode()}
+            busy={busy()}
+            awaitingPlanDecision={Boolean(planDecisionPlan())}
+          />
         </box>
 
         <Show when={commandPalette()}>
@@ -2073,9 +2269,16 @@ function ChatPanel(props: {
     onAllowAlways: () => void;
     onReject: () => void;
   };
+  planApproval?: {
+    plan: PlanBundle;
+    selectedChoice: PlanDecisionChoice;
+    busy: boolean;
+    onSelectChoice: (choice: PlanDecisionChoice) => void;
+    onConfirmChoice: (choice: PlanDecisionChoice) => void;
+  };
 }) {
   const theme = useTheme();
-  const approvalPending = createMemo(() => Boolean(props.approvalInline));
+  const panelPending = createMemo(() => Boolean(props.approvalInline || props.planApproval));
   return (
     <box
       border
@@ -2105,7 +2308,7 @@ function ChatPanel(props: {
           {(message) => <MessageBlock message={message} />}
         </Index>
       </scrollbox>
-      <Show when={!approvalPending() && props.slashAutocomplete.visible}>
+      <Show when={!panelPending() && props.slashAutocomplete.visible}>
         <SlashCommandAutocomplete
           suggestions={props.slashAutocomplete.suggestions}
           selectedIndex={props.slashAutocomplete.selectedIndex}
@@ -2114,7 +2317,23 @@ function ChatPanel(props: {
       </Show>
       <Show
         when={props.approvalInline}
-        fallback={<Composer {...props.composer} />}
+        fallback={
+          <Show
+            when={props.planApproval}
+            fallback={<Composer {...props.composer} />}
+          >
+            {(planApproval) => (
+              <PlanApprovalPanel
+                plan={planApproval().plan}
+                selectedChoice={planApproval().selectedChoice}
+                busy={planApproval().busy}
+                theme={theme()}
+                onSelectChoice={planApproval().onSelectChoice}
+                onConfirmChoice={planApproval().onConfirmChoice}
+              />
+            )}
+          </Show>
+        }
       >
         {(approvalInline) => (
           <ApprovalInlinePanel
@@ -2314,6 +2533,7 @@ function RightPanel(props: {
   state: WorkspaceState;
   mode: ComposerMode;
   busy: boolean;
+  awaitingPlanDecision: boolean;
 }) {
   const theme = useTheme();
   return (
@@ -2329,7 +2549,17 @@ function RightPanel(props: {
         backgroundColor: theme().panel,
       }}
     >
-      <Show when={props.approval} fallback={<StatusPanel state={props.state} mode={props.mode} busy={props.busy} />}>
+      <Show
+        when={props.approval}
+        fallback={
+          <StatusPanel
+            state={props.state}
+            mode={props.mode}
+            busy={props.busy}
+            awaitingPlanDecision={props.awaitingPlanDecision}
+          />
+        }
+      >
         {(approval) => <ApprovalView approval={approval()} />}
       </Show>
     </box>
@@ -2383,10 +2613,10 @@ function Preview(props: { preview: ApprovalPreview }) {
   );
 }
 
-function StatusPanel(props: { state: WorkspaceState; mode: ComposerMode; busy: boolean }) {
+function StatusPanel(props: { state: WorkspaceState; mode: ComposerMode; busy: boolean; awaitingPlanDecision: boolean }) {
   const theme = useTheme();
   const modelInfo = createMemo(() => getActiveModelInfo(props.state));
-  const taskStatus = createMemo(() => deriveTaskStatus(props.state, props.busy));
+  const taskStatus = createMemo(() => deriveTaskStatus(props.state, props.busy, props.awaitingPlanDecision));
   const contextTokens = createMemo(() => estimateContextTokens(props.state.messages));
   const recentEvents = createMemo(() => props.state.events.filter(isHighLevelEvent).slice(0, 5));
 
@@ -2469,7 +2699,7 @@ function StatusRow(props: { label: string; value: string; valueColor?: string })
   );
 }
 
-function deriveTaskStatus(state: WorkspaceState, busy: boolean): TaskStatus {
+function deriveTaskStatus(state: WorkspaceState, busy: boolean, awaitingPlanDecision: boolean): TaskStatus {
   const events = state.events.filter(isHighLevelEvent);
   const latest = events[0];
   const latestAgentStatus = events
@@ -2479,6 +2709,9 @@ function deriveTaskStatus(state: WorkspaceState, busy: boolean): TaskStatus {
 
   if (state.error.trim() || isErrorEvent(latest) || (latestAgentStatus && ERROR_AGENT_STATUSES.has(latestAgentStatus))) {
     return 'error';
+  }
+  if (awaitingPlanDecision || state.plan?.plan.status === 'pending_approval') {
+    return 'awaiting_plan_decision';
   }
   if (latest?.type === 'done' || (latestAgentStatus && COMPLETED_AGENT_STATUSES.has(latestAgentStatus))) {
     return 'completed';
@@ -2513,6 +2746,7 @@ function isErrorEvent(event: StatusEvent | undefined): boolean {
 function statusColor(status: TaskStatus, theme: TuiTheme): string {
   if (status === 'completed') return theme.green;
   if (status === 'running') return theme.yellow;
+  if (status === 'awaiting_plan_decision') return theme.yellow;
   if (status === 'error') return theme.red;
   return theme.muted;
 }
@@ -2520,6 +2754,13 @@ function statusColor(status: TaskStatus, theme: TuiTheme): string {
 function eventColor(event: StatusEvent, theme: TuiTheme): string {
   if (isErrorEvent(event)) return theme.red;
   if (event.type === 'done' || event.type === 'model_call_completed') return theme.green;
+  if (event.type === 'plan_updated') {
+    const status = eventString(event, 'status');
+    if (status === 'pending_approval') return theme.yellow;
+    if (status === 'failed' || status === 'cancelled' || status === 'rejected') return theme.red;
+    if (status === 'completed' || status === 'approved') return theme.green;
+    return theme.text;
+  }
   if (event.type === 'stream_fallback') return theme.yellow;
   if (event.type === 'model_call_started') return theme.yellow;
   const status = eventString(event, 'status');
@@ -2534,6 +2775,9 @@ function formatEvent(event: StatusEvent): string {
   }
   if (event.type === 'message_created') {
     return eventSummary(event, eventString(event, 'role'));
+  }
+  if (event.type === 'plan_updated') {
+    return eventSummary(event, eventString(event, 'status'), eventString(event, 'summary'));
   }
   if (event.type === 'model_call_started' || event.type === 'model_call_completed' || event.type === 'model_call_failed') {
     return eventSummary(

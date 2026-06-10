@@ -23,6 +23,9 @@ export class Plan {
   @Column({ type: 'enum', enum: PlanStatus, default: PlanStatus.PendingApproval })
   status: PlanStatus;
 
+  @Column({ type: 'text', default: '' })
+  goal: string;
+
   @Column({ type: 'text' })
   summary: string;
 
@@ -32,4 +35,3 @@ export class Plan {
   @UpdateDateColumn({ name: 'updated_at' })
   updatedAt: Date;
 }
-
