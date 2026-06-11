@@ -8,6 +8,7 @@ import { saveConfig } from '../config';
 import type {
   AgentIndicatorState,
   AgentPhase,
+  ActiveSkillContext,
   Approval,
   ApprovalPreview,
   Message,
@@ -20,6 +21,27 @@ import type {
   Session,
   TuiThemeName,
 } from '../types';
+import {
+  SkillDetailCache,
+  discoverSkills,
+  type SkillDiscoveryDebug,
+  type SkillInfo,
+} from '../skills/discovery';
+import {
+  filterSkills,
+  insertSkillCommand,
+  parseSkillCommandInput,
+  selectExplicitSkills,
+  skillCommandToken,
+  type SelectedSkill,
+} from '../skills/selection';
+import {
+  clampSkillSelection,
+  closeOrReturnSkillsPaletteOnEscape,
+  moveSkillSelection,
+  parseSkillsCommand,
+  type SkillsPaletteModel,
+} from '../skills/ui';
 import { ApprovalInlinePanel, type ApprovalChoice } from './ApprovalInlinePanel';
 import { AgentActivityIndicator } from './AgentActivityIndicator';
 import {
@@ -95,6 +117,7 @@ export type SlashCommandContext = {
   openModelSelectModal: () => Promise<void>;
   openPermissionsModal: () => void;
   openSessionPalette: () => Promise<void>;
+  openSkillsModal: () => void;
   openThemePalette: () => void;
   runCommand: (value: string) => Promise<void>;
   exitTui: () => void;
@@ -126,11 +149,22 @@ interface SessionPaletteState {
   error?: string;
 }
 
+interface SkillsIndexState {
+  skills: SkillInfo[];
+  loading: boolean;
+  scanned: boolean;
+  errors: string[];
+  debug?: SkillDiscoveryDebug;
+  disabledReason?: string;
+}
+
+type SkillsPaletteState = SkillsPaletteModel;
+
 interface CommandPaletteCommand {
   label: string;
   description: string;
   insert?: string;
-  action?: 'models' | 'sessions' | 'permissions';
+  action?: 'models' | 'sessions' | 'permissions' | 'skills';
 }
 
 interface ModelChoiceGroupRow {
@@ -155,6 +189,7 @@ interface SessionGroup {
 
 const commandPaletteCommands: CommandPaletteCommand[] = [
   { label: 'Select model', insert: '/models', action: 'models', description: 'Choose or configure the active model' },
+  { label: 'Skills', insert: '/skills', action: 'skills', description: 'Browse skills' },
   { label: '/permissions', action: 'permissions', description: 'Change agent permission mode' },
   { label: '/sessions', action: 'sessions', description: 'Switch to a previous session' },
   { label: '/new <title>', insert: '/new ', description: 'Create and switch to a new session' },
@@ -186,6 +221,13 @@ const slashCommands: SlashCommand[] = [
     description: 'Switch to a previous session',
     kind: 'immediate',
     run: (ctx) => ctx.openSessionPalette(),
+  },
+  {
+    id: 'skills',
+    name: '/skills',
+    description: 'Browse skills',
+    kind: 'immediate',
+    run: (ctx) => ctx.openSkillsModal(),
   },
   {
     id: 'permissions',
@@ -359,12 +401,17 @@ export function App(props: AppProps) {
   const [themePalette, setThemePalette] = createSignal<ThemePaletteState | null>(null);
   const [permissionPalette, setPermissionPalette] = createSignal<PermissionPaletteState | null>(null);
   const [sessionPalette, setSessionPalette] = createSignal<SessionPaletteState | null>(null);
+  const [skillsIndex, setSkillsIndex] = createSignal<SkillsIndexState>(initialSkillsIndexState(props.initialState));
+  const [skillsPalette, setSkillsPalette] = createSignal<SkillsPaletteState | null>(null);
+  const [activeSkillIds, setActiveSkillIds] = createSignal<string[]>([]);
   const [recentModelKeys, setRecentModelKeys] = createSignal<string[]>(initialRecentModelKeys(props.initialState.modelChoices));
   const renderer = useRenderer();
+  const skillDetailCache = new SkillDetailCache();
   let eventStreamAbort: AbortController | null = null;
 
   onMount(() => {
     startEventStream();
+    void refreshSkillsIndex();
   });
 
   onCleanup(() => stopEventStream());
@@ -374,7 +421,7 @@ export function App(props: AppProps) {
     const plan = state().plan;
     if (!plan || activeApproval() || dismissedPlanDecisionId() === plan.plan.id) return undefined;
     if (plan.plan.status === 'planning_generating') return undefined;
-    if (modelPalette() || commandPalette() || themePalette() || permissionPalette() || sessionPalette()) return undefined;
+    if (modelPalette() || commandPalette() || themePalette() || permissionPalette() || sessionPalette() || skillsPalette()) return undefined;
     const status = plan.plan.status;
     const questions = planQuestions(plan);
     if (PLAN_READY_STATUSES.has(status)) return { mode: 'ready', plan };
@@ -432,16 +479,24 @@ export function App(props: AppProps) {
     return 'Status';
   });
   const slashQuery = createMemo(() => {
-    if (modelPalette() || commandPalette() || themePalette() || permissionPalette() || sessionPalette() || planDecisionPlan()) return null;
+    if (modelPalette() || commandPalette() || themePalette() || permissionPalette() || sessionPalette() || skillsPalette() || planDecisionPlan()) return null;
     return getSlashQuery(input(), composerCursorOffset());
   });
   const filteredSlashSuggestions = createMemo(() => {
     const query = slashQuery();
-    return query === null ? [] : filteredSlashCommandSuggestions(query);
+    return query === null ? [] : filteredSlashCommandSuggestions(query, skillsIndex().skills);
   });
   const slashAutocompleteVisible = createMemo(() => {
     const query = slashQuery();
     return !activeApproval() && !planDecisionPlan() && query !== null && dismissedSlashQuery() !== query;
+  });
+  const filteredSkillItems = createMemo(() => {
+    const palette = skillsPalette();
+    return filterSkills(skillsIndex().skills, palette?.query ?? '');
+  });
+  const activeSkillItems = createMemo(() => {
+    const ids = new Set(activeSkillIds());
+    return skillsIndex().skills.filter((skill) => ids.has(skill.id));
   });
 
   createEffect(() => {
@@ -501,6 +556,16 @@ export function App(props: AppProps) {
   });
 
   createEffect(() => {
+    const palette = skillsPalette();
+    if (!palette) return;
+    const count = filteredSkillItems().length;
+    const selectedIndex = clampSkillSelection(palette.selectedIndex, count);
+    if (selectedIndex !== palette.selectedIndex) {
+      setSkillsPalette({ ...palette, selectedIndex });
+    }
+  });
+
+  createEffect(() => {
     const plan = state().plan;
     if (!plan) return;
     const status = plan.plan.status;
@@ -538,7 +603,8 @@ export function App(props: AppProps) {
       !modelPalette() &&
       !themePalette() &&
       !permissionPalette() &&
-      !sessionPalette()
+      !sessionPalette() &&
+      !skillsPalette()
     );
   }
 
@@ -598,6 +664,12 @@ export function App(props: AppProps) {
         setPermissionPalette(null);
         return;
       }
+      if (skillsPalette()) {
+        event.preventDefault();
+        event.stopPropagation();
+        setSkillsPalette((current) => (current ? closeOrReturnSkillsPaletteOnEscape(current) : current));
+        return;
+      }
       if (slashAutocompleteVisible()) {
         event.preventDefault();
         event.stopPropagation();
@@ -654,6 +726,48 @@ export function App(props: AppProps) {
         const command = selectedCommand(commandPalette());
         if (command) {
           void chooseCommand(command);
+        }
+        return;
+      }
+    }
+
+    const skillPaletteState = skillsPalette();
+    if (skillPaletteState) {
+      if (event.ctrl && name === 'r') {
+        event.preventDefault();
+        event.stopPropagation();
+        void refreshSkillsIndex({ force: true });
+        return;
+      }
+      if (skillPaletteState.view === 'list' && name === 'up') {
+        event.preventDefault();
+        event.stopPropagation();
+        moveSkillsSelection(-1);
+        return;
+      }
+      if (skillPaletteState.view === 'list' && name === 'down') {
+        event.preventDefault();
+        event.stopPropagation();
+        moveSkillsSelection(1);
+        return;
+      }
+      if (name === 'space') {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleSelectedSkill();
+        return;
+      }
+      if (skillPaletteState.view === 'list' && isSkillDetailsKey(name, event)) {
+        event.preventDefault();
+        event.stopPropagation();
+        void openSelectedSkillDetail();
+        return;
+      }
+      if (isEnterKey(name)) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (skillPaletteState.view === 'list') {
+          chooseSelectedSkillCommand();
         }
         return;
       }
@@ -737,7 +851,8 @@ export function App(props: AppProps) {
       !commandPalette() &&
       !themePalette() &&
       !permissionPalette() &&
-      !sessionPalette()
+      !sessionPalette() &&
+      !skillsPalette()
     ) {
       event.preventDefault();
       event.stopPropagation();
@@ -759,6 +874,7 @@ export function App(props: AppProps) {
     setThemePalette(null);
     setPermissionPalette(null);
     setSessionPalette(null);
+    setSkillsPalette(null);
     setCommandPalette({ selectedIndex: 0, query: '' });
   }
 
@@ -776,6 +892,10 @@ export function App(props: AppProps) {
       openPermissionsModal();
       return;
     }
+    if (command.action === 'skills') {
+      openSkillsModal();
+      return;
+    }
     setInput(command.insert ?? '');
   }
 
@@ -789,6 +909,7 @@ export function App(props: AppProps) {
       openModelSelectModal,
       openPermissionsModal,
       openSessionPalette: () => openSessionPalette(),
+      openSkillsModal,
       openThemePalette,
       runCommand: runComposerCommand,
       exitTui,
@@ -1167,6 +1288,7 @@ export function App(props: AppProps) {
     setThemePalette(null);
     setPermissionPalette(null);
     setSessionPalette(null);
+    setSkillsPalette(null);
     let choices = current.modelChoices;
     let error: string | undefined;
     try {
@@ -1210,6 +1332,7 @@ export function App(props: AppProps) {
     setModelPalette(null);
     setPermissionPalette(null);
     setSessionPalette(null);
+    setSkillsPalette(null);
     const selectedIndex = Math.max(
       tuiThemeList.findIndex((item) => item.name === themeName()),
       0,
@@ -1222,6 +1345,7 @@ export function App(props: AppProps) {
     setModelPalette(null);
     setThemePalette(null);
     setSessionPalette(null);
+    setSkillsPalette(null);
     setInput('');
     setComposerCursorOffset(0);
     setPermissionPalette({
@@ -1266,6 +1390,137 @@ export function App(props: AppProps) {
     }
   }
 
+  async function refreshSkillsIndex(options: { force?: boolean } = {}) {
+    const current = state();
+    if (current.mode !== 'local') {
+      setSkillsIndex({
+        skills: [],
+        loading: false,
+        scanned: true,
+        errors: [],
+        debug: undefined,
+        disabledReason: 'Local skills are available only in local runtime mode.',
+      });
+      return;
+    }
+
+    if (!options.force && skillsIndex().loading) return;
+    setSkillsIndex((previous) => ({ ...previous, loading: true, disabledReason: undefined }));
+    try {
+      const result = await discoverSkills({
+        workspaceDir: current.project.workspacePath,
+        customDirs: Array.isArray(current.config.preferences?.skillDirs) ? current.config.preferences.skillDirs : undefined,
+      });
+      logSkillDiscoveryDebug(current, result.debug);
+      const nextIds = new Set(result.skills.map((skill) => skill.id));
+      setActiveSkillIds((ids) => ids.filter((id) => nextIds.has(id)));
+      setSkillsIndex({
+        skills: result.skills,
+        loading: false,
+        scanned: true,
+        errors: result.errors,
+        debug: result.debug,
+      });
+      if (options.force) {
+        skillDetailCache.clear();
+        setState((prev) => ({
+          ...prev,
+          activity: `Skills refreshed (${result.skills.length})`,
+          error: '',
+        }));
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to scan skills.';
+      setSkillsIndex((previous) => ({
+        ...previous,
+        loading: false,
+        scanned: true,
+        errors: [...previous.errors, message],
+      }));
+      setState((prev) => ({ ...prev, error: message }));
+    }
+  }
+
+  function openSkillsModal(initialQuery = '') {
+    setCommandPalette(null);
+    setModelPalette(null);
+    setThemePalette(null);
+    setPermissionPalette(null);
+    setSessionPalette(null);
+    const query = initialQuery.trimStart();
+    setSkillsPalette({
+      selectedIndex: 0,
+      query,
+      view: 'list',
+    });
+    if (!skillsIndex().scanned && !skillsIndex().loading) {
+      void refreshSkillsIndex();
+    }
+  }
+
+  function chooseSelectedSkillCommand(skill = selectedSkill()) {
+    if (!skill) return;
+    const nextInput = insertSkillCommand(input(), skill);
+    setInput(nextInput);
+    setComposerCursorOffset(nextInput.length);
+    setDismissedSlashQuery(null);
+    setSkillsPalette(null);
+  }
+
+  function moveSkillsSelection(delta: number) {
+    setSkillsPalette((current) => {
+      if (!current || current.view !== 'list') return current;
+      return {
+        ...current,
+        selectedIndex: moveSkillSelection(current.selectedIndex, delta, filteredSkillItems().length),
+      };
+    });
+  }
+
+  function selectedSkill(): SkillInfo | undefined {
+    const palette = skillsPalette();
+    if (!palette) return undefined;
+    if (palette.view === 'detail' && palette.detailSkillId) {
+      return skillsIndex().skills.find((skill) => skill.id === palette.detailSkillId);
+    }
+    return filteredSkillItems()[palette.selectedIndex];
+  }
+
+  async function openSelectedSkillDetail(skill = selectedSkill()) {
+    if (!skill) return;
+    setSkillsPalette((current) =>
+      current
+        ? {
+            ...current,
+            view: 'detail',
+            detailSkillId: skill.id,
+            detail: undefined,
+            detailLoading: true,
+            detailError: undefined,
+          }
+        : current,
+    );
+    try {
+      const detail = await skillDetailCache.read(skill);
+      setSkillsPalette((current) =>
+        current?.detailSkillId === skill.id ? { ...current, detail, detailLoading: false, detailError: undefined } : current,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load skill.';
+      setSkillsPalette((current) =>
+        current?.detailSkillId === skill.id ? { ...current, detailLoading: false, detailError: message } : current,
+      );
+    }
+  }
+
+  function toggleSelectedSkill(skill = selectedSkill()) {
+    if (!skill) return;
+    setActiveSkillIds((ids) => {
+      if (ids.includes(skill.id)) return ids.filter((id) => id !== skill.id);
+      return [skill.id, ...ids].slice(0, 3);
+    });
+  }
+
   async function openSessionPalette(initialQuery = '') {
     const current = state();
     const query = initialQuery.trim();
@@ -1273,6 +1528,7 @@ export function App(props: AppProps) {
     setModelPalette(null);
     setThemePalette(null);
     setPermissionPalette(null);
+    setSkillsPalette(null);
     setSessionPalette({
       sessions: current.sessions,
       selectedIndex: initialSessionSelectedIndex(current.sessions, query, current.session.id),
@@ -1366,7 +1622,9 @@ export function App(props: AppProps) {
       return;
     }
     if (busy()) return;
-    setInput('');
+    if (parseSkillsCommand(value) === null) {
+      setInput('');
+    }
     await runComposerCommand(value);
   }
 
@@ -1402,14 +1660,21 @@ export function App(props: AppProps) {
   }
 
   async function submitComposerText(value: string) {
+    const prepared = await prepareSkillPrompt(value);
+    if (prepared.missingPromptSkill) {
+      const nextInput = `${prepared.commandText} `;
+      setInput(nextInput);
+      setComposerCursorOffset(nextInput.length);
+      throw new Error(`Type a prompt after ${skillCommandToken(prepared.missingPromptSkill)}`);
+    }
     if (composerMode() === 'plan') {
-      await createPlanFromGoal(value);
+      await createPlanFromGoal(prepared.prompt, prepared.activeSkills);
       return;
     }
     if (hasUnapprovedPlan(state().plan)) {
       throw new Error('Confirm or cancel the active plan before starting Build mode.');
     }
-    await runAgentPrompt(value);
+    await runAgentPrompt(prepared.prompt, undefined, prepared.activeSkills);
   }
 
   async function approvePendingToolRequest(mode: 'once' | 'session_auto' = 'once') {
@@ -1461,7 +1726,14 @@ export function App(props: AppProps) {
       throw new Error('/compact does not accept arguments.');
     }
     if (value.startsWith('/plan ')) {
-      await createPlanFromGoal(value.slice('/plan '.length));
+      const prepared = await prepareSkillPrompt(value.slice('/plan '.length));
+      if (prepared.missingPromptSkill) {
+        const nextInput = `/plan ${prepared.commandText} `;
+        setInput(nextInput);
+        setComposerCursorOffset(nextInput.length);
+        throw new Error(`Type a prompt after ${skillCommandToken(prepared.missingPromptSkill)}`);
+      }
+      await createPlanFromGoal(prepared.prompt, prepared.activeSkills);
       return;
     }
     if (value === '/plan-approve') {
@@ -1491,6 +1763,11 @@ export function App(props: AppProps) {
       await openModelSelectModal();
       return;
     }
+    const skillsQuery = parseSkillsCommand(value);
+    if (skillsQuery !== null) {
+      openSkillsModal(skillsQuery);
+      return;
+    }
     if (value === '/permissions' || value.startsWith('/permissions ')) {
       openPermissionsModal();
       return;
@@ -1501,6 +1778,11 @@ export function App(props: AppProps) {
     }
     if (value === '/model' || value.startsWith('/model ') || value === '/connect' || value.startsWith('/connect ')) {
       throw new Error('Use /models to choose or configure a model in the TUI.');
+    }
+
+    if (parseSkillCommandInput({ value, skills: skillsIndex().skills }).hasSkillCommands) {
+      await submitComposerText(value);
+      return;
     }
 
     await runAgentPrompt(value);
@@ -1550,6 +1832,7 @@ export function App(props: AppProps) {
         recentSessionId: session.id,
       };
 
+      setActiveSkillIds([]);
       setState((prev) => ({
         ...prev,
         config: nextConfig,
@@ -1582,10 +1865,10 @@ export function App(props: AppProps) {
     }
   }
 
-  async function createPlanFromGoal(goal: string) {
+  async function createPlanFromGoal(goal: string, activeSkills?: ActiveSkillContext[]) {
     const current = state();
     setState((prev) => ({ ...prev, activity: 'Planning' }));
-    const plan = await current.api.createPlan(current.session.id, goal, createClientRequestId());
+    const plan = await current.api.createPlan(current.session.id, goal, createClientRequestId(), activeSkills);
     setState((prev) => ({ ...prev, plan, activity: 'awaiting_plan_decision' }));
   }
 
@@ -1617,9 +1900,10 @@ export function App(props: AppProps) {
     }));
   }
 
-  async function runAgentPrompt(value: string, approvedPlanId?: string) {
+  async function runAgentPrompt(value: string, approvedPlanId?: string, activeSkillsInput?: ActiveSkillContext[]) {
     const current = state();
     const trimmed = value.trim();
+    const activeSkills = activeSkillsInput ?? await loadActiveToggleSkillContexts();
     setState((prev) => ({
       ...prev,
       messages: trimmed
@@ -1637,7 +1921,67 @@ export function App(props: AppProps) {
       activity: 'Thinking',
       error: '',
     }));
-    await current.api.runAgent(current.session.id, trimmed || undefined, approvedPlanId);
+    await current.api.runAgent(current.session.id, trimmed || undefined, approvedPlanId, activeSkills);
+  }
+
+  async function prepareSkillPrompt(value: string): Promise<{
+    prompt: string;
+    activeSkills: ActiveSkillContext[];
+    commandText: string;
+    missingPromptSkill?: SkillInfo;
+  }> {
+    const parsed = parseSkillCommandInput({
+      value,
+      skills: skillsIndex().skills,
+      activeSkillIds: activeSkillIds(),
+      maxSkills: 3,
+    });
+    if (parsed.missingPromptSkill) {
+      return {
+        prompt: parsed.prompt || value.trim(),
+        activeSkills: [],
+        commandText: parsed.commandText,
+        missingPromptSkill: parsed.missingPromptSkill,
+      };
+    }
+    return {
+      prompt: parsed.prompt || value.trim(),
+      activeSkills: await loadSelectedSkillContexts(parsed.selected),
+      commandText: parsed.commandText,
+      missingPromptSkill: parsed.missingPromptSkill,
+    };
+  }
+
+  async function loadActiveToggleSkillContexts(): Promise<ActiveSkillContext[]> {
+    const selected = selectExplicitSkills({
+      skills: skillsIndex().skills,
+      activeSkillIds: activeSkillIds(),
+      maxSkills: 3,
+    });
+    return loadSelectedSkillContexts(selected);
+  }
+
+  async function loadSelectedSkillContexts(selected: SelectedSkill[]): Promise<ActiveSkillContext[]> {
+    const contexts: ActiveSkillContext[] = [];
+    for (const item of selected) {
+      const detail = await loadSkillContext(item);
+      contexts.push(detail);
+    }
+    return contexts;
+  }
+
+  async function loadSkillContext(item: SelectedSkill): Promise<ActiveSkillContext> {
+    try {
+      const detail = await skillDetailCache.read(item.skill);
+      return {
+        name: detail.name,
+        source: detail.source,
+        skillFile: detail.skillFile,
+        content: detail.content,
+      };
+    } catch (error) {
+      throw new Error(`Failed to load skill ${item.skill.name}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 
   async function chooseModel(choice: ModelChoice, apiKey?: string) {
@@ -1735,6 +2079,7 @@ export function App(props: AppProps) {
               accentColor: composerAccentColor(),
               modelInfo: activeModelInfo(),
               permissionMode: currentPermissionMode(),
+              activeSkillCount: activeSkillItems().length,
               value: input(),
               focused:
                 !activeApproval() &&
@@ -1743,7 +2088,8 @@ export function App(props: AppProps) {
                 !commandPalette() &&
                 !themePalette() &&
                 !permissionPalette() &&
-                !sessionPalette(),
+                !sessionPalette() &&
+                !skillsPalette(),
               onInput: setInput,
               onCursorOffsetChange: setComposerCursorOffset,
               onSubmit: () => {
@@ -1861,6 +2207,22 @@ export function App(props: AppProps) {
               onQuery={(query) => setSessionPalette((current) => (current ? { ...current, query, selectedIndex: 0 } : current))}
               onChoose={(session) => {
                 void chooseSession(session);
+              }}
+            />
+          )}
+        </Show>
+
+        <Show when={skillsPalette()}>
+          {(palette) => (
+            <SkillsModal
+              palette={palette()}
+              index={skillsIndex()}
+              activeSkillIds={activeSkillIds()}
+              filteredSkills={filteredSkillItems()}
+              onClose={() => setSkillsPalette(null)}
+              onQuery={(query) => setSkillsPalette((current) => (current ? { ...current, query, selectedIndex: 0 } : current))}
+              onChoose={(skill) => {
+                chooseSelectedSkillCommand(skill);
               }}
             />
           )}
@@ -2106,6 +2468,202 @@ function SessionRow(props: { session: Session; selected: boolean; current: boole
   );
 }
 
+function SkillsModal(props: {
+  palette: SkillsPaletteState;
+  index: SkillsIndexState;
+  activeSkillIds: string[];
+  filteredSkills: SkillInfo[];
+  onClose: () => void;
+  onQuery: (query: string) => void;
+  onChoose: (skill: SkillInfo) => void;
+}) {
+  const theme = useTheme();
+  const dimensions = useTerminalDimensions();
+  const listRows = createMemo(() => {
+    if (props.index.loading) return 1;
+    if (props.index.skills.length === 0) {
+      return 6 + (props.index.debug?.scannedSkillRoots.length ?? 0) + props.index.errors.length;
+    }
+    return Math.max(props.filteredSkills.length, 1);
+  });
+  const listHeight = createMemo(() =>
+    clamp(listRows(), 3, Math.max(5, Math.floor(dimensions().height * 0.8) - 9)),
+  );
+  const detail = createMemo(() => props.palette.detail);
+  const detailSkill = createMemo(() =>
+    props.index.skills.find((skill) => skill.id === props.palette.detailSkillId) ?? detail(),
+  );
+  const detailPreview = createMemo(() => skillContentPreview(detail()?.content ?? ''));
+
+  return (
+    <ModalShell title="Skills" onClose={props.onClose}>
+      <Show
+        when={props.palette.view === 'detail'}
+        fallback={
+          <>
+            <PaletteSearch value={props.palette.query} placeholder="Search skills..." onInput={props.onQuery} />
+            <scrollbox
+              scrollY
+              style={{ width: '100%', height: listHeight(), minHeight: 3, marginTop: 1, flexShrink: 0 }}
+              contentOptions={{ width: '100%', minWidth: '100%', flexDirection: 'column' }}
+            >
+              <Show
+                when={!props.index.disabledReason}
+                fallback={<text fg={theme().muted}>{props.index.disabledReason}</text>}
+              >
+                <Show
+                  when={!props.index.loading}
+                  fallback={<text fg={theme().yellow}>Loading skills...</text>}
+                >
+                  <Show when={props.index.skills.length > 0} fallback={<SkillsEmptyState index={props.index} />}>
+                    <Show
+                      when={props.filteredSkills.length > 0}
+                      fallback={<text fg={theme().muted}>No matching skills found.</text>}
+                    >
+                      <For each={props.filteredSkills}>
+                        {(skill, index) => {
+                          const selected = createMemo(() => index() === props.palette.selectedIndex);
+                          const active = createMemo(() => props.activeSkillIds.includes(skill.id));
+                          return (
+                            <box
+                              style={{
+                                width: '100%',
+                                height: 1,
+                                minHeight: 1,
+                                flexDirection: 'row',
+                                backgroundColor: selected() ? theme().selection : theme().input,
+                              }}
+                              onMouseDown={() => props.onChoose(skill)}
+                            >
+                              <text fg={active() ? theme().green : theme().muted} style={{ width: 2, flexShrink: 0 }}>
+                                {active() ? '*' : ' '}
+                              </text>
+                              <text fg={theme().text} truncate style={{ width: 22, flexShrink: 0 }}>
+                                {skill.name}
+                              </text>
+                              <text fg={selected() ? theme().text : theme().muted} truncate style={{ flexGrow: 1, minWidth: 0 }}>
+                                {skill.description}
+                              </text>
+                              <text fg={selected() ? theme().text : theme().muted} truncate style={{ width: 10, flexShrink: 0 }}>
+                                {skillSourceLabel(skill)}
+                              </text>
+                            </box>
+                          );
+                        }}
+                      </For>
+                    </Show>
+                  </Show>
+                </Show>
+              </Show>
+            </scrollbox>
+            <PaletteFooter items={[['Enter', 'select'], ['Space', 'toggle'], ['Tab', 'details'], ['Ctrl+R', 'refresh'], ['Esc', 'close'], ['Up/Down', 'navigate']]} />
+          </>
+        }
+      >
+        <box style={{ flexDirection: 'column', marginTop: 1, width: '100%', minHeight: 0 }}>
+          <Show when={detailSkill()} fallback={<text fg={theme().muted}>Skill not found.</text>}>
+            {(skill) => {
+              const active = createMemo(() => props.activeSkillIds.includes(skill().id));
+              return (
+                <>
+                  <box style={{ width: '100%', height: 1, flexDirection: 'row' }}>
+                    <text fg={active() ? theme().green : theme().muted} style={{ width: 2, flexShrink: 0 }}>
+                      {active() ? '*' : ' '}
+                    </text>
+                    <text fg={theme().text} truncate style={{ flexGrow: 1, minWidth: 0 }}>
+                      {skill().name}
+                    </text>
+                    <text fg={theme().muted}>{skillSourceLabel(skill())}</text>
+                  </box>
+                  <text fg={theme().muted} wrapMode="word" style={{ width: '100%', minWidth: 0 }}>
+                    {skill().description}
+                  </text>
+                  <text fg={theme().muted} truncate style={{ width: '100%', minWidth: 0 }}>
+                    rootDir: {skill().rootDir}
+                  </text>
+                  <text fg={theme().muted} truncate style={{ width: '100%', minWidth: 0 }}>
+                    SKILL.md: {skill().skillFile}
+                  </text>
+                  <Show when={props.palette.detailError}>
+                    <text fg={theme().red}>{props.palette.detailError}</text>
+                  </Show>
+                  <Show when={props.palette.detailLoading}>
+                    <text fg={theme().yellow}>Loading skill...</text>
+                  </Show>
+                  <scrollbox
+                    scrollY
+                    style={{ width: '100%', height: Math.max(5, Math.floor(dimensions().height * 0.45)), minHeight: 5, marginTop: 1 }}
+                    contentOptions={{ width: '100%', minWidth: '100%', flexDirection: 'column' }}
+                  >
+                    <Show when={detailPreview()} fallback={<text fg={theme().muted}>No preview available.</text>}>
+                      {(preview) => (
+                        <For each={preview().split('\n')}>
+                          {(line) => (
+                            <text fg={theme().text} wrapMode="word" style={{ width: '100%', minWidth: 0 }}>
+                              {line || ' '}
+                            </text>
+                          )}
+                        </For>
+                      )}
+                    </Show>
+                  </scrollbox>
+                </>
+              );
+            }}
+          </Show>
+          <PaletteFooter items={[['Space', 'toggle'], ['Ctrl+R', 'refresh'], ['Esc', 'back']]} />
+        </box>
+      </Show>
+    </ModalShell>
+  );
+}
+
+function SkillsEmptyState(props: { index: SkillsIndexState }) {
+  const theme = useTheme();
+  const debug = createMemo(() => props.index.debug);
+  return (
+    <box style={{ flexDirection: 'column', width: '100%', minWidth: 0 }}>
+      <text fg={theme().muted}>No skills found.</text>
+      <Show when={debug()}>
+        {(info) => (
+          <>
+            <text fg={theme().muted} truncate style={{ width: '100%', minWidth: 0 }}>
+              os.homedir(): {info().osHomedir || '-'}
+            </text>
+            <text fg={theme().muted} truncate style={{ width: '100%', minWidth: 0 }}>
+              USERPROFILE: {info().envUserProfile || '-'}
+            </text>
+            <text fg={theme().muted} truncate style={{ width: '100%', minWidth: 0 }}>
+              HOME: {info().envHome || '-'}
+            </text>
+            <text fg={theme().muted} truncate style={{ width: '100%', minWidth: 0 }}>
+              workspacePath: {info().workspacePath || '-'}
+            </text>
+            <text fg={theme().muted}>scanned roots:</text>
+            <For each={info().scannedSkillRoots}>
+              {(root) => (
+                <text fg={theme().muted} truncate style={{ width: '100%', minWidth: 0 }}>
+                  {root}
+                </text>
+              )}
+            </For>
+          </>
+        )}
+      </Show>
+      <Show when={props.index.errors.length > 0}>
+        <text fg={theme().red}>errors:</text>
+        <For each={props.index.errors}>
+          {(error) => (
+            <text fg={theme().red} truncate style={{ width: '100%', minWidth: 0 }}>
+              {error}
+            </text>
+          )}
+        </For>
+      </Show>
+    </box>
+  );
+}
+
 function ModalShell(props: { title: string; onClose: () => void; children: JSX.Element }) {
   const theme = useTheme();
   const dimensions = useTerminalDimensions();
@@ -2346,6 +2904,7 @@ function Composer(props: {
   accentColor: string;
   modelInfo: ActiveModelInfo;
   permissionMode: PermissionMode;
+  activeSkillCount: number;
   value: string;
   focused: boolean;
   onInput: (value: string) => void;
@@ -2408,6 +2967,7 @@ function Composer(props: {
           <text fg={props.accentColor}>{composerModeLabel(props.mode)}</text>
           <text fg={theme().muted} truncate style={{ flexGrow: 1, minWidth: 0 }}>
             {' '}· {props.modelInfo.modelName} · {props.modelInfo.providerDisplay} · {permissionModeLabel(props.permissionMode)}
+            {props.activeSkillCount > 0 ? ` · Skills ${props.activeSkillCount}` : ''}
           </text>
         </box>
       </box>
@@ -2551,6 +3111,7 @@ function ChatPanel(props: {
     accentColor: string;
     modelInfo: ActiveModelInfo;
     permissionMode: PermissionMode;
+    activeSkillCount: number;
     value: string;
     focused: boolean;
     onInput: (value: string) => void;
@@ -3382,6 +3943,56 @@ function pad2(value: number): string {
   return value.toString().padStart(2, '0');
 }
 
+function logSkillDiscoveryDebug(state: WorkspaceState, debug: SkillDiscoveryDebug): void {
+  if (!shouldLogSkillDiscoveryDebug(state)) return;
+  console.info('[Mebius skills discovery]', {
+    osHomedir: debug.osHomedir,
+    USERPROFILE: debug.envUserProfile,
+    HOME: debug.envHome,
+    workspacePath: debug.workspacePath ?? state.project.workspacePath ?? state.targetPath,
+    scannedSkillRoots: debug.scannedSkillRoots,
+    foundSkillFiles: debug.foundSkillFiles,
+  });
+}
+
+function shouldLogSkillDiscoveryDebug(state: WorkspaceState): boolean {
+  return process.env.MEBIUS_CODE_DEBUG_SKILLS === '1' || state.capabilities.serverMode !== 'production';
+}
+
+function initialSkillsIndexState(state: WorkspaceState): SkillsIndexState {
+  if (state.mode !== 'local') {
+    return {
+      skills: [],
+      loading: false,
+      scanned: true,
+      errors: [],
+      debug: undefined,
+      disabledReason: 'Local skills are available only in local runtime mode.',
+    };
+  }
+  return {
+    skills: [],
+    loading: true,
+    scanned: false,
+    errors: [],
+    debug: undefined,
+  };
+}
+
+function skillContentPreview(content: string): string {
+  const lines = content.split(/\r?\n/).slice(0, 120);
+  const preview = lines.join('\n').slice(0, 8000);
+  if (!content) return '';
+  if (content.length > preview.length || content.split(/\r?\n/).length > lines.length) {
+    return `${preview}\n\n...`;
+  }
+  return preview;
+}
+
+function skillSourceLabel(skill: SkillInfo): string {
+  return skill.source;
+}
+
 function filteredCommandPaletteCommands(query: string): CommandPaletteCommand[] {
   const normalizedQuery = normalizeSearch(query);
   if (!normalizedQuery) return commandPaletteCommands;
@@ -3398,13 +4009,28 @@ function getSlashQuery(input: string, cursorOffset = input.length): string | nul
   return input.slice(1, clampedOffset);
 }
 
-function filteredSlashCommandSuggestions(query: string): SlashCommand[] {
+function filteredSlashCommandSuggestions(query: string, skills: SkillInfo[]): SlashCommand[] {
   const normalizedQuery = normalizeSearch(query);
-  if (!normalizedQuery) return slashCommands;
+  const commands = [...slashCommands, ...skillSlashCommands(skills)];
+  if (!normalizedQuery) return commands;
   const prefixedQuery = `/${normalizedQuery}`;
-  return slashCommands.filter((command) =>
+  return commands.filter((command) =>
     [command.name, ...(command.aliases ?? [])].some((value) => normalizeSearch(value).startsWith(prefixedQuery)),
   );
+}
+
+function skillSlashCommands(skills: SkillInfo[]): SlashCommand[] {
+  const builtInNames = new Set(
+    slashCommands.flatMap((command) => [command.name, ...(command.aliases ?? [])]).map(normalizeSearch),
+  );
+  return skills
+    .filter((skill) => !builtInNames.has(normalizeSearch(skillCommandToken(skill))))
+    .map((skill) => ({
+      id: `skill:${skill.id}`,
+      name: skillCommandToken(skill),
+      description: skill.description,
+      kind: 'input' as const,
+    }));
 }
 
 function buildModelChoiceGroups(choices: ModelChoice[], query: string, recentModelKeys: string[]): ModelChoiceGroup[] {
@@ -3498,6 +4124,10 @@ function clamp(value: number, min: number, max: number): number {
 
 function isEnterKey(name: string): boolean {
   return name === 'return' || name === 'kpenter' || name === 'linefeed' || name === 'enter';
+}
+
+function isSkillDetailsKey(name: string, event: KeyEvent): boolean {
+  return name === 'tab' || name === 'right' || name === 'arrowright' || name === 'd' || (event.ctrl && isEnterKey(name));
 }
 
 function highRiskCommand(command: string): boolean {

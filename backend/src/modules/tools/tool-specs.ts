@@ -1,6 +1,6 @@
 import { CommandRuntimeInfo, resolveCommandRuntime } from './command-runtime';
 
-const BASE_CODING_TOOL_SPECS = [
+export const BASE_CODING_TOOL_SPECS = [
   {
     type: 'function',
     function: {

@@ -1,5 +1,6 @@
 import type {
   Approval,
+  ActiveSkillContext,
   AuthResponse,
   CommandRunView,
   GitStatus,
@@ -108,17 +109,35 @@ export class ApiClient {
     return this.request<Message[]>(`/sessions/${sessionId}/messages`);
   }
 
-  async runAgent(sessionId: string, message?: string, approvedPlanId?: string): Promise<unknown> {
+  async runAgent(
+    sessionId: string,
+    message?: string,
+    approvedPlanId?: string,
+    activeSkills?: ActiveSkillContext[],
+  ): Promise<unknown> {
     return this.request(`/sessions/${sessionId}/run`, {
       method: 'POST',
-      body: JSON.stringify({ ...(message ? { message } : {}), ...(approvedPlanId ? { approvedPlanId } : {}) }),
+      body: JSON.stringify({
+        ...(message ? { message } : {}),
+        ...(approvedPlanId ? { approvedPlanId } : {}),
+        ...(activeSkills && activeSkills.length > 0 ? { activeSkills } : {}),
+      }),
     });
   }
 
-  async createPlan(sessionId: string, goal: string, clientRequestId?: string): Promise<PlanBundle> {
+  async createPlan(
+    sessionId: string,
+    goal: string,
+    clientRequestId?: string,
+    activeSkills?: ActiveSkillContext[],
+  ): Promise<PlanBundle> {
     return this.request<PlanBundle>(`/sessions/${sessionId}/plan`, {
       method: 'POST',
-      body: JSON.stringify({ goal, ...(clientRequestId ? { clientRequestId } : {}) }),
+      body: JSON.stringify({
+        goal,
+        ...(clientRequestId ? { clientRequestId } : {}),
+        ...(activeSkills && activeSkills.length > 0 ? { activeSkills } : {}),
+      }),
     });
   }
 

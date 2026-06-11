@@ -171,6 +171,46 @@ describe('AgentService', () => {
     expect(result.steps).toHaveLength(2);
   });
 
+  it('injects active skills into the plan model context', async () => {
+    llm.chat.mockResolvedValueOnce({
+      content: JSON.stringify({
+        summary: 'Explain recursion with Feynman style.',
+        markdown: '# Plan\n\nExplain recursion clearly.',
+        steps: [{ title: 'Explain recursion', detail: 'Use the active perspective.' }],
+        questions: [],
+      }),
+    });
+
+    await service.createPlan(owner, session.id, {
+      goal: 'Explain recursion',
+      activeSkills: [
+        {
+          name: 'feynman-perspective',
+          source: 'claude',
+          skillFile: 'C:\\Users\\12722\\.claude\\skills\\feynman-perspective\\SKILL.md',
+          content: '# Feynman Perspective\n\nExplain with simple analogies.',
+        },
+      ],
+    });
+
+    expect(llm.chat.mock.calls[0]?.[0].messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'system',
+          content: expect.stringContaining('# Active Skill: feynman-perspective'),
+        }),
+      ]),
+    );
+    expect(llm.chat.mock.calls[0]?.[0].messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'system',
+          content: expect.stringContaining('Source: C:\\Users\\12722\\.claude\\skills\\feynman-perspective\\SKILL.md'),
+        }),
+      ]),
+    );
+  });
+
   it('approves an owned plan and publishes a plan update', async () => {
     const plan = planFixture({ id: 'plan-1', status: PlanStatus.PlanReadyPendingApproval });
     plans.findOne.mockResolvedValueOnce(plan);
@@ -364,6 +404,39 @@ describe('AgentService', () => {
         role: MessageRole.Assistant,
         content: 'Final project summary',
       }),
+    );
+  });
+
+  it('injects active skills into the model system context for the run', async () => {
+    llm.streamChat.mockResolvedValueOnce({ content: 'Used the skill.' });
+
+    await service.run(owner, session.id, {
+      message: 'Build a better UI',
+      activeSkills: [
+        {
+          name: 'frontend-design',
+          source: 'claude',
+          skillFile: '~/.claude/skills/frontend-design/SKILL.md',
+          content: '# Frontend Design\n\nUse refined production UI patterns.',
+        },
+      ],
+    });
+
+    expect(llm.streamChat.mock.calls[0][0].messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'system',
+          content: expect.stringContaining('# Active Skill: frontend-design'),
+        }),
+      ]),
+    );
+    expect(llm.streamChat.mock.calls[0][0].messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'system',
+          content: expect.stringContaining('Source: ~/.claude/skills/frontend-design/SKILL.md'),
+        }),
+      ]),
     );
   });
 

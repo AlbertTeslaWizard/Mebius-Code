@@ -10,6 +10,7 @@ export interface TuiConfig {
     leftSidebarVisible?: boolean;
     rightPanel?: 'plan' | 'diff' | 'logs';
     theme?: TuiThemeName;
+    skillDirs?: string[];
   };
 }
 
@@ -90,6 +91,15 @@ export interface ModelChoice {
 export type ModelsCommandResult =
   | { type: 'models.list'; models: ModelChoice[] }
   | { type: 'models.selected'; modelConfig: ModelConfig; session: Session };
+
+export type SkillSource = 'workspace' | 'user' | 'opencode' | 'claude' | 'mebius' | 'custom';
+
+export interface ActiveSkillContext {
+  name: string;
+  source: SkillSource;
+  skillFile?: string;
+  content: string;
+}
 
 export type PermissionsCommandResult =
   | { type: 'permissions.current'; permissionMode: PermissionMode; session: Session }

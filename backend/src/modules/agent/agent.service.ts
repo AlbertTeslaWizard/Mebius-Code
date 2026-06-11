@@ -13,15 +13,19 @@ import { User } from '../users/user.entity';
 import { ToolsService } from '../tools/tools.service';
 import { ToolCall } from '../tools/tool-call.entity';
 import { resolveCommandRuntime } from '../tools/command-runtime';
-import { buildCodingToolSpecs } from '../tools/tool-specs';
+import { BASE_CODING_TOOL_SPECS, buildCodingToolSpecs } from '../tools/tool-specs';
 import { PendingToolMessage, PendingToolResumeContext } from './agent-resume.types';
 import { CreatePlanDto } from './dto/create-plan.dto';
-import { RunAgentDto } from './dto/run-agent.dto';
+import { ActiveSkillDto, RunAgentDto } from './dto/run-agent.dto';
 import { UpdatePlanAnswersDto } from './dto/update-plan-answers.dto';
 import { LlmMessage, LlmToolCall, OpenAiCompatibleService } from './openai-compatible.service';
 import { PlanStep } from './plan-step.entity';
 import { Plan } from './plan.entity';
 import { PlanQuestion, PlanQuestionAnswer } from './plan-workflow.types';
+
+const KNOWN_TOOL_NAMES = new Set(BASE_CODING_TOOL_SPECS.map((t: { function: { name: string } }) => t.function.name));
+
+const TOOL_NOT_AVAILABLE_MESSAGE = `The tool "{{toolName}}" is not available. Available tools: list_files, read_file, search_text, create_patch, run_command. Continue answering without "{{toolName}}" and use your existing knowledge or the available tools.`;
 
 interface ParsedPlan {
   summary: string;
@@ -107,6 +111,7 @@ export class AgentService {
                 'markdown must be a complete Markdown plan with sections: requirements understanding, technical choices, target outcome, modules, file structure, implementation steps, risks/tradeoffs. ' +
                 'steps must be an array of {title, detail}. questions must be an array and may be empty. Each question must be data-driven with id, title, prompt, choices, recommendedChoiceId, allowCustomAnswer, notes, required, and multiSelect when useful. Do not execute tools.',
             },
+            ...this.buildActiveSkillMessages(dto.activeSkills ?? []),
             {
               role: 'user',
               content: dto.goal,
@@ -296,7 +301,7 @@ export class AgentService {
         this.sessions.latestSummary(session.id),
         this.sessions.listMessages(owner.id, session.id),
       ]);
-      const messages = this.buildModelMessages(summary?.content, history);
+      const messages = this.buildModelMessages(summary?.content, history, dto.activeSkills);
       if (approvedPlan && !dto.message) {
         messages.push({
           role: 'user',
@@ -457,6 +462,26 @@ export class AgentService {
 
       for (const toolCall of toolCalls) {
         const parsedArgs = this.parseToolArguments(toolCall.function.arguments);
+
+        if (!KNOWN_TOOL_NAMES.has(toolCall.function.name)) {
+          const unknownToolMessage = TOOL_NOT_AVAILABLE_MESSAGE.replaceAll('{{toolName}}', toolCall.function.name);
+          await this.recordToolResultMessage(
+            session,
+            toolCall.id,
+            toolCall.function.name,
+            ToolCallStatus.Failed,
+            unknownToolMessage,
+          );
+          this.events.publish(session.id, 'agent_status', {
+            status: 'using_tools',
+            toolName: toolCall.function.name,
+            activity: 'unknown_tool',
+          });
+          messages.push({ role: 'tool', tool_call_id: toolCall.id, content: unknownToolMessage });
+          completedToolMessages.push({ tool_call_id: toolCall.id, content: unknownToolMessage });
+          continue;
+        }
+
         let created: ToolCall;
         try {
           created = await this.tools.requestOrExecute({
@@ -482,6 +507,11 @@ export class AgentService {
             ToolCallStatus.Failed,
             failedToolMessage,
           );
+          if (failedToolMessage.startsWith('Unknown tool:')) {
+            messages.push({ role: 'tool', tool_call_id: toolCall.id, content: failedToolMessage });
+            completedToolMessages.push({ tool_call_id: toolCall.id, content: failedToolMessage });
+            continue;
+          }
           throw error;
         }
         createdToolCalls.push(created);
@@ -874,14 +904,20 @@ export class AgentService {
       .map((path) => path.trim().replaceAll('\\', '/'));
   }
 
-  private buildModelMessages(summary: string | undefined, history: Message[]): LlmMessage[] {
+  private buildModelMessages(
+    summary: string | undefined,
+    history: Message[],
+    activeSkills: ActiveSkillDto[] = [],
+  ): LlmMessage[] {
     return [
       {
         role: 'system',
         content:
           'You are Mebius Code, an agentic coding assistant. Prefer Plan Mode for risky work. Use tools when you need project context. Mutating tools require approval. ' +
-          resolveCommandRuntime().guidance,
+          resolveCommandRuntime().guidance +
+          '\n\nAvailable tools: list_files, read_file, search_text, create_patch, run_command. Do not call any tool not in this list. You do NOT have access to web search, internet browsing, or image generation tools. If you need information you cannot find with available tools, answer based on your existing knowledge and state that you cannot perform real-time searches.',
       },
+      ...this.buildActiveSkillMessages(activeSkills),
       ...(summary
         ? [
             {
@@ -892,6 +928,27 @@ export class AgentService {
         : []),
       ...this.normalizeHistory(history.slice(-50)),
     ];
+  }
+
+  private buildActiveSkillMessages(activeSkills: ActiveSkillDto[]): LlmMessage[] {
+    const SKILL_CAPABILITY_NOTICE = '\n\n---\nNote from Mebius Code: Only use tools explicitly listed in your available tools (list_files, read_file, search_text, create_patch, run_command). Do not invoke tools mentioned in this skill that are not available, such as web search, image generation, or MCP tools. If a skill instructs you to use an unavailable tool, adapt by using available tools or your existing knowledge.';
+    return activeSkills
+      .map((skill) => this.normalizeActiveSkill(skill))
+      .filter((skill): skill is { name: string; source: string; content: string } => Boolean(skill))
+      .map((skill) => ({
+        role: 'system' as const,
+        content: `# Active Skill: ${skill.name}\nSource: ${skill.source}\n\n${skill.content}${SKILL_CAPABILITY_NOTICE}`,
+      }));
+  }
+
+  private normalizeActiveSkill(skill: ActiveSkillDto): { name: string; source: string; content: string } | null {
+    const name = skill.name.trim();
+    const content = skill.content.trim();
+    if (!name || !content) return null;
+    const source = typeof skill.skillFile === 'string' && skill.skillFile.trim()
+      ? skill.skillFile.trim()
+      : (skill.source ?? 'skill');
+    return { name, source, content };
   }
 
   private async saveAssistantResponse(

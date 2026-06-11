@@ -601,7 +601,7 @@ export class ToolsService {
       case 'run_command':
         return this.runCommand(toolCall, owner, project, toolCall.arguments, options.commandAuthorized ?? false);
       default:
-        throw new BadRequestException(`Unknown tool: ${toolCall.name}`);
+        return `Error: Unknown tool "${toolCall.name}". Available tools: list_files, read_file, search_text, create_patch, run_command. Do not call "${toolCall.name}" again.`;
     }
   }
 
