@@ -408,6 +408,7 @@ export function App(props: AppProps) {
   const renderer = useRenderer();
   const skillDetailCache = new SkillDetailCache();
   let eventStreamAbort: AbortController | null = null;
+  let skillsRefreshInFlight: Promise<void> | null = null;
 
   onMount(() => {
     startEventStream();
@@ -1404,41 +1405,48 @@ export function App(props: AppProps) {
       return;
     }
 
-    if (!options.force && skillsIndex().loading) return;
+    if (!options.force && skillsRefreshInFlight) return skillsRefreshInFlight;
+
     setSkillsIndex((previous) => ({ ...previous, loading: true, disabledReason: undefined }));
-    try {
-      const result = await discoverSkills({
-        workspaceDir: current.project.workspacePath,
-        customDirs: Array.isArray(current.config.preferences?.skillDirs) ? current.config.preferences.skillDirs : undefined,
-      });
-      logSkillDiscoveryDebug(current, result.debug);
-      const nextIds = new Set(result.skills.map((skill) => skill.id));
-      setActiveSkillIds((ids) => ids.filter((id) => nextIds.has(id)));
-      setSkillsIndex({
-        skills: result.skills,
-        loading: false,
-        scanned: true,
-        errors: result.errors,
-        debug: result.debug,
-      });
-      if (options.force) {
-        skillDetailCache.clear();
-        setState((prev) => ({
-          ...prev,
-          activity: `Skills refreshed (${result.skills.length})`,
-          error: '',
+    const doRefresh = async () => {
+      try {
+        const result = await discoverSkills({
+          workspaceDir: current.project.workspacePath,
+          customDirs: Array.isArray(current.config.preferences?.skillDirs) ? current.config.preferences.skillDirs : undefined,
+        });
+        logSkillDiscoveryDebug(current, result.debug);
+        const nextIds = new Set(result.skills.map((skill) => skill.id));
+        setActiveSkillIds((ids) => ids.filter((id) => nextIds.has(id)));
+        setSkillsIndex({
+          skills: result.skills,
+          loading: false,
+          scanned: true,
+          errors: result.errors,
+          debug: result.debug,
+        });
+        if (options.force) {
+          skillDetailCache.clear();
+          setState((prev) => ({
+            ...prev,
+            activity: `Skills refreshed (${result.skills.length})`,
+            error: '',
+          }));
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to scan skills.';
+        setSkillsIndex((previous) => ({
+          ...previous,
+          loading: false,
+          scanned: true,
+          errors: [...previous.errors, message],
         }));
+        setState((prev) => ({ ...prev, error: message }));
+      } finally {
+        skillsRefreshInFlight = null;
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to scan skills.';
-      setSkillsIndex((previous) => ({
-        ...previous,
-        loading: false,
-        scanned: true,
-        errors: [...previous.errors, message],
-      }));
-      setState((prev) => ({ ...prev, error: message }));
-    }
+    };
+    skillsRefreshInFlight = doRefresh();
+    return skillsRefreshInFlight;
   }
 
   function openSkillsModal(initialQuery = '') {
@@ -1453,7 +1461,7 @@ export function App(props: AppProps) {
       query,
       view: 'list',
     });
-    if (!skillsIndex().scanned && !skillsIndex().loading) {
+    if (!skillsIndex().scanned) {
       void refreshSkillsIndex();
     }
   }
@@ -1711,6 +1719,7 @@ export function App(props: AppProps) {
     }
     if (value === '/clear') {
       await current.api.runSessionCommand(current.session.id, '/clear');
+      setInput('');
       setState((prev) => ({ ...prev, messages: [], streamStatus: { mode: 'idle' }, activity: 'Context cleared' }));
       return;
     }
@@ -1719,6 +1728,7 @@ export function App(props: AppProps) {
     }
     if (value === '/compact') {
       await current.api.runSessionCommand(current.session.id, '/compact');
+      setInput('');
       setState((prev) => ({ ...prev, messages: [], streamStatus: { mode: 'idle' }, activity: 'Context compacted' }));
       return;
     }
@@ -1801,6 +1811,7 @@ export function App(props: AppProps) {
     });
 
     await switchToSession(created, { fallbackToTarget: true });
+  setInput('');
   }
 
   async function switchToSession(target: Session, options: { fallbackToTarget?: boolean } = {}) {
@@ -2350,7 +2361,7 @@ function CommandPalette(props: {
           </For>
         </Show>
       </scrollbox>
-      <PaletteFooter items={[['Enter', 'select'], ['Esc', 'close'], ['Up/Down', 'navigate']]} />
+      <PaletteFooter items={[['↑/↓', 'navigate'], ['Enter', 'select'], ['Esc', 'close']]} />
     </ModalShell>
   );
 }
@@ -2429,7 +2440,7 @@ function SessionsPalette(props: {
           </For>
         </Show>
       </scrollbox>
-      <PaletteFooter items={[['Enter', 'switch'], ['Esc', 'close'], ['Up/Down', 'navigate']]} />
+      <PaletteFooter items={[['↑/↓', 'navigate'], ['Enter', 'switch'], ['Esc', 'close']]} />
     </box>
   );
 }
@@ -2515,7 +2526,16 @@ function SkillsModal(props: {
                   when={!props.index.loading}
                   fallback={<text fg={theme().yellow}>Loading skills...</text>}
                 >
-                  <Show when={props.index.skills.length > 0} fallback={<SkillsEmptyState index={props.index} />}>
+                  <Show when={!(props.index.errors.length > 0 && props.index.skills.length === 0)} fallback={
+                    <box style={{ flexDirection: 'column', width: '100%' }}>
+                      <text fg={theme().red}>Failed to load skills:</text>
+                      <For each={props.index.errors}>
+                        {(error) => <text fg={theme().red}>{error}</text>}
+                      </For>
+                      <text fg={theme().muted}>Ctrl+R retry</text>
+                    </box>
+                  }>
+                    <Show when={props.index.skills.length > 0} fallback={<SkillsEmptyState index={props.index} />}>
                     <Show
                       when={props.filteredSkills.length > 0}
                       fallback={<text fg={theme().muted}>No matching skills found.</text>}
@@ -2555,8 +2575,9 @@ function SkillsModal(props: {
                   </Show>
                 </Show>
               </Show>
+            </Show>
             </scrollbox>
-            <PaletteFooter items={[['Enter', 'select'], ['Space', 'toggle'], ['Tab', 'details'], ['Ctrl+R', 'refresh'], ['Esc', 'close'], ['Up/Down', 'navigate']]} />
+            <PaletteFooter items={[['↑/↓', 'navigate'], ['Enter', 'select'], ['Space', 'toggle'], ['Tab', 'details'], ['Ctrl+R', 'refresh'], ['Esc', 'close']]} />
           </>
         }
       >
@@ -2759,14 +2780,18 @@ function PaletteSearch(props: { value: string; placeholder: string; onInput: (va
 function PaletteFooter(props: { items: Array<[string, string]> }) {
   const theme = useTheme();
   return (
-    <box style={{ width: '100%', height: 1, marginTop: 1, flexDirection: 'row', flexShrink: 0 }}>
+    <box style={{ width: '100%', height: 1, marginTop: 1, flexDirection: 'row', flexShrink: 0, paddingLeft: 1, paddingRight: 1 }}>
       <For each={props.items}>
-        {([key, action]) => (
-          <>
-            <text fg={theme().text}>{action}</text>
-            <text fg={theme().muted}> {key}  </text>
-          </>
-        )}
+        {(item, index) => {
+          const [key, label] = item;
+          return (
+            <>
+              {index() > 0 && <text fg={theme().muted}> · </text>}
+              <text fg={theme().blue}>{key}</text>
+              <text fg={theme().muted}> {label}</text>
+            </>
+          );
+        }}
       </For>
     </box>
   );
@@ -2894,7 +2919,7 @@ function PermissionsPanel(props: {
           }}
         </For>
       </box>
-      <PaletteFooter items={[['Enter', 'select'], ['Esc', 'close'], ['Up/Down', 'navigate']]} />
+      <PaletteFooter items={[['↑/↓', 'navigate'], ['Enter', 'select'], ['Esc', 'close']]} />
     </box>
   );
 }
@@ -3057,7 +3082,7 @@ function ModelSelectModal(props: {
           </For>
         </Show>
       </scrollbox>
-      <PaletteFooter items={[['Enter', 'select'], ['Esc', 'close'], ['Up/Down', 'navigate']]} />
+      <PaletteFooter items={[['↑/↓', 'navigate'], ['Enter', 'select'], ['Esc', 'close']]} />
     </ModalShell>
   );
 }
@@ -3091,6 +3116,55 @@ function ModelChoiceRow(props: { choice: ModelChoice; selected: boolean; onChoos
       <text fg={secondaryColor()} truncate style={{ width: 16, flexShrink: 0 }}>
         {modelChoiceTag(props.choice)}
       </text>
+    </box>
+  );
+}
+
+function WelcomeScreen(props: {
+  composer: Parameters<typeof Composer>[0];
+  slashAutocomplete: {
+    visible: boolean;
+    suggestions: SlashCommand[];
+    selectedIndex: number;
+    onChoose: (command: SlashCommand) => void;
+  };
+  error?: string;
+}) {
+  const theme = useTheme();
+  return (
+    <box style={{ width: '100%', height: '100%', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+      <Show when={props.error}>
+        <text fg={theme().red}>{props.error}</text>
+      </Show>
+      <box style={{ flexGrow: 1, minHeight: 0 }} />
+      <box style={{ flexDirection: 'row', justifyContent: 'center' }}>
+        <text fg={theme().purple}>Mebius</text>
+        <text fg={theme().muted}> Code</text>
+      </box>
+      <box style={{ height: 1 }} />
+      <box style={{ width: '100%', flexDirection: 'column' }}>
+        <Composer {...props.composer} />
+        <Show when={props.slashAutocomplete.visible}>
+          <SlashCommandAutocomplete
+            suggestions={props.slashAutocomplete.suggestions}
+            selectedIndex={props.slashAutocomplete.selectedIndex}
+            onChoose={props.slashAutocomplete.onChoose}
+          />
+        </Show>
+      </box>
+      <box style={{ height: 1 }} />
+      <box style={{ flexDirection: 'row', justifyContent: 'center' }}>
+        <text fg={theme().muted}>Tab agents</text>
+        <text fg={theme().muted}>  ·  </text>
+        <text fg={theme().muted}>Ctrl+P commands</text>
+        <text fg={theme().muted}>  ·  </text>
+        <text fg={theme().muted}>/models</text>
+        <text fg={theme().muted}>  ·  </text>
+        <text fg={theme().muted}>/skills</text>
+      </box>
+      <box style={{ height: 1 }} />
+      <text fg={theme().muted}>Type a message to begin</text>
+      <box style={{ flexGrow: 1, minHeight: 0 }} />
     </box>
   );
 }
@@ -3159,6 +3233,7 @@ function ChatPanel(props: {
 }) {
   const theme = useTheme();
   const panelPending = createMemo(() => Boolean(props.approvalInline || props.planApproval || props.planQuestion || props.planReview));
+  const isEmptySession = createMemo(() => Boolean(props.messages.length === 0 && !panelPending()));
   return (
     <box
       border
@@ -3175,6 +3250,21 @@ function ChatPanel(props: {
         backgroundColor: theme().panel,
       }}
     >
+      <Show
+        when={!isEmptySession()}
+        fallback={
+          <WelcomeScreen
+            composer={props.composer}
+            slashAutocomplete={{
+              visible: props.slashAutocomplete.visible,
+              suggestions: props.slashAutocomplete.suggestions,
+              selectedIndex: props.slashAutocomplete.selectedIndex,
+              onChoose: props.slashAutocomplete.onChoose,
+            }}
+            error={props.error}
+          />
+        }
+      >
       <scrollbox
         stickyScroll
         stickyStart="bottom"
@@ -3277,6 +3367,7 @@ function ChatPanel(props: {
           />
           <text fg={theme().muted}>  esc interrupt</text>
         </box>
+      </Show>
       </Show>
     </box>
   );
@@ -3972,7 +4063,7 @@ function initialSkillsIndexState(state: WorkspaceState): SkillsIndexState {
   }
   return {
     skills: [],
-    loading: true,
+    loading: false,
     scanned: false,
     errors: [],
     debug: undefined,
