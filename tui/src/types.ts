@@ -104,6 +104,21 @@ export interface AgentActivity {
   message?: string;
 }
 
+export type AgentPhase =
+  | 'thinking'
+  | 'planning'
+  | 'editing files'
+  | 'running tool'
+  | 'waiting model'
+  | 'responding'
+  | 'idle';
+
+export interface AgentIndicatorState {
+  active: boolean;
+  phase: AgentPhase;
+  toolName?: string;
+}
+
 export interface StreamStatus {
   mode: 'idle' | 'streaming' | 'fallback' | 'interrupted' | 'error';
   reason?: string;

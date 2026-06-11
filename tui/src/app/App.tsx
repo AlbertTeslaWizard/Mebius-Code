@@ -6,6 +6,8 @@ import type { Accessor, JSX } from 'solid-js';
 import { attachEventStream, refreshReviewData, type WorkspaceState } from '../bootstrap';
 import { saveConfig } from '../config';
 import type {
+  AgentIndicatorState,
+  AgentPhase,
   Approval,
   ApprovalPreview,
   Message,
@@ -19,6 +21,7 @@ import type {
   TuiThemeName,
 } from '../types';
 import { ApprovalInlinePanel, type ApprovalChoice } from './ApprovalInlinePanel';
+import { AgentActivityIndicator } from './AgentActivityIndicator';
 import {
   PlanQuestionPanel,
   PlanReadyPanel,
@@ -389,6 +392,36 @@ export function App(props: AppProps) {
   const activeModelInfo = createMemo(() => getActiveModelInfo(state()));
   const theme = createMemo(() => getTuiTheme(themeName()));
   const composerAccentColor = createMemo(() => composerModeAccent(composerMode(), theme()));
+  const agentIndicator = createMemo<AgentIndicatorState>(() => {
+    const s = state();
+    if (!s.turnActive) return { active: false, phase: 'idle' };
+
+    const streamMode = s.streamStatus.mode;
+    const activity = s.session.agentActivity;
+
+    if (streamMode === 'streaming') {
+      return { active: true, phase: 'responding' };
+    }
+    if (streamMode === 'fallback') {
+      return { active: true, phase: 'waiting model' };
+    }
+    if (activity?.status && RUNNING_AGENT_STATUSES.has(activity.status)) {
+      const phaseMap: Record<string, AgentPhase> = {
+        thinking: 'thinking',
+        responding: 'responding',
+        using_tools: activity.toolName ? 'running tool' : 'editing files',
+        waiting_for_approval: 'running tool',
+        working: 'editing files',
+      };
+      return {
+        active: true,
+        phase: phaseMap[activity.status] ?? 'thinking',
+        toolName: activity.toolName,
+      };
+    }
+
+    return { active: true, phase: 'thinking' };
+  });
   const rightTitle = createMemo(() => {
     const approval = activeApproval();
     if (approval) return `Approval - ${approval.toolCall.name}`;
@@ -1101,6 +1134,9 @@ export function App(props: AppProps) {
       }));
     } finally {
       setBusy(false);
+      if (state().turnActive) {
+        setState((current) => ({ ...current, turnActive: false }));
+      }
     }
   }
 
@@ -1354,6 +1390,9 @@ export function App(props: AppProps) {
       }));
     } finally {
       setBusy(false);
+      if (state().turnActive) {
+        setState((current) => ({ ...current, turnActive: false }));
+      }
     }
   }
 
@@ -1683,6 +1722,8 @@ export function App(props: AppProps) {
           <ChatPanel
             messages={state().messages}
             error={state().error}
+            indicator={agentIndicator()}
+            composerAccentColor={composerAccentColor()}
             slashAutocomplete={{
               visible: slashAutocompleteVisible(),
               suggestions: filteredSlashSuggestions(),
@@ -2278,8 +2319,8 @@ function PermissionsPanel(props: {
                   <text fg={selected() ? theme().text : theme().text}>{option.label}</text>
                   <Show when={option.danger}>
                     <text fg={theme().red}> dangerous</text>
-                  </Show>
-                </box>
+      </Show>
+    </box>
                 <text fg={selected() ? theme().text : theme().muted} wrapMode="word" style={{ width: '100%', minWidth: 0 }}>
                   {option.description}
                 </text>
@@ -2366,8 +2407,7 @@ function Composer(props: {
         <box style={{ width: '100%', height: 1, flexShrink: 0, flexDirection: 'row' }}>
           <text fg={props.accentColor}>{composerModeLabel(props.mode)}</text>
           <text fg={theme().muted} truncate style={{ flexGrow: 1, minWidth: 0 }}>
-            {' '}
-            - {props.modelInfo.modelName} - {props.modelInfo.providerDisplay} - {permissionModeLabel(props.permissionMode)}
+            {' '}· {props.modelInfo.modelName} · {props.modelInfo.providerDisplay} · {permissionModeLabel(props.permissionMode)}
           </text>
         </box>
       </box>
@@ -2498,6 +2538,8 @@ function ModelChoiceRow(props: { choice: ModelChoice; selected: boolean; onChoos
 function ChatPanel(props: {
   messages: Message[];
   error: string;
+  indicator: AgentIndicatorState;
+  composerAccentColor: string;
   slashAutocomplete: {
     visible: boolean;
     suggestions: SlashCommand[];
@@ -2664,6 +2706,16 @@ function ChatPanel(props: {
             onReject={approvalInline().onReject}
           />
         )}
+      </Show>
+      <Show when={props.indicator.active && !panelPending()}>
+        <box style={{ width: '100%', height: 1, flexShrink: 0, flexDirection: 'row', paddingX: 1 }}>
+          <AgentActivityIndicator
+            active={props.indicator.active}
+            accentColor={props.composerAccentColor}
+            mutedColor={theme().muted}
+          />
+          <text fg={theme().muted}>  esc interrupt</text>
+        </box>
       </Show>
     </box>
   );

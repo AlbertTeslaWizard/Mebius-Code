@@ -39,6 +39,7 @@ export interface WorkspaceState {
   events: Array<SseEvent & { time: string }>;
   streamStatus: StreamStatus;
   activity: string;
+  turnActive: boolean;
   error: string;
 }
 
@@ -126,6 +127,7 @@ export async function bootstrapWorkspace(input: {
     events: [],
     streamStatus: { mode: 'idle' },
     activity: 'Ready',
+    turnActive: false,
     error: '',
   };
 }
@@ -212,6 +214,12 @@ export function attachEventStream(input: {
     }
   }, input.abortSignal).then(() => {
     flushPendingToken();
+    input.setState((state) => ({
+      ...state,
+      turnActive: false,
+      streamStatus: { mode: 'idle' },
+      activity: state.activity === 'Ready' ? state.activity : 'Ready',
+    }));
   }).catch((error) => {
     if (input.abortSignal.aborted) return;
     flushPendingToken();
@@ -282,6 +290,7 @@ function reduceEvent(state: WorkspaceState, event: SseEvent): WorkspaceState {
       messages,
       streamStatus: state.streamStatus.mode === 'fallback' ? state.streamStatus : { mode: 'streaming' },
       activity: 'Assistant responding',
+      turnActive: true,
     };
   }
 
@@ -292,6 +301,7 @@ function reduceEvent(state: WorkspaceState, event: SseEvent): WorkspaceState {
       events,
       streamStatus,
       activity: `streaming fallback${streamStatus.reason ? `: ${streamStatus.reason}` : ''}`,
+      turnActive: true,
     };
   }
 
@@ -314,6 +324,7 @@ function reduceEvent(state: WorkspaceState, event: SseEvent): WorkspaceState {
       messages,
       streamStatus,
       activity: `stream ${mode}${streamStatus.reason ? `: ${streamStatus.reason}` : ''}`,
+      turnActive: false,
       error: streamStatus.message ?? state.error,
     };
   }
@@ -343,10 +354,23 @@ function reduceEvent(state: WorkspaceState, event: SseEvent): WorkspaceState {
   }
 
   if (event.type === 'done') {
+    const updatedAt = new Date().toISOString();
+    const messages = state.messages.map((message) =>
+      message.streaming
+        ? {
+            ...message,
+            streaming: false,
+            updatedAt,
+          }
+        : message,
+    );
     return {
       ...state,
       events,
-      streamStatus: state.streamStatus.mode === 'streaming' ? { mode: 'idle' } : state.streamStatus,
+      messages,
+      streamStatus: { mode: 'idle' },
+      activity: 'Ready',
+      turnActive: false,
     };
   }
 
@@ -359,11 +383,32 @@ function reduceEvent(state: WorkspaceState, event: SseEvent): WorkspaceState {
         messages: [],
         streamStatus: { mode: 'idle' },
         activity: status === 'context_cleared' ? 'Context cleared' : 'Context compacted',
+        turnActive: false,
+      };
+    }
+    if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+      const updatedAt = new Date().toISOString();
+      const messages = state.messages.map((message) =>
+        message.streaming
+          ? {
+              ...message,
+              streaming: false,
+              updatedAt,
+            }
+          : message,
+      );
+      return {
+        ...state,
+        events,
+        messages,
+        streamStatus: { mode: 'idle' },
+        activity: status === 'completed' ? 'Ready' : status,
+        turnActive: false,
       };
     }
     const toolName = typeof event.data.toolName === 'string' ? ` - ${event.data.toolName}` : '';
     const command = typeof event.data.command === 'string' ? ` - ${event.data.command}` : '';
-    return { ...state, events, activity: `${status}${toolName}${command}` };
+    return { ...state, events, activity: `${status}${toolName}${command}`, turnActive: true };
   }
 
   return { ...state, events };
