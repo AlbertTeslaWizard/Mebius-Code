@@ -370,6 +370,7 @@ export function App(props: AppProps) {
   const activePlanWorkflow = createMemo<PlanWorkflow | undefined>(() => {
     const plan = state().plan;
     if (!plan || activeApproval() || dismissedPlanDecisionId() === plan.plan.id) return undefined;
+    if (plan.plan.status === 'planning_generating') return undefined;
     if (modelPalette() || commandPalette() || themePalette() || permissionPalette() || sessionPalette()) return undefined;
     const status = plan.plan.status;
     const questions = planQuestions(plan);
@@ -464,6 +465,18 @@ export function App(props: AppProps) {
       return;
     }
     setSlashSelectedIndex((current) => clamp(current, 0, Math.max(count - 1, 0)));
+  });
+
+  createEffect(() => {
+    const plan = state().plan;
+    if (!plan) return;
+    const status = plan.plan.status;
+    if (
+      (status === 'approved' || status === 'cancelled' || status === 'failed') &&
+      state().activity === 'awaiting_plan_decision'
+    ) {
+      setState((prev) => ({ ...prev, activity: 'Ready' }));
+    }
   });
 
   function startEventStream() {
@@ -3057,7 +3070,7 @@ function deriveTaskStatus(state: WorkspaceState, busy: boolean, awaitingPlanDeci
   if (state.error.trim() || isErrorEvent(latest) || (latestAgentStatus && ERROR_AGENT_STATUSES.has(latestAgentStatus))) {
     return 'error';
   }
-  if (awaitingPlanDecision || hasUnapprovedPlan(state.plan)) {
+  if (awaitingPlanDecision) {
     return 'awaiting_plan_decision';
   }
   if (latest?.type === 'done' || (latestAgentStatus && COMPLETED_AGENT_STATUSES.has(latestAgentStatus))) {

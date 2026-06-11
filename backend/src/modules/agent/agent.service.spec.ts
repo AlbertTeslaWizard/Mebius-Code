@@ -191,6 +191,54 @@ describe('AgentService', () => {
     });
   });
 
+  it('returns approved plan from latestPlan with normalized status', async () => {
+    const plan = planFixture({ id: 'plan-1', status: PlanStatus.Approved });
+    plans.findOne.mockResolvedValueOnce(plan);
+    planSteps.find.mockResolvedValueOnce([]);
+
+    const result = await service.latestPlan(owner.id, session.id);
+
+    expect(result).not.toBeNull();
+    expect(result!.plan.status).toBe(PlanStatus.Approved);
+  });
+
+  it('returns plan_ready_pending_approval from latestPlan when plan is awaiting decision', async () => {
+    const plan = planFixture({ id: 'plan-2', status: PlanStatus.PlanReadyPendingApproval });
+    plans.findOne.mockResolvedValueOnce(plan);
+    planSteps.find.mockResolvedValueOnce([]);
+
+    const result = await service.latestPlan(owner.id, session.id);
+
+    expect(result).not.toBeNull();
+    expect(result!.plan.status).toBe(PlanStatus.PlanReadyPendingApproval);
+  });
+
+  it('normalizes legacy pending_approval status to plan_ready_pending_approval', async () => {
+    const plan = planFixture({ id: 'plan-3', status: 'pending_approval' as PlanStatus });
+    plans.findOne.mockResolvedValueOnce(plan);
+    planSteps.find.mockResolvedValueOnce([]);
+
+    const result = await service.latestPlan(owner.id, session.id);
+
+    expect(result).not.toBeNull();
+    expect(result!.plan.status).toBe(PlanStatus.PlanReadyPendingApproval);
+  });
+
+  it('normalizes legacy running/completed statuses to approved in latestPlan', async () => {
+    for (const legacyStatus of ['running', 'completed'] as unknown as PlanStatus[]) {
+      jest.clearAllMocks();
+      sessions.findOwned.mockResolvedValueOnce(session);
+      const plan = planFixture({ id: 'plan-legacy', status: legacyStatus });
+      plans.findOne.mockResolvedValueOnce(plan);
+      planSteps.find.mockResolvedValueOnce([]);
+
+      const result = await service.latestPlan(owner.id, session.id);
+
+      expect(result).not.toBeNull();
+      expect(result!.plan.status).toBe(PlanStatus.Approved);
+    }
+  });
+
   it('cancels an owned plan and publishes a plan update', async () => {
     const plan = planFixture({ id: 'plan-1', status: PlanStatus.PlanReadyPendingApproval });
     plans.findOne.mockResolvedValueOnce(plan);
