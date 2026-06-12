@@ -4126,7 +4126,7 @@ function deriveTaskStatus(state: WorkspaceState, busy: boolean, awaitingPlanDeci
     .map((event) => eventString(event, 'status'))
     .find((status): status is string => Boolean(status));
 
-  if (state.error.trim() || isErrorEvent(latest) || (latestAgentStatus && ERROR_AGENT_STATUSES.has(latestAgentStatus))) {
+  if (state.error.trim() || isErrorEvent(latest) || (latest?.type === 'agent_status' && latestAgentStatus && ERROR_AGENT_STATUSES.has(latestAgentStatus))) {
     return 'error';
   }
   if (awaitingPlanDecision) {

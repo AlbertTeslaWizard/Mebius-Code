@@ -44,6 +44,7 @@ export interface WorkspaceState {
 }
 
 const STREAM_TOKEN_FLUSH_MS = 50;
+const MAX_RECONNECT_ATTEMPTS = 5;
 
 interface StartupSessionResult {
   session: Session;
@@ -175,7 +176,7 @@ export function attachEventStream(input: {
   setState: (updater: (state: WorkspaceState) => WorkspaceState) => void;
   token: string;
   abortSignal: AbortSignal;
-}): void {
+}, reconnectAttempt = 0): void {
   const api = input.state().api;
   const sessionId = input.state().session.id;
   let pendingTokenEvent: SseEvent | null = null;
@@ -257,14 +258,23 @@ export function attachEventStream(input: {
       turnActive: false,
       streamStatus: { mode: 'idle' },
       activity: state.activity === 'Ready' ? state.activity : 'Ready',
+      error: '',
     }));
   }).catch((error) => {
     if (input.abortSignal.aborted) return;
     flushPendingToken();
-    input.setState((state) => ({
-      ...state,
-      error: error instanceof Error ? error.message : 'Event stream failed.',
-    }));
+    if (reconnectAttempt < MAX_RECONNECT_ATTEMPTS) {
+      const delay = Math.min(1000 * Math.pow(2, reconnectAttempt), 30_000);
+      setTimeout(() => {
+        if (input.abortSignal.aborted) return;
+        attachEventStream(input, reconnectAttempt + 1);
+      }, delay);
+    } else {
+      input.setState((state) => ({
+        ...state,
+        error: error instanceof Error ? error.message : 'Event stream failed.',
+      }));
+    }
   });
 }
 
