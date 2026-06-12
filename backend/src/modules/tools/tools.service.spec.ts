@@ -25,6 +25,7 @@ import { SessionCommandGrant } from './session-command-grant.entity';
 import { ToolApproval } from './tool-approval.entity';
 import { ToolCall } from './tool-call.entity';
 import { ToolsService } from './tools.service';
+import { WebSearchService } from './web-search.service';
 
 describe('ToolsService', () => {
   const owner = { id: 'owner-1' } as User;
@@ -117,6 +118,10 @@ describe('ToolsService', () => {
     publish: jest.fn(),
     complete: jest.fn(),
   } as unknown as jest.Mocked<EventsService>;
+  const webSearch = {
+    isEnabled: jest.fn(),
+    search: jest.fn(),
+  } as unknown as jest.Mocked<WebSearchService>;
   const agent = {
     resumeAfterToolApproval: jest.fn().mockResolvedValue(undefined),
     recordToolResultMessage: jest.fn().mockResolvedValue(undefined),
@@ -134,10 +139,12 @@ describe('ToolsService', () => {
     commandPolicy,
     audit,
     events,
+    webSearch,
     agent,
   );
 
   beforeEach(() => {
+    jest.restoreAllMocks();
     jest.clearAllMocks();
     pendingToolCall.status = ToolCallStatus.PendingApproval;
     pendingToolCall.resultText = JSON.stringify({ kind: 'pending_tool_resume', payload: resumeContext });
@@ -184,6 +191,14 @@ describe('ToolsService', () => {
     commandPolicy.parse.mockResolvedValue({ command: 'npm', args: ['test'], executionMode: 'argv' });
     commandPolicy.parseAuthorized.mockReturnValue({ command: 'npm', args: ['test'], executionMode: 'argv' });
     commandPolicy.listAllowedCommands.mockResolvedValue(['npm test']);
+    webSearch.isEnabled.mockReturnValue(false);
+    webSearch.search.mockResolvedValue(
+      JSON.stringify({
+        query: 'nestjs latest docs',
+        provider: 'tavily',
+        results: [],
+      }),
+    );
     sessionCommandGrants.findOne.mockResolvedValue(null);
     sessionApprovalRules.find.mockResolvedValue([]);
     commandRuns.save.mockImplementation(async (value: any) => ({
@@ -482,6 +497,37 @@ describe('ToolsService', () => {
     expect(sessions.findOwned).toHaveBeenCalledWith(owner.id, session.id);
     expect(commandPolicy.listAllowedCommands).toHaveBeenCalledWith('project-1');
     expect(result).toEqual(['npm test', 'python --version']);
+  });
+
+  it('auto-executes web_search as a read-only tool', async () => {
+    webSearch.isEnabled.mockReturnValueOnce(true);
+    webSearch.search.mockResolvedValueOnce(
+      JSON.stringify({
+        query: 'nestjs latest docs',
+        provider: 'tavily',
+        results: [{ title: 'NestJS Docs', url: 'https://docs.nestjs.com', snippet: 'Docs' }],
+      }),
+    );
+
+    const result = await service.requestOrExecute({
+      owner,
+      sessionId: session.id,
+      name: 'web_search',
+      args: { query: 'nestjs latest docs', maxResults: 3 },
+    });
+
+    expect(result.status).toBe(ToolCallStatus.Succeeded);
+    expect(webSearch.search).toHaveBeenCalledWith({ query: 'nestjs latest docs', maxResults: 3 });
+    expect(approvals.save).not.toHaveBeenCalled();
+    expect(events.publish).toHaveBeenCalledWith(
+      session.id,
+      'tool_call_result',
+      expect.objectContaining({
+        name: 'web_search',
+        status: ToolCallStatus.Succeeded,
+        query: 'nestjs latest docs',
+      }),
+    );
   });
 
   it('does not list allowed commands when session ownership fails', async () => {

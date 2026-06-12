@@ -41,6 +41,8 @@ import {
 } from './session-command-grant.entity';
 import { ToolApproval } from './tool-approval.entity';
 import { ToolCall } from './tool-call.entity';
+import { codingToolNames } from './tool-specs';
+import { WebSearchService } from './web-search.service';
 
 const DIFF_PREVIEW_LIMIT = 20_000;
 type ApprovalMode = 'once' | 'project' | 'session_auto';
@@ -113,6 +115,7 @@ export class ToolsService {
     private readonly commandPolicy: CommandPolicyService,
     private readonly audit: AuditService,
     private readonly events: EventsService,
+    private readonly webSearch: WebSearchService,
     @Inject(forwardRef(() => AgentService))
     private readonly agent: AgentService,
   ) {}
@@ -326,6 +329,10 @@ export class ToolsService {
 
   async listAllowedCommands(projectId?: string): Promise<string[]> {
     return this.commandPolicy.listAllowedCommands(projectId);
+  }
+
+  webSearchEnabled(): boolean {
+    return this.webSearch.isEnabled();
   }
 
   async listSessionAllowedCommands(ownerId: string, sessionId: string): Promise<string[]> {
@@ -600,8 +607,10 @@ export class ToolsService {
         return this.applyPatch(toolCall, owner, project, toolCall.arguments);
       case 'run_command':
         return this.runCommand(toolCall, owner, project, toolCall.arguments, options.commandAuthorized ?? false);
+      case 'web_search':
+        return this.webSearch.search(toolCall.arguments);
       default:
-        return `Error: Unknown tool "${toolCall.name}". Available tools: list_files, read_file, search_text, create_patch, run_command. Do not call "${toolCall.name}" again.`;
+        return `Error: Unknown tool "${toolCall.name}". Available tools: ${codingToolNames(this.webSearchEnabled()).join(', ')}. Do not call "${toolCall.name}" again.`;
     }
   }
 
@@ -911,6 +920,9 @@ export class ToolsService {
     }
     if (toolName === 'run_command' && typeof args.command === 'string') {
       metadata.command = args.command;
+    }
+    if (toolName === 'web_search' && typeof args.query === 'string') {
+      metadata.query = args.query;
     }
     return metadata;
   }

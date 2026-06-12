@@ -10,6 +10,7 @@ describe('permission decision', () => {
   it('allows read tools in every mode', () => {
     for (const mode of Object.values(PermissionMode)) {
       expect(decidePermission(mode, { name: 'read_file', args: { path: 'README.md' } })).toBe('allow');
+      expect(decidePermission(mode, { name: 'web_search', args: { query: 'nestjs latest release' } })).toBe('allow');
     }
   });
 
@@ -69,4 +70,3 @@ function inspectCommand(command: string): CommandInspection {
     shellTokens,
   };
 }
-

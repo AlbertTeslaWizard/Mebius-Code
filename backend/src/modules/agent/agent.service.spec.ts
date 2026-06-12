@@ -49,6 +49,7 @@ describe('AgentService', () => {
   const tools = {
     requestOrExecute: jest.fn(),
     listAllowedCommands: jest.fn(),
+    webSearchEnabled: jest.fn(),
   } as unknown as jest.Mocked<ToolsService>;
   const events = {
     publish: jest.fn(),
@@ -74,6 +75,7 @@ describe('AgentService', () => {
     sessions.listMessages.mockResolvedValue([userMessage]);
     sessions.findPendingApprovalTool.mockResolvedValue(null);
     tools.listAllowedCommands.mockResolvedValue([]);
+    tools.webSearchEnabled.mockReturnValue(false);
     plans.findOne.mockResolvedValue(null);
     plans.create.mockImplementation((value) => value as Plan);
     plans.save.mockImplementation(async (value) => value as Plan);
@@ -435,6 +437,29 @@ describe('AgentService', () => {
         expect.objectContaining({
           role: 'system',
           content: expect.stringContaining('Source: ~/.claude/skills/frontend-design/SKILL.md'),
+        }),
+      ]),
+    );
+  });
+
+  it('exposes web_search to the model when web search is enabled', async () => {
+    tools.webSearchEnabled.mockReturnValue(true);
+    llm.streamChat.mockResolvedValueOnce({ content: 'Searched the web.' });
+
+    await service.run(owner, session.id, { message: 'Find the latest NestJS release' });
+
+    expect(llm.streamChat.mock.calls[0][0].tools).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          function: expect.objectContaining({ name: 'web_search' }),
+        }),
+      ]),
+    );
+    expect(llm.streamChat.mock.calls[0][0].messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'system',
+          content: expect.stringContaining('Use web_search when a task needs current public information'),
         }),
       ]),
     );

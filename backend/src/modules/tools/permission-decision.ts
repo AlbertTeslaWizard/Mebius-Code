@@ -16,7 +16,7 @@ export interface SessionApprovalRuleLike {
   scope?: string | null;
 }
 
-const READ_TOOLS = new Set(['list_files', 'read_file', 'search_text', 'read', 'glob', 'grep', 'list']);
+const READ_TOOLS = new Set(['list_files', 'read_file', 'search_text', 'web_search', 'read', 'glob', 'grep', 'list']);
 const WRITE_TOOLS = new Set(['create_patch', 'edit', 'write']);
 
 const SAFE_COMMAND_PREFIXES = [

@@ -33,4 +33,20 @@ describe('buildCodingToolSpecs', () => {
     expect(runCommand?.function.description).toContain('/bin/sh');
     expect(runCommand?.function.description).toContain('POSIX sh syntax');
   });
+
+  it('only includes web_search when enabled', () => {
+    expect(buildCodingToolSpecs([]).some((tool) => tool.function.name === 'web_search')).toBe(false);
+    expect(
+      buildCodingToolSpecs(
+        [],
+        {
+          platform: 'linux',
+          shellExecutable: '/bin/sh',
+          shellSyntax: 'posix-sh',
+          guidance: 'Command runtime: platform linux.',
+        },
+        { webSearchEnabled: true },
+      ).some((tool) => tool.function.name === 'web_search'),
+    ).toBe(true);
+  });
 });

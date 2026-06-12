@@ -103,6 +103,28 @@ logs; admins can query all actors.
 switch the active session model. API keys must be passed through `args.apiKey`,
 not embedded in the command string.
 
+## Web Search Tool
+
+The agent exposes a read-only `web_search` tool through Exa hosted MCP by
+default. It works without a key for light personal use; when the hosted free
+quota is exhausted, the tool returns guidance instead of failing the agent run.
+
+Optional configuration:
+
+```env
+WEB_SEARCH_ENABLED=true
+WEB_SEARCH_PROVIDER=exa
+EXA_API_KEY=
+WEB_SEARCH_MAX_RESULTS=5
+WEB_SEARCH_TIMEOUT_MS=10000
+WEB_SEARCH_CONTEXT_MAX_CHARACTERS=10000
+```
+
+Set `WEB_SEARCH_ENABLED=false` to remove the tool from the model prompt. Set
+`EXA_API_KEY` to use your own Exa account after hitting hosted free limits.
+Search results are returned as structured JSON with provider, content, URLs,
+snippets, and quota guidance when applicable.
+
 ## Security Defaults
 
 - Model API keys are encrypted with `MEBIUS_CODE_MASTER_KEY`.

@@ -15,6 +15,7 @@ import { ToolApproval } from './tool-approval.entity';
 import { ToolCall } from './tool-call.entity';
 import { ToolsController, ToolsReadController } from './tools.controller';
 import { ToolsService } from './tools.service';
+import { WebSearchService } from './web-search.service';
 
 @Module({
   imports: [
@@ -27,7 +28,7 @@ import { ToolsService } from './tools.service';
     UsersModule,
   ],
   controllers: [ToolsController, ToolsReadController, CommandPolicyController],
-  providers: [ToolsService],
+  providers: [ToolsService, WebSearchService],
   exports: [ToolsService],
 })
 export class ToolsModule {}
