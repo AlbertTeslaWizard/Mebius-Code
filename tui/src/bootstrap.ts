@@ -45,6 +45,12 @@ export interface WorkspaceState {
 
 const STREAM_TOKEN_FLUSH_MS = 50;
 
+interface StartupSessionResult {
+  session: Session;
+  sessions: Session[];
+  messages: Message[];
+}
+
 export async function bootstrapWorkspace(input: {
   apiBaseUrl: string;
   targetPath?: string;
@@ -85,10 +91,13 @@ export async function bootstrapWorkspace(input: {
   }
 
   const sessionList = await api.listSessions(project.id);
-  let session = sessionList.items.find((item) => item.id === config.recentSessionId) ?? sessionList.items[0];
-  if (!session) {
-    session = await api.createSession(project.id, { title: `TUI session for ${project.name}` });
-  }
+  const startupSession = await resolveStartupSession({
+    api,
+    project,
+    sessions: sessionList.items,
+    recentSessionId: config.recentSessionId,
+  });
+  const { session, sessions, messages } = startupSession;
   const nextConfig = {
     ...config,
     apiBaseUrl: input.persistApiBaseUrl === false ? config.apiBaseUrl : apiBaseUrl,
@@ -98,8 +107,7 @@ export async function bootstrapWorkspace(input: {
   };
   await saveConfig(nextConfig);
 
-  const [messages, gitStatus, approvals, plan, commandRuns, modelChoices] = await Promise.all([
-    api.listMessages(session.id),
+  const [gitStatus, approvals, plan, commandRuns, modelChoices] = await Promise.all([
     api.gitStatus(project.id).catch(() => null),
     api.pendingApprovals().catch(() => []),
     api.latestPlan(session.id).catch(() => null),
@@ -116,7 +124,7 @@ export async function bootstrapWorkspace(input: {
     project,
     projects,
     session,
-    sessions: sessionList.items,
+    sessions,
     modelChoices,
     messages,
     gitStatus,
@@ -130,6 +138,31 @@ export async function bootstrapWorkspace(input: {
     turnActive: false,
     error: '',
   };
+}
+
+export async function resolveStartupSession(input: {
+  api: Pick<ApiClient, 'createSession' | 'listMessages'>;
+  project: Project;
+  sessions: Session[];
+  recentSessionId?: string;
+}): Promise<StartupSessionResult> {
+  const selectedSession = chooseRecentSession(input.sessions, input.recentSessionId);
+  if (!selectedSession) {
+    const created = await input.api.createSession(input.project.id, { title: `TUI session for ${input.project.name}` });
+    return { session: created, sessions: upsertSession(input.sessions, created), messages: [] };
+  }
+
+  const messages = await input.api.listMessages(selectedSession.id);
+  if (messages.length === 0) {
+    return { session: selectedSession, sessions: input.sessions, messages };
+  }
+
+  const modelConfigId = selectedSession.activeModelConfig?.id;
+  const created = await input.api.createSession(input.project.id, {
+    title: `TUI session for ${input.project.name}`,
+    ...(modelConfigId ? { modelConfigId } : {}),
+  });
+  return { session: created, sessions: upsertSession(input.sessions, created), messages: [] };
 }
 
 export function attachEventStream(input: {
@@ -440,7 +473,16 @@ function chooseRecentProject(projects: Project[], recentProjectId: string | unde
   return projects.find((project) => project.id === recentProjectId) ?? projects[0];
 }
 
+function chooseRecentSession(sessions: Session[], recentSessionId: string | undefined): Session | undefined {
+  return sessions.find((session) => session.id === recentSessionId) ?? sessions[0];
+}
+
 function upsertProject(projects: Project[], project: Project): Project[] {
   const existing = projects.some((item) => item.id === project.id);
   return existing ? projects.map((item) => (item.id === project.id ? project : item)) : [project, ...projects];
+}
+
+function upsertSession(sessions: Session[], session: Session): Session[] {
+  const existing = sessions.some((item) => item.id === session.id);
+  return existing ? sessions.map((item) => (item.id === session.id ? session : item)) : [session, ...sessions];
 }

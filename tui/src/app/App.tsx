@@ -296,6 +296,17 @@ const slashCommands: SlashCommand[] = [
 const RIGHT_RAIL_WIDTH = 32;
 const MAIN_COLUMN_MIN_WIDTH = 48;
 const COMPOSER_HEIGHT = 6;
+const WELCOME_COMPOSER_MIN_WIDTH = 28;
+const WELCOME_COMPOSER_MAX_WIDTH = 72;
+const WELCOME_HORIZONTAL_PADDING = 8;
+const PIXEL_WORDMARK_MIN_WIDTH = 62;
+const PIXEL_WORDMARK_LINES: Array<{ brand: string; code: string }> = [
+  { brand: '█   █ █████ ████  █████ █   █ █████', code: '█████ █████ ████  █████' },
+  { brand: '██ ██ █     █   █   █   █   █ █    ', code: '█     █   █ █   █ █    ' },
+  { brand: '█ █ █ ████  ████    █   █   █ █████', code: '█     █   █ █   █ ████ ' },
+  { brand: '█   █ █     █   █   █   █   █     █', code: '█     █   █ █   █ █    ' },
+  { brand: '█   █ █████ ████  █████ █████ █████', code: '█████ █████ ████  █████' },
+];
 const composerSubmitKeyBindings: Array<{ name: string; action: TextareaAction }> = [
   { name: 'return', action: 'submit' },
   { name: 'kpenter', action: 'submit' },
@@ -2931,6 +2942,7 @@ function Composer(props: {
   permissionMode: PermissionMode;
   activeSkillCount: number;
   value: string;
+  placeholder?: string | null;
   focused: boolean;
   onInput: (value: string) => void;
   onCursorOffsetChange: (offset: number) => void;
@@ -2975,7 +2987,7 @@ function Composer(props: {
           ref={textareaRef}
           focused={props.focused}
           initialValue={props.value}
-          placeholder={null}
+          placeholder={props.placeholder ?? null}
           backgroundColor={theme().input}
           focusedBackgroundColor={theme().input}
           textColor={theme().text}
@@ -3131,19 +3143,44 @@ function WelcomeScreen(props: {
   error?: string;
 }) {
   const theme = useTheme();
+  const dimensions = useTerminalDimensions();
+  const welcomeWidth = createMemo(() => {
+    const availableWidth = Math.max(
+      WELCOME_COMPOSER_MIN_WIDTH,
+      dimensions().width - RIGHT_RAIL_WIDTH - WELCOME_HORIZONTAL_PADDING,
+    );
+    return clamp(availableWidth, WELCOME_COMPOSER_MIN_WIDTH, WELCOME_COMPOSER_MAX_WIDTH);
+  });
+
   return (
     <box style={{ width: '100%', height: '100%', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
       <Show when={props.error}>
         <text fg={theme().red}>{props.error}</text>
       </Show>
       <box style={{ flexGrow: 1, minHeight: 0 }} />
-      <box style={{ flexDirection: 'row', justifyContent: 'center' }}>
-        <text fg={theme().purple}>Mebius</text>
-        <text fg={theme().muted}> Code</text>
-      </box>
+      <Show
+        when={welcomeWidth() >= PIXEL_WORDMARK_MIN_WIDTH}
+        fallback={
+          <box style={{ flexDirection: 'row', justifyContent: 'center' }}>
+            <text fg={theme().muted}>mebius</text>
+            <text fg={theme().text}> code</text>
+          </box>
+        }
+      >
+        <box style={{ flexDirection: 'column', alignItems: 'center' }}>
+          <For each={PIXEL_WORDMARK_LINES}>
+            {(line) => (
+              <box style={{ flexDirection: 'row', height: 1, minHeight: 1 }}>
+                <text fg={theme().muted}>{line.brand}</text>
+                <text fg={theme().text}>  {line.code}</text>
+              </box>
+            )}
+          </For>
+        </box>
+      </Show>
       <box style={{ height: 1 }} />
-      <box style={{ width: '100%', flexDirection: 'column' }}>
-        <Composer {...props.composer} />
+      <box style={{ width: welcomeWidth(), flexDirection: 'column' }}>
+        <Composer {...props.composer} placeholder={'Ask anything... "Fix a TODO in the codebase"'} />
         <Show when={props.slashAutocomplete.visible}>
           <SlashCommandAutocomplete
             suggestions={props.slashAutocomplete.suggestions}
@@ -3153,17 +3190,20 @@ function WelcomeScreen(props: {
         </Show>
       </box>
       <box style={{ height: 1 }} />
-      <box style={{ flexDirection: 'row', justifyContent: 'center' }}>
-        <text fg={theme().muted}>Tab agents</text>
-        <text fg={theme().muted}>  ·  </text>
-        <text fg={theme().muted}>Ctrl+P commands</text>
-        <text fg={theme().muted}>  ·  </text>
-        <text fg={theme().muted}>/models</text>
-        <text fg={theme().muted}>  ·  </text>
-        <text fg={theme().muted}>/skills</text>
+      <box style={{ width: welcomeWidth(), flexDirection: 'row', justifyContent: 'flex-end' }}>
+        <text fg={theme().text}>Tab</text>
+        <text fg={theme().muted}> agents  </text>
+        <text fg={theme().text}>Ctrl+P</text>
+        <text fg={theme().muted}> commands  </text>
+        <text fg={theme().text}>/models</text>
+        <text fg={theme().muted}>  </text>
+        <text fg={theme().text}>/skills</text>
       </box>
       <box style={{ height: 1 }} />
-      <text fg={theme().muted}>Type a message to begin</text>
+      <box style={{ flexDirection: 'row' }}>
+        <text fg={theme().yellow}>Tip</text>
+        <text fg={theme().muted}> start with / for commands</text>
+      </box>
       <box style={{ flexGrow: 1, minHeight: 0 }} />
     </box>
   );
