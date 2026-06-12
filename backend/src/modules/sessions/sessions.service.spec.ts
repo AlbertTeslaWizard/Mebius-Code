@@ -261,6 +261,46 @@ describe('SessionsService', () => {
     expect(result.activeModelConfig).not.toHaveProperty('encryptedApiKey');
   });
 
+  it('renames owned sessions with trimmed titles', async () => {
+    const result = await service.update('owner-1', 'session-1', {
+      title: '  Follow-up work  ',
+    });
+
+    expect(sessions.findOne).toHaveBeenCalledWith({
+      where: { id: 'session-1', owner: { id: 'owner-1' } },
+      relations: { owner: true, project: true, activeModelConfig: true },
+    });
+    expect(sessions.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'session-1',
+        title: 'Follow-up work',
+      }),
+    );
+    expect(result.title).toBe('Follow-up work');
+  });
+
+  it('rejects blank session rename titles after trimming', async () => {
+    await expect(
+      service.update('owner-1', 'session-1', {
+        title: '   ',
+      }),
+    ).rejects.toThrow('Session title must be at least 2 characters.');
+
+    expect(sessions.save).not.toHaveBeenCalled();
+  });
+
+  it('does not rename missing or unowned sessions', async () => {
+    sessions.findOne.mockResolvedValueOnce(null);
+
+    await expect(
+      service.update('owner-1', 'session-1', {
+        title: 'Follow-up work',
+      }),
+    ).rejects.toThrow('Session not found.');
+
+    expect(sessions.save).not.toHaveBeenCalled();
+  });
+
   it('returns waiting approval activity when the session has a pending approval', async () => {
     approvals.findOne.mockResolvedValue({
       toolCall: {

@@ -63,11 +63,34 @@ describe('startup session selection', () => {
     expect(api.createCalls).toEqual([]);
   });
 
-  it('creates a new session when the selected session has messages and inherits the active model', async () => {
+  it('reuses an existing empty session before creating a new one', async () => {
+    const previous = sessionFixture('previous', { activeModelConfig: modelConfigFixture('model-1') });
+    const empty = sessionFixture('empty');
+    const older = sessionFixture('older');
+    const api = createStartupApi({ previous: [messageFixture('message-1')], empty: [] });
+
+    const result = await resolveStartupSession({
+      api: api.client,
+      project: projectFixture(),
+      sessions: [previous, empty, older],
+      recentSessionId: 'previous',
+    });
+
+    expect(result.session).toBe(empty);
+    expect(result.messages).toEqual([]);
+    expect(result.sessions).toEqual([previous, empty, older]);
+    expect(api.listMessageCalls).toEqual(['previous', 'empty']);
+    expect(api.createCalls).toEqual([]);
+  });
+
+  it('creates a new session when all listed sessions have messages and inherits the active model', async () => {
     const previous = sessionFixture('previous', { activeModelConfig: modelConfigFixture('model-1') });
     const older = sessionFixture('older');
     const created = sessionFixture('created', { activeModelConfig: modelConfigFixture('model-1') });
-    const api = createStartupApi({ previous: [messageFixture('message-1')] }, created);
+    const api = createStartupApi(
+      { previous: [messageFixture('message-1')], older: [messageFixture('message-2')] },
+      created,
+    );
 
     const result = await resolveStartupSession({
       api: api.client,
@@ -79,7 +102,7 @@ describe('startup session selection', () => {
     expect(result.session.id).toBe('created');
     expect(result.messages).toEqual([]);
     expect(result.sessions.map((session) => session.id)).toEqual(['created', 'previous', 'older']);
-    expect(api.listMessageCalls).toEqual(['previous']);
+    expect(api.listMessageCalls).toEqual(['previous', 'older']);
     expect(api.createCalls).toEqual([
       {
         projectId: 'project-1',

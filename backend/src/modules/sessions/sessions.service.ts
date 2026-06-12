@@ -16,6 +16,7 @@ import { CreateMessageDto } from './dto/create-message.dto';
 import { CreateSessionDto } from './dto/create-session.dto';
 import { ListSessionsDto } from './dto/list-sessions.dto';
 import { SlashCommandDto } from './dto/slash-command.dto';
+import { UpdateSessionDto } from './dto/update-session.dto';
 import { Message } from './message.entity';
 import { Session } from './session.entity';
 
@@ -99,6 +100,19 @@ export class SessionsService {
     const session = await this.findOwned(ownerId, sessionId);
     const agentActivity = await this.getAgentActivity(session.id);
     return this.toView(session, agentActivity);
+  }
+
+  async update(ownerId: string, sessionId: string, dto: UpdateSessionDto): Promise<SessionView> {
+    const session = await this.findOwned(ownerId, sessionId);
+    const title = dto.title.trim();
+    if (title.length < 2) {
+      throw new BadRequestException('Session title must be at least 2 characters.');
+    }
+
+    session.title = title;
+    const saved = await this.sessions.save(session);
+    const agentActivity = await this.getAgentActivity(saved.id);
+    return this.toView(saved, agentActivity);
   }
 
   async listForProject(

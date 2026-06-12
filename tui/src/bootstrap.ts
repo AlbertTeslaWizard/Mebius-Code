@@ -157,6 +157,11 @@ export async function resolveStartupSession(input: {
     return { session: selectedSession, sessions: input.sessions, messages };
   }
 
+  const reusable = await findEmptySession(input.api, input.sessions, selectedSession.id);
+  if (reusable) {
+    return { session: reusable.session, sessions: input.sessions, messages: reusable.messages };
+  }
+
   const modelConfigId = selectedSession.activeModelConfig?.id;
   const created = await input.api.createSession(input.project.id, {
     title: `TUI session for ${input.project.name}`,
@@ -419,7 +424,7 @@ function reduceEvent(state: WorkspaceState, event: SseEvent): WorkspaceState {
         turnActive: false,
       };
     }
-    if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+    if (status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'session_deleted') {
       const updatedAt = new Date().toISOString();
       const messages = state.messages.map((message) =>
         message.streaming
@@ -475,6 +480,21 @@ function chooseRecentProject(projects: Project[], recentProjectId: string | unde
 
 function chooseRecentSession(sessions: Session[], recentSessionId: string | undefined): Session | undefined {
   return sessions.find((session) => session.id === recentSessionId) ?? sessions[0];
+}
+
+async function findEmptySession(
+  api: Pick<ApiClient, 'listMessages'>,
+  sessions: Session[],
+  skippedSessionId: string,
+): Promise<{ session: Session; messages: Message[] } | null> {
+  for (const session of sessions) {
+    if (session.id === skippedSessionId) continue;
+    const messages = await api.listMessages(session.id);
+    if (messages.length === 0) {
+      return { session, messages };
+    }
+  }
+  return null;
 }
 
 function upsertProject(projects: Project[], project: Project): Project[] {

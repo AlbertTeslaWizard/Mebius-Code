@@ -73,6 +73,17 @@ export class ApiClient {
     return this.request<Session>(`/sessions/${sessionId}`);
   }
 
+  async renameSession(sessionId: string, title: string): Promise<Session> {
+    return this.request<Session>(`/sessions/${sessionId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ title }),
+    });
+  }
+
+  async deleteSession(sessionId: string): Promise<{ deleted: true }> {
+    return this.request<{ deleted: true }>(`/sessions/${sessionId}`, { method: 'DELETE' });
+  }
+
   async listModels(sessionId: string): Promise<ModelChoice[]> {
     const result = await this.request<ModelsCommandResult>(`/sessions/${sessionId}/commands`, {
       method: 'POST',

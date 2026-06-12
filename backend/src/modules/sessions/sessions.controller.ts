@@ -5,6 +5,7 @@ import {
   Get,
   MessageEvent,
   Param,
+  Patch,
   Post,
   Query,
   Req,
@@ -23,6 +24,7 @@ import { CreateMessageDto } from './dto/create-message.dto';
 import { CreateSessionDto } from './dto/create-session.dto';
 import { ListSessionsDto } from './dto/list-sessions.dto';
 import { SlashCommandDto } from './dto/slash-command.dto';
+import { UpdateSessionDto } from './dto/update-session.dto';
 import { SessionsService } from './sessions.service';
 
 @Controller()
@@ -58,6 +60,12 @@ export class SessionsController {
   @UseGuards(JwtAuthGuard)
   get(@Req() request: RequestWithUser, @Param('id') id: string) {
     return this.sessions.get(request.user.sub, id);
+  }
+
+  @Patch('sessions/:id')
+  @UseGuards(JwtAuthGuard)
+  update(@Req() request: RequestWithUser, @Param('id') id: string, @Body() dto: UpdateSessionDto) {
+    return this.sessions.update(request.user.sub, id, dto);
   }
 
   @Get('sessions/:id/messages')

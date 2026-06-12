@@ -147,6 +147,9 @@ interface SessionPaletteState {
   query: string;
   loading: boolean;
   error?: string;
+  confirmDeleteSessionId?: string;
+  renameSessionId?: string;
+  renameTitle?: string;
 }
 
 interface SkillsIndexState {
@@ -655,7 +658,11 @@ export function App(props: AppProps) {
       if (sessionPalette()) {
         event.preventDefault();
         event.stopPropagation();
-        setSessionPalette(null);
+        if (sessionPalette()?.renameSessionId) {
+          cancelSessionRename();
+        } else {
+          setSessionPalette(null);
+        }
         return;
       }
       if (modelPalette()) {
@@ -808,6 +815,34 @@ export function App(props: AppProps) {
 
     const sessionState = sessionPalette();
     if (sessionState) {
+      if (sessionState.renameSessionId && event.ctrl && (name === 'd' || name === 'r')) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      if (event.ctrl && name === 'd') {
+        event.preventDefault();
+        event.stopPropagation();
+        void deleteSelectedSessionFromPalette();
+        return;
+      }
+      if (event.ctrl && name === 'r') {
+        event.preventDefault();
+        event.stopPropagation();
+        startSessionRename();
+        return;
+      }
+      if (isEnterKey(name) && sessionState.renameSessionId) {
+        event.preventDefault();
+        event.stopPropagation();
+        void submitSessionRename();
+        return;
+      }
+      if (sessionState.renameSessionId && (name === 'up' || name === 'down')) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       if (name === 'up') {
         event.preventDefault();
         event.stopPropagation();
@@ -1580,13 +1615,218 @@ export function App(props: AppProps) {
     setSessionPalette((current) => {
       if (!current) return current;
       const count = flattenSessionGroups(buildSessionGroups(current.sessions, current.query)).length;
-      return { ...current, selectedIndex: moveIndex(current.selectedIndex, delta, count) };
+      return {
+        ...current,
+        selectedIndex: moveIndex(current.selectedIndex, delta, count),
+        confirmDeleteSessionId: undefined,
+      };
     });
   }
 
   function selectedSession(palette: SessionPaletteState | null): Session | undefined {
     if (!palette) return undefined;
     return flattenSessionGroups(buildSessionGroups(palette.sessions, palette.query))[palette.selectedIndex];
+  }
+
+  function sessionActionBlocked(action: string): string | null {
+    const current = state();
+    if (busy()) return `Wait for the current operation to finish before ${action}.`;
+    if (current.turnActive || current.session.agentActivity) {
+      return `Wait for current session activity to finish before ${action}.`;
+    }
+    return null;
+  }
+
+  function startSessionRename() {
+    const blocked = sessionActionBlocked('renaming sessions');
+    const palette = sessionPalette();
+    if (blocked) {
+      setSessionPalette((current) => (current ? { ...current, error: blocked } : current));
+      return;
+    }
+    const session = selectedSession(palette);
+    if (!session) return;
+    setSessionPalette((current) =>
+      current
+        ? {
+            ...current,
+            confirmDeleteSessionId: undefined,
+            renameSessionId: session.id,
+            renameTitle: session.title,
+            error: undefined,
+          }
+        : current,
+    );
+  }
+
+  function updateSessionRenameTitle(title: string) {
+    setSessionPalette((current) => (current ? { ...current, renameTitle: title, error: undefined } : current));
+  }
+
+  function cancelSessionRename() {
+    setSessionPalette((current) =>
+      current
+        ? {
+            ...current,
+            renameSessionId: undefined,
+            renameTitle: undefined,
+            error: undefined,
+          }
+        : current,
+    );
+  }
+
+  async function submitSessionRename() {
+    const blocked = sessionActionBlocked('renaming sessions');
+    const palette = sessionPalette();
+    if (blocked) {
+      setSessionPalette((current) => (current ? { ...current, error: blocked } : current));
+      return;
+    }
+    if (!palette?.renameSessionId) return;
+
+    const session = palette.sessions.find((item) => item.id === palette.renameSessionId);
+    const title = (palette.renameTitle ?? '').trim();
+    if (title.length < MIN_SESSION_TITLE_LENGTH) {
+      setSessionPalette((current) => (current ? { ...current, error: 'Session title must be at least 2 characters.' } : current));
+      return;
+    }
+    if (title.length > MAX_SESSION_TITLE_LENGTH) {
+      setSessionPalette((current) =>
+        current ? { ...current, error: `Session title must be ${MAX_SESSION_TITLE_LENGTH} characters or fewer.` } : current,
+      );
+      return;
+    }
+    if (session?.title === title) {
+      cancelSessionRename();
+      return;
+    }
+
+    setBusy(true);
+    setSessionPalette((current) => (current ? { ...current, loading: true, error: undefined } : current));
+    try {
+      const current = state();
+      const renamed = await current.api.renameSession(palette.renameSessionId, title);
+      const sessions = await current.api
+        .listSessions(current.project.id)
+        .then((result) => result.items)
+        .catch(() => upsertSessionList(current.sessions, renamed));
+      setState((prev) => ({
+        ...prev,
+        session: prev.session.id === renamed.id ? renamed : prev.session,
+        sessions,
+        activity: `Renamed session: ${renamed.title}`,
+        error: '',
+      }));
+      setSessionPalette((currentPalette) =>
+        currentPalette
+          ? {
+              ...currentPalette,
+              sessions,
+              selectedIndex: initialSessionSelectedIndex(sessions, currentPalette.query, renamed.id),
+              loading: false,
+              error: undefined,
+              confirmDeleteSessionId: undefined,
+              renameSessionId: undefined,
+              renameTitle: undefined,
+            }
+          : currentPalette,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to rename session.';
+      setState((prev) => ({ ...prev, error: message }));
+      setSessionPalette((current) => (current ? { ...current, loading: false, error: message } : current));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteSelectedSessionFromPalette() {
+    const blocked = sessionActionBlocked('deleting sessions');
+    const palette = sessionPalette();
+    if (blocked) {
+      setSessionPalette((current) => (current ? { ...current, error: blocked } : current));
+      return;
+    }
+    const session = selectedSession(palette);
+    if (!palette || !session) return;
+    if (palette.confirmDeleteSessionId !== session.id) {
+      setSessionPalette((current) =>
+        current
+          ? {
+              ...current,
+              confirmDeleteSessionId: session.id,
+              renameSessionId: undefined,
+              renameTitle: undefined,
+              error: `Press Ctrl+D again to delete "${session.title}".`,
+            }
+          : current,
+      );
+      return;
+    }
+
+    setBusy(true);
+    setSessionPalette((current) => (current ? { ...current, loading: true, error: undefined } : current));
+    try {
+      const current = state();
+      await current.api.deleteSession(session.id);
+      let sessions = await current.api
+        .listSessions(current.project.id)
+        .then((result) => result.items)
+        .catch(() => current.sessions.filter((item) => item.id !== session.id));
+
+      if (session.id === current.session.id) {
+        let replacement = replacementSessionAfterDelete(palette, session.id, sessions);
+        if (!replacement) {
+          const modelConfigId =
+            current.session.activeModelConfig?.id ?? current.modelChoices.find((choice) => choice.active)?.modelConfigId;
+          replacement = await current.api.createSession(current.project.id, {
+            title: `TUI session for ${current.project.name}`,
+            ...(modelConfigId ? { modelConfigId } : {}),
+          });
+          sessions = upsertSessionList(sessions, replacement);
+        }
+        await switchToSession(replacement, { fallbackToTarget: true });
+        const latestSessions = state().sessions;
+        setSessionPalette((currentPalette) =>
+          currentPalette
+            ? {
+                ...currentPalette,
+                sessions: latestSessions,
+                selectedIndex: initialSessionSelectedIndex(latestSessions, currentPalette.query, state().session.id),
+                loading: false,
+                error: undefined,
+                confirmDeleteSessionId: undefined,
+              }
+            : currentPalette,
+        );
+      } else {
+        setState((prev) => ({
+          ...prev,
+          sessions,
+          activity: `Deleted session: ${session.title}`,
+          error: '',
+        }));
+        setSessionPalette((currentPalette) => {
+          if (!currentPalette) return currentPalette;
+          const count = flattenSessionGroups(buildSessionGroups(sessions, currentPalette.query)).length;
+          return {
+            ...currentPalette,
+            sessions,
+            selectedIndex: clamp(currentPalette.selectedIndex, 0, Math.max(count - 1, 0)),
+            loading: false,
+            error: undefined,
+            confirmDeleteSessionId: undefined,
+          };
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to delete session.';
+      setState((prev) => ({ ...prev, error: message }));
+      setSessionPalette((current) => (current ? { ...current, loading: false, error: message } : current));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function chooseSession(session: Session) {
@@ -1868,6 +2108,7 @@ export function App(props: AppProps) {
         commandRuns,
         events: [],
         streamStatus: { mode: 'idle' },
+        turnActive: false,
         activity: `Session: ${session.title}`,
         error: '',
       }));
@@ -2226,7 +2467,20 @@ export function App(props: AppProps) {
               palette={palette()}
               currentSessionId={state().session.id}
               onClose={() => setSessionPalette(null)}
-              onQuery={(query) => setSessionPalette((current) => (current ? { ...current, query, selectedIndex: 0 } : current))}
+              onQuery={(query) =>
+                setSessionPalette((current) =>
+                  current
+                    ? {
+                        ...current,
+                        query,
+                        selectedIndex: 0,
+                        confirmDeleteSessionId: undefined,
+                      }
+                    : current,
+                )
+              }
+              onRenameCancel={cancelSessionRename}
+              onRenameInput={updateSessionRenameTitle}
               onChoose={(session) => {
                 void chooseSession(session);
               }}
@@ -2382,6 +2636,8 @@ function SessionsPalette(props: {
   currentSessionId: string;
   onClose: () => void;
   onQuery: (query: string) => void;
+  onRenameCancel: () => void;
+  onRenameInput: (title: string) => void;
   onChoose: (session: Session) => void;
 }) {
   const theme = useTheme();
@@ -2407,7 +2663,13 @@ function SessionsPalette(props: {
       }}
       onKeyDown={(event) => {
         if (event.name === 'escape') {
-          props.onClose();
+          event.preventDefault();
+          event.stopPropagation();
+          if (props.palette.renameSessionId) {
+            props.onRenameCancel();
+          } else {
+            props.onClose();
+          }
         }
       }}
     >
@@ -2416,7 +2678,12 @@ function SessionsPalette(props: {
         <box style={{ flexGrow: 1 }} />
         <text fg={theme().muted}>esc</text>
       </box>
-      <PaletteSearch value={props.palette.query} placeholder="Search sessions" onInput={props.onQuery} />
+      <PaletteSearch
+        value={props.palette.query}
+        placeholder="Search sessions"
+        focused={!props.palette.renameSessionId}
+        onInput={props.onQuery}
+      />
       <Show when={props.palette.error}>
         <text fg={theme().red}>{props.palette.error}</text>
       </Show>
@@ -2441,6 +2708,10 @@ function SessionsPalette(props: {
                         session={row.session}
                         selected={selected()}
                         current={row.session.id === props.currentSessionId}
+                        confirmingDelete={row.session.id === props.palette.confirmDeleteSessionId}
+                        renaming={row.session.id === props.palette.renameSessionId}
+                        renameTitle={props.palette.renameTitle ?? row.session.title}
+                        onRenameInput={props.onRenameInput}
                         onChoose={() => props.onChoose(row.session)}
                       />
                     );
@@ -2451,12 +2722,29 @@ function SessionsPalette(props: {
           </For>
         </Show>
       </scrollbox>
-      <PaletteFooter items={[['↑/↓', 'navigate'], ['Enter', 'switch'], ['Esc', 'close']]} />
+      <PaletteFooter
+        items={[
+          ['Up/Down', 'navigate'],
+          ['Enter', props.palette.renameSessionId ? 'save' : 'switch'],
+          ['Ctrl+D', 'delete'],
+          ['Ctrl+R', 'rename'],
+          ['Esc', props.palette.renameSessionId ? 'cancel' : 'close'],
+        ]}
+      />
     </box>
   );
 }
 
-function SessionRow(props: { session: Session; selected: boolean; current: boolean; onChoose: () => void }) {
+function SessionRow(props: {
+  session: Session;
+  selected: boolean;
+  current: boolean;
+  confirmingDelete: boolean;
+  renaming: boolean;
+  renameTitle: string;
+  onRenameInput: (title: string) => void;
+  onChoose: () => void;
+}) {
   const theme = useTheme();
   const rowBackground = createMemo(() => (props.selected ? theme().selection : theme().background));
   const primaryColor = createMemo(() => (props.selected ? theme().text : theme().text));
@@ -2472,14 +2760,33 @@ function SessionRow(props: { session: Session; selected: boolean; current: boole
         flexDirection: 'row',
         backgroundColor: rowBackground(),
       }}
-      onMouseDown={props.onChoose}
+      onMouseDown={() => {
+        if (!props.renaming) props.onChoose();
+      }}
     >
       <text fg={markerColor()} style={{ width: 2, flexShrink: 0 }}>
         {props.current ? '*' : ' '}
       </text>
-      <text fg={primaryColor()} truncate style={{ flexGrow: 1, minWidth: 0 }}>
-        {props.session.title}
-      </text>
+      <Show
+        when={props.renaming}
+        fallback={
+          <text fg={props.confirmingDelete ? theme().red : primaryColor()} truncate style={{ flexGrow: 1, minWidth: 0 }}>
+            {props.confirmingDelete ? `Delete? ${props.session.title}` : props.session.title}
+          </text>
+        }
+      >
+        <input
+          focused
+          value={props.renameTitle}
+          backgroundColor={rowBackground()}
+          focusedBackgroundColor={rowBackground()}
+          textColor={primaryColor()}
+          focusedTextColor={primaryColor()}
+          cursorColor={theme().blue}
+          onInput={props.onRenameInput}
+          style={{ flexGrow: 1, minWidth: 0 }}
+        />
+      </Show>
       <text fg={secondaryColor()} truncate style={{ width: 20, flexShrink: 0 }}>
         {props.session.activeModelConfig?.modelName ?? props.session.status}
       </text>
@@ -2765,7 +3072,7 @@ function ModalShell(props: { title: string; onClose: () => void; children: JSX.E
   );
 }
 
-function PaletteSearch(props: { value: string; placeholder: string; onInput: (value: string) => void }) {
+function PaletteSearch(props: { value: string; placeholder: string; focused?: boolean; onInput: (value: string) => void }) {
   const theme = useTheme();
   return (
     <box style={{ width: '100%', height: 1, minHeight: 1, marginTop: 1, flexDirection: 'row', flexShrink: 0 }}>
@@ -2773,7 +3080,7 @@ function PaletteSearch(props: { value: string; placeholder: string; onInput: (va
         &gt;
       </text>
       <input
-        focused
+        focused={props.focused ?? true}
         value={props.value}
         placeholder={props.placeholder}
         backgroundColor={theme().input}
@@ -4016,6 +4323,26 @@ function initialSessionSelectedIndex(sessions: Session[], query: string, current
   const flatSessions = flattenSessionGroups(buildSessionGroups(sessions, query));
   const currentIndex = flatSessions.findIndex((session) => session.id === currentSessionId);
   return Math.max(currentIndex, 0);
+}
+
+function replacementSessionAfterDelete(
+  palette: SessionPaletteState,
+  deletedSessionId: string,
+  remainingSessions: Session[],
+): Session | undefined {
+  const remainingById = new Map(remainingSessions.map((session) => [session.id, session]));
+  const visibleBeforeDelete = flattenSessionGroups(buildSessionGroups(palette.sessions, palette.query));
+  const deletedIndex = visibleBeforeDelete.findIndex((session) => session.id === deletedSessionId);
+  const visibleCandidates =
+    deletedIndex >= 0
+      ? [...visibleBeforeDelete.slice(deletedIndex + 1), ...visibleBeforeDelete.slice(0, deletedIndex)]
+      : visibleBeforeDelete;
+
+  for (const candidate of visibleCandidates) {
+    const remaining = remainingById.get(candidate.id);
+    if (remaining) return remaining;
+  }
+  return remainingSessions[0];
 }
 
 function sessionMatches(session: Session, query: string): boolean {
