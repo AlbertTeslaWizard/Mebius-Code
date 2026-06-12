@@ -245,6 +245,17 @@ export function attachEventStream(input: {
 
     flushPendingToken();
     input.setState((state) => reduceEvent(state, event));
+    if (shouldReloadTurnState(event.type)) {
+      const current = input.state();
+      void Promise.all([
+        api.listMessages(sessionId).catch(() => current.messages),
+        refreshReviewData(current),
+      ]).then(([messages, updates]) => {
+        if (input.abortSignal.aborted) return;
+        input.setState((state) => ({ ...state, ...updates, messages }));
+      });
+      return;
+    }
     if (shouldRefreshReviewData(event.type)) {
       void refreshReviewData(input.state()).then((updates) => {
         if (input.abortSignal.aborted) return;
@@ -295,8 +306,14 @@ function shouldRefreshReviewData(eventType: string): boolean {
     eventType === 'tool_call_requested' ||
     eventType === 'tool_call_result' ||
     eventType === 'command_output' ||
-    eventType === 'plan_updated'
+    eventType === 'plan_updated' ||
+    eventType === 'patch_created' ||
+    eventType === 'patch_reverted'
   );
+}
+
+function shouldReloadTurnState(eventType: string): boolean {
+  return eventType === 'turn_undone' || eventType === 'turn_redone';
 }
 
 function reduceEvent(state: WorkspaceState, event: SseEvent): WorkspaceState {
@@ -461,6 +478,20 @@ function reduceEvent(state: WorkspaceState, event: SseEvent): WorkspaceState {
     const toolName = typeof event.data.toolName === 'string' ? ` - ${event.data.toolName}` : '';
     const command = typeof event.data.command === 'string' ? ` - ${event.data.command}` : '';
     return { ...state, events, activity: `${status}${toolName}${command}`, turnActive: true };
+  }
+
+  if (event.type === 'turn_undone' || event.type === 'turn_redone') {
+    const messageCount = typeof event.data.messageCount === 'number' ? event.data.messageCount : 0;
+    const activity = event.type === 'turn_undone'
+      ? `Turn undone (${messageCount} message${messageCount === 1 ? '' : 's'})`
+      : `Turn redone (${messageCount} message${messageCount === 1 ? '' : 's'})`;
+    return {
+      ...state,
+      events,
+      activity,
+      turnActive: false,
+      streamStatus: { mode: 'idle' },
+    };
   }
 
   return { ...state, events };

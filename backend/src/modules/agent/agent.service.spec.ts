@@ -5,6 +5,7 @@ import { PlanStatus } from '../../common/enums/plan-status.enum';
 import { ApprovalStatus, ToolCallStatus } from '../../common/enums/tool-status.enum';
 import { EventsService } from '../events/events.service';
 import { ModelConfigsService, RuntimeModelConfig } from '../model-configs/model-configs.service';
+import { AgentTurn, AgentTurnKind, AgentTurnStatus } from '../sessions/agent-turn.entity';
 import { Message } from '../sessions/message.entity';
 import { Session } from '../sessions/session.entity';
 import { SessionsService } from '../sessions/sessions.service';
@@ -25,6 +26,7 @@ describe('AgentService', () => {
   const plans = {
     create: jest.fn((value) => value),
     findOne: jest.fn(),
+    createQueryBuilder: jest.fn(() => createPlanQueryBuilder(() => plans.findOne({} as never))),
     save: jest.fn(async (value) => value),
   } as unknown as jest.Mocked<Repository<Plan>>;
   const planSteps = {
@@ -38,6 +40,7 @@ describe('AgentService', () => {
     latestSummary: jest.fn(),
     listMessages: jest.fn(),
     findPendingApprovalTool: jest.fn(),
+    createTurn: jest.fn(),
   } as unknown as jest.Mocked<SessionsService>;
   const modelConfigs = {
     findRuntime: jest.fn(),
@@ -68,6 +71,9 @@ describe('AgentService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     sessions.findOwned.mockResolvedValue(session);
+    sessions.createTurn.mockImplementation(async (targetSession, kind, metadata = {}) =>
+      turnFixture(kind, targetSession, metadata),
+    );
     sessions.addMessage.mockImplementation(async (_session, role, content, metadata = {}) =>
       messageFixture(`message-${String(role)}-${String(content)}`, role as Message['role'], content, metadata),
     );
@@ -145,12 +151,14 @@ describe('AgentService', () => {
       MessageRole.User,
       'Fix Plan Mode approval UX',
       { type: 'plan_prompt', planId: 'plan-1' },
+      expect.objectContaining({ kind: AgentTurnKind.Plan }),
     );
     expect(sessions.addMessage).toHaveBeenCalledWith(
       session,
       MessageRole.Assistant,
       '# Plan\n\nFix the Plan Mode approval flow.',
       { type: 'plan_draft', planId: 'plan-1' },
+      expect.objectContaining({ kind: AgentTurnKind.Plan }),
     );
     expect(events.publish).toHaveBeenCalledWith(
       session.id,
@@ -226,6 +234,7 @@ describe('AgentService', () => {
       MessageRole.Assistant,
       expect.stringContaining('# Approved Plan Snapshot'),
       { type: 'plan_final', planId: plan.id },
+      expect.objectContaining({ kind: AgentTurnKind.PlanApproval }),
     );
     expect(events.publish).toHaveBeenCalledWith(session.id, 'plan_updated', {
       planId: plan.id,
@@ -392,12 +401,14 @@ describe('AgentService', () => {
         toolName: 'list_files',
         status: ToolCallStatus.Succeeded,
       }),
+      expect.objectContaining({ kind: AgentTurnKind.Chat }),
     );
     expect(sessions.addMessage).toHaveBeenLastCalledWith(
       session,
       'assistant',
       'Final project summary',
       {},
+      expect.objectContaining({ kind: AgentTurnKind.Chat }),
     );
     expect(events.publish).toHaveBeenCalledWith(session.id, 'agent_status', { status: 'completed' });
     expect(events.complete).toHaveBeenCalledWith(session.id);
@@ -521,6 +532,7 @@ describe('AgentService', () => {
       'assistant',
       'Recovered with non-streaming chat',
       {},
+      expect.objectContaining({ kind: AgentTurnKind.Chat }),
     );
   });
 
@@ -626,6 +638,7 @@ describe('AgentService', () => {
         kind: 'assistant_tool_turn',
         toolCalls: expect.arrayContaining([expect.objectContaining({ id: 'call-approval' })]),
       }),
+      expect.objectContaining({ kind: AgentTurnKind.Chat }),
     );
     expect(events.publish).toHaveBeenCalledWith(
       session.id,
@@ -747,6 +760,7 @@ describe('AgentService', () => {
       'assistant',
       'Applied the requested file.',
       {},
+      undefined,
     );
     expect(events.publish).toHaveBeenCalledWith(session.id, 'agent_status', { status: 'completed' });
     expect(events.complete).toHaveBeenCalledWith(session.id);
@@ -891,6 +905,34 @@ describe('AgentService', () => {
     );
   });
 });
+
+function createPlanQueryBuilder(getOne: () => Promise<Plan | null>) {
+  return {
+    leftJoin: jest.fn().mockReturnThis(),
+    leftJoinAndSelect: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+    andWhere: jest.fn().mockReturnThis(),
+    orderBy: jest.fn().mockReturnThis(),
+    getOne: jest.fn(getOne),
+  };
+}
+
+function turnFixture(
+  kind: AgentTurnKind,
+  session: Message['session'],
+  metadata: Record<string, unknown> = {},
+): AgentTurn {
+  return {
+    id: `turn-${kind}`,
+    session,
+    kind,
+    status: AgentTurnStatus.Active,
+    metadata,
+    undoneAt: null,
+    createdAt: new Date('2026-06-02T00:00:00.000Z'),
+    updatedAt: new Date('2026-06-02T00:00:00.000Z'),
+  } as AgentTurn;
+}
 
 function planFixture(input: {
   id: string;

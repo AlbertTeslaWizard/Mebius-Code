@@ -10,6 +10,7 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 import { PlanStatus } from '../../common/enums/plan-status.enum';
+import { AgentTurn } from '../sessions/agent-turn.entity';
 import { Session } from '../sessions/session.entity';
 import type { PlanQuestion, PlanQuestionAnswer } from './plan-workflow.types';
 
@@ -30,6 +31,10 @@ export class Plan {
   @ManyToOne(() => Session, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'session_id' })
   session: Relation<Session>;
+
+  @ManyToOne(() => AgentTurn, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'turn_id' })
+  turn?: Relation<AgentTurn> | null;
 
   @Column({ type: 'enum', enum: PLAN_STATUS_DB_VALUES, default: PlanStatus.PlanningGenerating })
   status: PlanStatus;

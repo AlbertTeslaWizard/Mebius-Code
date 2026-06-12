@@ -4,7 +4,10 @@ import { CommonModule } from '../../common/common.module';
 import { AgentModule } from '../agent/agent.module';
 import { AuditModule } from '../audit/audit.module';
 import { EventsModule } from '../events/events.module';
+import { Plan } from '../agent/plan.entity';
+import { AgentTurn } from '../sessions/agent-turn.entity';
 import { SessionsModule } from '../sessions/sessions.module';
+import { Message } from '../sessions/message.entity';
 import { UsersModule } from '../users/users.module';
 import { CommandRun } from './command-run.entity';
 import { CommandPolicyController } from './command-policy.controller';
@@ -19,7 +22,17 @@ import { WebSearchService } from './web-search.service';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([ToolCall, ToolApproval, FilePatch, CommandRun, SessionCommandGrant, SessionApprovalRule]),
+    TypeOrmModule.forFeature([
+      ToolCall,
+      ToolApproval,
+      FilePatch,
+      CommandRun,
+      SessionCommandGrant,
+      SessionApprovalRule,
+      Message,
+      AgentTurn,
+      Plan,
+    ]),
     CommonModule,
     forwardRef(() => AgentModule),
     AuditModule,

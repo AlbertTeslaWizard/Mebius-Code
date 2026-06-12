@@ -22,6 +22,7 @@ import type {
   Session,
   SsePayload,
   TreeNode,
+  TurnUndoRedoResult,
 } from '../api/types';
 import { useLocaleStore } from './locale';
 
@@ -470,6 +471,20 @@ export const useWorkspaceStore = defineStore('workspace', {
         throw new Error(locale.t('pendingApprovalBeforeChat'));
       }
       if (trimmed.startsWith('/')) {
+        if (trimmed === '/undo') {
+          await this.undoLastTurn();
+          return;
+        }
+        if (trimmed.startsWith('/undo ')) {
+          throw new Error('/undo does not accept arguments.');
+        }
+        if (trimmed === '/redo') {
+          await this.redoLastTurn();
+          return;
+        }
+        if (trimmed.startsWith('/redo ')) {
+          throw new Error('/redo does not accept arguments.');
+        }
         const result = await request<unknown>(`/sessions/${this.currentSession.id}/commands`, {
           method: 'POST',
           body: jsonBody({ command: trimmed }),
@@ -501,6 +516,33 @@ export const useWorkspaceStore = defineStore('workspace', {
         };
         throw error;
       }
+    },
+    async undoLastTurn() {
+      return this.applyTurnUndoRedo('undo');
+    },
+    async redoLastTurn() {
+      return this.applyTurnUndoRedo('redo');
+    },
+    async applyTurnUndoRedo(direction: 'undo' | 'redo') {
+      if (!this.currentSession) return null;
+      const result = await request<TurnUndoRedoResult>(`/sessions/${this.currentSession.id}/${direction}`, {
+        method: 'POST',
+      });
+      if (result.conflicts.length === 0) {
+        await Promise.all([
+          this.loadMessages(),
+          this.refreshCurrentSession(),
+          this.refreshReviewData(),
+          this.loadTree(),
+          this.loadGitStatus(),
+        ]);
+      }
+      this.eventLog.unshift({
+        type: direction === 'undo' ? 'turn_undone' : 'turn_redone',
+        data: result as unknown as SsePayload,
+        time: new Date().toISOString(),
+      });
+      return result;
     },
     async createPlan(goal: string) {
       if (!this.currentSession || !goal.trim()) return;
@@ -720,6 +762,8 @@ export const useWorkspaceStore = defineStore('workspace', {
         'command_started',
         'command_output',
         'patch_reverted',
+        'turn_undone',
+        'turn_redone',
         'model_call_started',
         'model_call_completed',
         'model_call_failed',
@@ -744,6 +788,17 @@ export const useWorkspaceStore = defineStore('workspace', {
           }
           if (type === 'message_created') {
             this.handleMessageCreated(data);
+            return;
+          }
+          if (type === 'turn_undone' || type === 'turn_redone') {
+            this.agentActivity = null;
+            void Promise.all([
+              this.loadMessages(),
+              this.refreshCurrentSession(),
+              this.refreshReviewData(),
+              this.loadTree(),
+              this.loadGitStatus(),
+            ]);
             return;
           }
           if (type === 'model_call_started' || type === 'model_call_completed' || type === 'model_call_failed') {

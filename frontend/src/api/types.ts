@@ -270,6 +270,15 @@ export interface CommandRunView {
   };
 }
 
+export interface TurnUndoRedoResult {
+  direction: 'undo' | 'redo';
+  turnId?: string;
+  messageCount: number;
+  reverted: Array<{ path: string; patchId: string }>;
+  restored: Array<{ path: string; patchId: string }>;
+  conflicts: Array<{ path: string; patchId: string; reason: string }>;
+}
+
 export interface CommandAuthorization {
   shellAutoRun: boolean;
   canGrantShellAutoRun: boolean;

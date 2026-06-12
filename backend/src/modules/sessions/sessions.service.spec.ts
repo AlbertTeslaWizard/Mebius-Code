@@ -7,6 +7,7 @@ import { ProjectsService } from '../projects/projects.service';
 import { ToolApproval } from '../tools/tool-approval.entity';
 import { ToolCall } from '../tools/tool-call.entity';
 import { ConversationSummary } from './conversation-summary.entity';
+import { AgentTurn } from './agent-turn.entity';
 import { Message } from './message.entity';
 import { Session } from './session.entity';
 import { SessionsService } from './sessions.service';
@@ -37,6 +38,10 @@ describe('SessionsService', () => {
     findOne: jest.fn(),
     createQueryBuilder: jest.fn(() => summaryDeleteQueryBuilder),
   } as unknown as jest.Mocked<Repository<ConversationSummary>>;
+  const turns = {
+    create: jest.fn((turn: Partial<AgentTurn>) => turn as AgentTurn),
+    save: jest.fn((turn: AgentTurn) => Promise.resolve(turn)),
+  } as unknown as jest.Mocked<Repository<AgentTurn>>;
   const toolCalls = {
     findOne: jest.fn(),
   } as unknown as jest.Mocked<Repository<ToolCall>>;
@@ -146,6 +151,7 @@ describe('SessionsService', () => {
     sessions,
     messages,
     summaries,
+    turns,
     toolCalls,
     approvals,
     projects,
@@ -514,7 +520,10 @@ describe('SessionsService', () => {
     });
 
     expect(messages.find).toHaveBeenCalledWith({
-      where: { session: { id: 'session-1' } },
+      where: expect.objectContaining({
+        session: { id: 'session-1' },
+        deletedAt: expect.anything(),
+      }),
       order: { createdAt: 'ASC' },
       take: 100,
     });

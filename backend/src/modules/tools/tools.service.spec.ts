@@ -13,9 +13,12 @@ import { CommandPolicyService } from '../../common/security/command-policy.servi
 import { PathSandboxService } from '../../common/security/path-sandbox.service';
 import { AgentService } from '../agent/agent.service';
 import { PendingToolResumeContext } from '../agent/agent-resume.types';
+import { Plan } from '../agent/plan.entity';
 import { AuditService } from '../audit/audit.service';
 import { EventsService } from '../events/events.service';
 import { Session } from '../sessions/session.entity';
+import { AgentTurn, AgentTurnKind, AgentTurnStatus } from '../sessions/agent-turn.entity';
+import { Message } from '../sessions/message.entity';
 import { SessionsService } from '../sessions/sessions.service';
 import { User } from '../users/user.entity';
 import { CommandRun } from './command-run.entity';
@@ -30,6 +33,7 @@ import { WebSearchService } from './web-search.service';
 describe('ToolsService', () => {
   const owner = { id: 'owner-1' } as User;
   const session = { id: 'session-1', project: { id: 'project-1', workspacePath: 'D:/workspace' } } as Session;
+  const agentTurn = { id: 'turn-1' } as AgentTurn;
   const resumeContext: PendingToolResumeContext = {
     assistantContent: '',
     assistantReasoningContent: 'Apply the patch and then summarize.',
@@ -54,6 +58,7 @@ describe('ToolsService', () => {
     requiresApproval: true,
     status: ToolCallStatus.PendingApproval,
     resultText: JSON.stringify({ kind: 'pending_tool_resume', payload: resumeContext }),
+    turn: agentTurn,
   } as unknown as ToolCall;
   const approval = {
     id: 'approval-1',
@@ -74,11 +79,13 @@ describe('ToolsService', () => {
     create: jest.fn((value) => value),
     find: jest.fn(),
     findOne: jest.fn(),
+    createQueryBuilder: jest.fn(() => createPatchesQueryBuilder()),
     save: jest.fn(async (value) => value),
   } as unknown as jest.Mocked<Repository<FilePatch>>;
   const commandRuns = {
     create: jest.fn((value) => value),
     find: jest.fn(),
+    createQueryBuilder: jest.fn(() => createCommandRunsQueryBuilder()),
     save: jest.fn(async (value) => value),
   } as unknown as jest.Mocked<Repository<CommandRun>>;
   const sessionCommandGrants = {
@@ -92,8 +99,26 @@ describe('ToolsService', () => {
     find: jest.fn(),
     save: jest.fn(async (value) => value),
   } as unknown as jest.Mocked<Repository<SessionApprovalRule>>;
+  const messages = {
+    findOne: jest.fn(),
+    find: jest.fn(),
+    save: jest.fn(async (value) => value),
+    createQueryBuilder: jest.fn(),
+  } as unknown as jest.Mocked<Repository<Message>>;
+  const turns = {
+    findOne: jest.fn(),
+    save: jest.fn(async (value) => value),
+    createQueryBuilder: jest.fn(),
+  } as unknown as jest.Mocked<Repository<AgentTurn>>;
+  const plans = {
+    findOne: jest.fn(),
+    save: jest.fn(async (value) => value),
+    createQueryBuilder: jest.fn(),
+  } as unknown as jest.Mocked<Repository<Plan>>;
   const sessions = {
     findOwned: jest.fn(),
+    createTurn: jest.fn(),
+    findPendingApprovalTool: jest.fn(),
   } as unknown as jest.Mocked<SessionsService>;
   const paths = {
     resolveProjectPath: jest.fn(),
@@ -134,6 +159,9 @@ describe('ToolsService', () => {
     commandRuns,
     sessionCommandGrants,
     sessionApprovalRules,
+    messages,
+    turns,
+    plans,
     sessions,
     paths,
     commandPolicy,
@@ -148,8 +176,11 @@ describe('ToolsService', () => {
     jest.clearAllMocks();
     pendingToolCall.status = ToolCallStatus.PendingApproval;
     pendingToolCall.resultText = JSON.stringify({ kind: 'pending_tool_resume', payload: resumeContext });
+    pendingToolCall.turn = agentTurn;
     approvals.findOne.mockResolvedValue(approval);
     sessions.findOwned.mockResolvedValue(session);
+    sessions.findPendingApprovalTool.mockResolvedValue(null);
+    turns.findOne.mockResolvedValue(null);
     paths.resolveProjectPath.mockImplementation((_root, path) => `D:/workspace/${path}`);
     paths.resolveExistingProjectPath.mockImplementation((root, path = '.') =>
       Promise.resolve(path === '.' ? root : `${root}/${path}`),
@@ -413,6 +444,7 @@ describe('ToolsService', () => {
       pendingToolCall.name,
       ToolCallStatus.Succeeded,
       'Patch applied to demo.py.',
+      agentTurn,
     );
     expect(agent.resumeAfterToolApproval).toHaveBeenCalledWith(owner, result, resumeContext);
   });
@@ -433,6 +465,7 @@ describe('ToolsService', () => {
       pendingToolCall.name,
       ToolCallStatus.Failed,
       'boom',
+      agentTurn,
     );
     expect(events.complete).toHaveBeenCalledWith(session.id);
   });
@@ -447,6 +480,7 @@ describe('ToolsService', () => {
       pendingToolCall.name,
       ToolCallStatus.Rejected,
       'Tool create_patch was rejected by the user.',
+      agentTurn,
     );
     expect(events.publish).toHaveBeenCalledWith(session.id, 'agent_status', {
       status: 'completed',
@@ -455,7 +489,7 @@ describe('ToolsService', () => {
   });
 
   it('lists command runs for an owned session', async () => {
-    commandRuns.find.mockResolvedValue([
+    const runs = [
       {
         id: 'run-1',
         session,
@@ -468,17 +502,13 @@ describe('ToolsService', () => {
         createdAt: new Date('2026-06-03T00:00:00.000Z'),
         toolCall: { id: 'tool-1', name: 'run_command', status: ToolCallStatus.Succeeded } as ToolCall,
       } as CommandRun,
-    ]);
+    ];
+    commandRuns.createQueryBuilder.mockReturnValueOnce(createCommandRunsQueryBuilder(runs) as never);
 
     const result = await service.listSessionCommandRuns(owner.id, session.id);
 
     expect(sessions.findOwned).toHaveBeenCalledWith(owner.id, session.id);
-    expect(commandRuns.find).toHaveBeenCalledWith({
-      where: { session: { id: session.id } },
-      relations: { toolCall: true },
-      order: { createdAt: 'DESC' },
-      take: 50,
-    });
+    expect(commandRuns.createQueryBuilder).toHaveBeenCalledWith('run');
     expect(result[0]).toMatchObject({
       id: 'run-1',
       command: 'npm test',
@@ -698,4 +728,158 @@ describe('ToolsService', () => {
       await rm(workspace, { recursive: true, force: true });
     }
   });
+
+  it('undoes the latest active turn by soft-deleting messages and reverting applied patches', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'mebius-turn-undo-'));
+    try {
+      await writeFile(join(workspace, 'demo.ts'), 'new', 'utf8');
+      paths.resolveNewProjectPath.mockImplementation((root, path = '.') => Promise.resolve(resolve(root, path)));
+      const turn = turnFixture(session, 'turn-undo', AgentTurnStatus.Active);
+      const message = { id: 'message-undo', deletedAt: null } as Message;
+      const patch = turnPatchFixture(session, owner, workspace, {
+        id: 'patch-undo',
+        status: FilePatchStatus.Applied,
+        originalContent: 'old',
+        patchedContent: 'new',
+      });
+
+      turns.findOne.mockResolvedValueOnce(turn);
+      messages.find.mockResolvedValueOnce([message]);
+      patches.createQueryBuilder.mockReturnValueOnce(createPatchesQueryBuilder([patch]) as never);
+
+      const result = await service.undoLastTurn(owner, session.id);
+
+      expect(result).toMatchObject({
+        direction: 'undo',
+        turnId: turn.id,
+        messageCount: 1,
+        reverted: [{ path: 'demo.ts', patchId: patch.id }],
+        conflicts: [],
+      });
+      expect(message.deletedAt).toBeInstanceOf(Date);
+      expect(turn.status).toBe(AgentTurnStatus.Undone);
+      expect(patch.status).toBe(FilePatchStatus.Reverted);
+      await expect(readFile(join(workspace, 'demo.ts'), 'utf8')).resolves.toBe('old');
+      expect(events.publish).toHaveBeenCalledWith(
+        session.id,
+        'turn_undone',
+        expect.objectContaining({ turnId: turn.id, messageCount: 1 }),
+      );
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('redoes the last undone turn by restoring messages and reapplied patches', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'mebius-turn-redo-'));
+    try {
+      await writeFile(join(workspace, 'demo.ts'), 'old', 'utf8');
+      paths.resolveNewProjectPath.mockImplementation((root, path = '.') => Promise.resolve(resolve(root, path)));
+      const turn = turnFixture(session, 'turn-redo', AgentTurnStatus.Undone);
+      const message = { id: 'message-redo', deletedAt: new Date('2026-06-03T00:00:00.000Z') } as Message;
+      const patch = turnPatchFixture(session, owner, workspace, {
+        id: 'patch-redo',
+        status: FilePatchStatus.Reverted,
+        originalContent: 'old',
+        patchedContent: 'new',
+      });
+
+      turns.findOne.mockResolvedValueOnce(null);
+      turns.createQueryBuilder.mockReturnValueOnce(createTurnsQueryBuilder(turn) as never);
+      messages.find.mockResolvedValueOnce([message]);
+      patches.createQueryBuilder.mockReturnValueOnce(createPatchesQueryBuilder([patch]) as never);
+
+      const result = await service.redoLastTurn(owner, session.id);
+
+      expect(result).toMatchObject({
+        direction: 'redo',
+        turnId: turn.id,
+        messageCount: 1,
+        restored: [{ path: 'demo.ts', patchId: patch.id }],
+        conflicts: [],
+      });
+      expect(message.deletedAt).toBeNull();
+      expect(turn.status).toBe(AgentTurnStatus.Active);
+      expect(patch.status).toBe(FilePatchStatus.Applied);
+      await expect(readFile(join(workspace, 'demo.ts'), 'utf8')).resolves.toBe('new');
+      expect(events.publish).toHaveBeenCalledWith(
+        session.id,
+        'turn_redone',
+        expect.objectContaining({ turnId: turn.id, messageCount: 1 }),
+      );
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
 });
+
+function createCommandRunsQueryBuilder(runs: CommandRun[] = []) {
+  return {
+    leftJoinAndSelect: jest.fn().mockReturnThis(),
+    leftJoin: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+    andWhere: jest.fn().mockReturnThis(),
+    orderBy: jest.fn().mockReturnThis(),
+    take: jest.fn().mockReturnThis(),
+    getMany: jest.fn().mockResolvedValue(runs),
+  };
+}
+
+function createPatchesQueryBuilder(patches: FilePatch[] = []) {
+  return {
+    innerJoinAndSelect: jest.fn().mockReturnThis(),
+    innerJoin: jest.fn().mockReturnThis(),
+    leftJoinAndSelect: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+    andWhere: jest.fn().mockReturnThis(),
+    orderBy: jest.fn().mockReturnThis(),
+    getMany: jest.fn().mockResolvedValue(patches),
+  };
+}
+
+function createTurnsQueryBuilder(turn: AgentTurn | null) {
+  return {
+    where: jest.fn().mockReturnThis(),
+    andWhere: jest.fn().mockReturnThis(),
+    orderBy: jest.fn().mockReturnThis(),
+    getOne: jest.fn().mockResolvedValue(turn),
+  };
+}
+
+function turnFixture(session: Session, id: string, status: AgentTurnStatus): AgentTurn {
+  return {
+    id,
+    session,
+    kind: AgentTurnKind.Chat,
+    status,
+    metadata: {},
+    undoneAt: status === AgentTurnStatus.Undone ? new Date('2026-06-03T00:00:00.000Z') : null,
+    createdAt: new Date('2026-06-03T00:00:00.000Z'),
+    updatedAt: new Date('2026-06-03T00:00:00.000Z'),
+  } as AgentTurn;
+}
+
+function turnPatchFixture(
+  session: Session,
+  owner: User,
+  workspace: string,
+  input: {
+    id: string;
+    status: FilePatchStatus;
+    originalContent: string;
+    patchedContent: string;
+  },
+): FilePatch {
+  return {
+    id: input.id,
+    project: { id: 'project-1', workspacePath: workspace, owner },
+    session,
+    toolCall: { id: 'tool-1', turn: { id: 'turn-1' } } as ToolCall,
+    relativePath: 'demo.ts',
+    originalContent: input.originalContent,
+    patchedContent: input.patchedContent,
+    diffText: 'diff',
+    status: input.status,
+    createdAt: new Date('2026-06-03T00:00:00.000Z'),
+  } as FilePatch;
+}

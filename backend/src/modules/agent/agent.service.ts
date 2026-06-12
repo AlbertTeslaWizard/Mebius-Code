@@ -1,12 +1,13 @@
 import { BadRequestException, forwardRef, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, In, MoreThan, Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import { MessageRole } from '../../common/enums/message-role.enum';
 import { PlanStatus } from '../../common/enums/plan-status.enum';
 import { PlanStepStatus } from '../../common/enums/plan-step-status.enum';
 import { ToolCallStatus } from '../../common/enums/tool-status.enum';
 import { EventsService } from '../events/events.service';
 import { ModelConfigsService } from '../model-configs/model-configs.service';
+import { AgentTurn, AgentTurnKind, AgentTurnStatus } from '../sessions/agent-turn.entity';
 import { Message } from '../sessions/message.entity';
 import { SessionsService } from '../sessions/sessions.service';
 import { User } from '../users/user.entity';
@@ -79,7 +80,11 @@ export class AgentService {
       return this.planBundle(existingPlan);
     }
 
-    const { plan: initialPlan, userMessage } = await this.createInitialPlan(session, dto);
+    const turn = await this.sessions.createTurn(session, AgentTurnKind.Plan, {
+      goal: dto.goal,
+      ...(dto.clientRequestId ? { clientRequestId: dto.clientRequestId } : {}),
+    });
+    const { plan: initialPlan, userMessage } = await this.createInitialPlan(session, dto, turn);
     this.events.publish(session.id, 'message_created', {
       id: userMessage.id,
       role: userMessage.role,
@@ -120,7 +125,7 @@ export class AgentService {
       parsed = this.fallbackDraftPlan(dto.goal, error instanceof Error ? error.message : undefined);
     }
 
-    const { plan, steps, assistantMessage } = await this.saveDraftPlan(session, initialPlan, parsed);
+    const { plan, steps, assistantMessage } = await this.saveDraftPlan(session, initialPlan, parsed, turn);
     this.events.publish(session.id, 'message_created', {
       id: assistantMessage.id,
       role: assistantMessage.role,
@@ -149,7 +154,12 @@ export class AgentService {
       where: { plan: { id: plan.id } },
       order: { order: 'ASC' },
     });
-    const { saved, message } = await this.approvePlanWithSnapshot(plan, steps);
+    const turn = await this.sessions.createTurn(plan.session as Message['session'], AgentTurnKind.PlanApproval, {
+      planId: plan.id,
+      previousStatus: plan.status,
+      nextStatus: PlanStatus.Approved,
+    });
+    const { saved, message } = await this.approvePlanWithSnapshot(plan, steps, turn);
     this.events.publish(plan.session.id, 'message_created', {
       id: message.id,
       role: message.role,
@@ -247,10 +257,15 @@ export class AgentService {
     steps: PlanStep[];
   } | null> {
     const session = await this.sessions.findOwned(ownerId, sessionId);
-    const plan = await this.plans.findOne({
-      where: { session: { id: session.id } },
-      order: { createdAt: 'DESC' },
-    });
+    const plan = await this.plans
+      .createQueryBuilder('plan')
+      .leftJoin('plan.turn', 'turn')
+      .where('plan.session_id = :sessionId', { sessionId: session.id })
+      .andWhere('(plan.turn_id IS NULL OR turn.status = :activeStatus)', {
+        activeStatus: AgentTurnStatus.Active,
+      })
+      .orderBy('plan.created_at', 'DESC')
+      .getOne();
     if (!plan) {
       return null;
     }
@@ -281,9 +296,17 @@ export class AgentService {
         `A tool approval is still pending for ${pendingApproval.toolCall.name}. Please approve or reject it before sending another message.`,
       );
     }
+    const turn = await this.sessions.createTurn(
+      session,
+      approvedPlan ? AgentTurnKind.PlanExecution : AgentTurnKind.Chat,
+      {
+        ...(dto.message ? { message: dto.message } : {}),
+        ...(approvedPlan ? { approvedPlanId: approvedPlan.id } : {}),
+      },
+    );
     try {
       if (dto.message) {
-        const userMessage = await this.sessions.addMessage(session, MessageRole.User, dto.message);
+        const userMessage = await this.sessions.addMessage(session, MessageRole.User, dto.message, {}, turn);
         this.events.publish(session.id, 'message_created', {
           id: userMessage.id,
           role: userMessage.role,
@@ -304,7 +327,7 @@ export class AgentService {
           content: this.buildApprovedPlanExecutionPrompt(approvedPlan),
         });
       }
-      return await this.continueRun(owner, session, config, messages, []);
+      return await this.continueRun(owner, session, config, messages, [], 'thinking', turn);
     } catch (error) {
       this.events.publish(session.id, 'agent_status', {
         status: 'failed',
@@ -357,7 +380,7 @@ export class AgentService {
     }
 
     try {
-      await this.continueRun(owner, session, config, messages, [approvedToolCall], 'using_tools');
+      await this.continueRun(owner, session, config, messages, [approvedToolCall], 'using_tools', approvedToolCall.turn);
     } catch (error) {
       await this.markLatestRunningPlanFailed(session.id);
       this.events.publish(session.id, 'agent_status', {
@@ -376,6 +399,7 @@ export class AgentService {
     messages: LlmMessage[],
     createdToolCalls: ToolCall[],
     initialStatus: 'thinking' | 'using_tools' = 'thinking',
+    agentTurn?: AgentTurn | null,
   ): Promise<{
     assistant?: Message;
     toolCalls: unknown[];
@@ -388,15 +412,15 @@ export class AgentService {
     });
     const availableToolNames = codingToolSpecs.map((tool) => tool.function.name);
     const knownToolNames = new Set(availableToolNames);
-    for (let turn = 0; turn <= MAX_TOOL_TURNS; turn += 1) {
+    for (let toolTurn = 0; toolTurn <= MAX_TOOL_TURNS; toolTurn += 1) {
       this.events.publish(session.id, 'agent_status', {
-        status: turn === 0 ? initialStatus : 'using_tools',
+        status: toolTurn === 0 ? initialStatus : 'using_tools',
       });
       const response = await this.withModelDiagnostics(
         session.id,
         config,
         'chat',
-        turn,
+        toolTurn,
         () =>
           this.llm.streamChat(
             {
@@ -434,7 +458,7 @@ export class AgentService {
 
       const toolCalls = response.tool_calls ?? [];
       if (toolCalls.length === 0) {
-        const assistant = await this.saveAssistantResponse(session, response.content ?? '');
+        const assistant = await this.saveAssistantResponse(session, response.content ?? '', {}, agentTurn);
         this.events.publish(session.id, 'agent_status', { status: 'completed' });
         this.events.complete(session.id);
         return { assistant, toolCalls: createdToolCalls };
@@ -445,6 +469,7 @@ export class AgentService {
           session,
           response.content,
           this.createAssistantToolTurnMetadata(response.reasoning_content, toolCalls),
+          agentTurn,
         );
       }
 
@@ -472,6 +497,7 @@ export class AgentService {
             toolCall.function.name,
             ToolCallStatus.Failed,
             unknownToolMessage,
+            agentTurn,
           );
           this.events.publish(session.id, 'agent_status', {
             status: 'using_tools',
@@ -490,6 +516,7 @@ export class AgentService {
             sessionId: session.id,
             name: toolCall.function.name,
             args: parsedArgs,
+            turn: agentTurn,
             resumeContext: {
               assistantContent: response.content ?? null,
               assistantReasoningContent: response.reasoning_content ?? null,
@@ -507,6 +534,7 @@ export class AgentService {
             toolCall.function.name,
             ToolCallStatus.Failed,
             failedToolMessage,
+            agentTurn,
           );
           if (failedToolMessage.startsWith('Unknown tool:')) {
             messages.push({ role: 'tool', tool_call_id: toolCall.id, content: failedToolMessage });
@@ -536,6 +564,7 @@ export class AgentService {
           created.name,
           created.status,
           toolMessageContent,
+          agentTurn,
         );
         messages.push({
           role: 'tool',
@@ -552,6 +581,8 @@ export class AgentService {
     const assistant = await this.saveAssistantResponse(
       session,
       'I inspected the project, but the tool workflow did not finish within the configured turn limit. Please narrow the request or ask me to continue from the latest tool results.',
+      {},
+      agentTurn,
     );
     this.events.publish(session.id, 'agent_status', { status: 'completed' });
     this.events.complete(session.id);
@@ -564,36 +595,48 @@ export class AgentService {
 
   private async findIdempotentPlan(sessionId: string, dto: CreatePlanDto): Promise<Plan | null> {
     if (dto.clientRequestId) {
-      const existing = await this.plans.findOne({
-        where: { session: { id: sessionId }, clientRequestId: dto.clientRequestId },
-        relations: { session: true },
-        order: { createdAt: 'DESC' },
-      });
+      const existing = await this.plans
+        .createQueryBuilder('plan')
+        .leftJoin('plan.turn', 'turn')
+        .leftJoinAndSelect('plan.session', 'session')
+        .where('plan.session_id = :sessionId', { sessionId })
+        .andWhere('plan.client_request_id = :clientRequestId', { clientRequestId: dto.clientRequestId })
+        .andWhere('(plan.turn_id IS NULL OR turn.status = :activeStatus)', {
+          activeStatus: AgentTurnStatus.Active,
+        })
+        .orderBy('plan.created_at', 'DESC')
+        .getOne();
       if (existing) return this.normalizePlanForResponse(existing);
     }
 
     const since = new Date(Date.now() - PLAN_IDEMPOTENCY_WINDOW_MS);
-    const existing = await this.plans.findOne({
-      where: {
-        session: { id: sessionId },
-        goal: dto.goal,
-        status: In([
+    const existing = await this.plans
+      .createQueryBuilder('plan')
+      .leftJoin('plan.turn', 'turn')
+      .leftJoinAndSelect('plan.session', 'session')
+      .where('plan.session_id = :sessionId', { sessionId })
+      .andWhere('plan.goal = :goal', { goal: dto.goal })
+      .andWhere('plan.status IN (:...statuses)', {
+        statuses: [
           PlanStatus.PlanningGenerating,
           PlanStatus.PlanCustomizing,
           PlanStatus.PlanReadyPendingApproval,
           PlanStatus.PlanReview,
-        ]),
-        createdAt: MoreThan(since),
-      },
-      relations: { session: true },
-      order: { createdAt: 'DESC' },
-    });
+        ],
+      })
+      .andWhere('plan.created_at > :since', { since })
+      .andWhere('(plan.turn_id IS NULL OR turn.status = :activeStatus)', {
+        activeStatus: AgentTurnStatus.Active,
+      })
+      .orderBy('plan.created_at', 'DESC')
+      .getOne();
     return existing ? this.normalizePlanForResponse(existing) : null;
   }
 
   private async createInitialPlan(
     session: Message['session'],
     dto: CreatePlanDto,
+    turn: AgentTurn,
   ): Promise<{ plan: Plan; userMessage: Message }> {
     const action = async (manager: EntityManager): Promise<{ plan: Plan; userMessage: Message }> => {
       const planRepo = manager.getRepository(Plan);
@@ -601,6 +644,7 @@ export class AgentService {
       const plan = await planRepo.save(
         planRepo.create({
           session,
+          turn,
           status: PlanStatus.PlanningGenerating,
           goal: dto.goal,
           clientRequestId: dto.clientRequestId ?? null,
@@ -614,6 +658,7 @@ export class AgentService {
       const userMessage = await messageRepo.save(
         messageRepo.create({
           session,
+          turn,
           role: MessageRole.User,
           content: dto.goal,
           metadata: {
@@ -633,6 +678,7 @@ export class AgentService {
     const plan = await this.plans.save(
       this.plans.create({
         session,
+        turn,
         status: PlanStatus.PlanningGenerating,
         goal: dto.goal,
         clientRequestId: dto.clientRequestId ?? null,
@@ -643,11 +689,17 @@ export class AgentService {
         answers: [],
       }),
     );
-    const userMessage = await this.sessions.addMessage(session as Message['session'], MessageRole.User, dto.goal, {
-      type: 'plan_prompt',
-      planId: plan.id,
-      ...(dto.clientRequestId ? { clientRequestId: dto.clientRequestId } : {}),
-    });
+    const userMessage = await this.sessions.addMessage(
+      session as Message['session'],
+      MessageRole.User,
+      dto.goal,
+      {
+        type: 'plan_prompt',
+        planId: plan.id,
+        ...(dto.clientRequestId ? { clientRequestId: dto.clientRequestId } : {}),
+      },
+      turn,
+    );
     return { plan, userMessage };
   }
 
@@ -655,6 +707,7 @@ export class AgentService {
     session: Message['session'],
     plan: Plan,
     parsed: ParsedPlan,
+    turn: AgentTurn,
   ): Promise<{ plan: Plan; steps: PlanStep[]; assistantMessage: Message }> {
     const status = parsed.questions.length > 0 ? PlanStatus.PlanCustomizing : PlanStatus.PlanReadyPendingApproval;
     const action = async (
@@ -685,6 +738,7 @@ export class AgentService {
       const assistantMessage = await messageRepo.save(
         messageRepo.create({
           session,
+          turn,
           role: MessageRole.Assistant,
           content: parsed.markdown,
           metadata: { type: 'plan_draft', planId: savedPlan.id },
@@ -718,10 +772,16 @@ export class AgentService {
         }),
       ),
     );
-    const assistantMessage = await this.sessions.addMessage(session as Message['session'], MessageRole.Assistant, parsed.markdown, {
-      type: 'plan_draft',
-      planId: savedPlan.id,
-    });
+    const assistantMessage = await this.sessions.addMessage(
+      session as Message['session'],
+      MessageRole.Assistant,
+      parsed.markdown,
+      {
+        type: 'plan_draft',
+        planId: savedPlan.id,
+      },
+      turn,
+    );
     return { plan: this.normalizePlanForResponse(savedPlan), steps, assistantMessage };
   }
 
@@ -773,7 +833,11 @@ export class AgentService {
     return { plan: this.normalizePlanForResponse(savedPlan), steps };
   }
 
-  private async approvePlanWithSnapshot(plan: Plan, steps: PlanStep[]): Promise<{ saved: Plan; message: Message }> {
+  private async approvePlanWithSnapshot(
+    plan: Plan,
+    steps: PlanStep[],
+    turn: AgentTurn,
+  ): Promise<{ saved: Plan; message: Message }> {
     const content = this.buildFinalPlanSnapshot(plan, steps);
     const action = async (manager: EntityManager): Promise<{ saved: Plan; message: Message }> => {
       const planRepo = manager.getRepository(Plan);
@@ -783,6 +847,7 @@ export class AgentService {
       const message = await messageRepo.save(
         messageRepo.create({
           session: plan.session,
+          turn,
           role: MessageRole.Assistant,
           content,
           metadata: { type: 'plan_final', planId: plan.id },
@@ -797,10 +862,16 @@ export class AgentService {
 
     plan.status = PlanStatus.Approved;
     const saved = await this.plans.save(plan);
-    const message = await this.sessions.addMessage(plan.session, MessageRole.Assistant, content, {
-      type: 'plan_final',
-      planId: plan.id,
-    });
+    const message = await this.sessions.addMessage(
+      plan.session,
+      MessageRole.Assistant,
+      content,
+      {
+        type: 'plan_final',
+        planId: plan.id,
+      },
+      turn,
+    );
     return { saved: this.normalizePlanForResponse(saved), message };
   }
 
@@ -973,8 +1044,9 @@ export class AgentService {
     session: Message['session'],
     content: string,
     metadata: Record<string, unknown> = {},
+    turn?: AgentTurn | null,
   ): Promise<Message> {
-    const assistant = await this.sessions.addMessage(session, MessageRole.Assistant, content, metadata);
+    const assistant = await this.sessions.addMessage(session, MessageRole.Assistant, content, metadata, turn);
     this.events.publish(session.id, 'message_created', {
       id: assistant.id,
       role: assistant.role,
@@ -989,13 +1061,14 @@ export class AgentService {
     toolName: string,
     status: string,
     content: string,
+    turn?: AgentTurn | null,
   ): Promise<Message> {
     return this.sessions.addMessage(session, MessageRole.Tool, content, {
       kind: 'tool_result',
       toolCallId,
       toolName,
       status,
-    } satisfies ToolResultMessageMetadata);
+    } satisfies ToolResultMessageMetadata, turn);
   }
 
   private normalizeHistory(history: Message[]): LlmMessage[] {

@@ -81,4 +81,16 @@ export class ToolsReadController {
     const owner = await this.users.findById(request.user.sub);
     return this.tools.revertPatch(owner, id);
   }
+
+  @Post('sessions/:sessionId/undo')
+  async undo(@Req() request: RequestWithUser, @Param('sessionId') sessionId: string) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.tools.undoLastTurn(owner, sessionId);
+  }
+
+  @Post('sessions/:sessionId/redo')
+  async redo(@Req() request: RequestWithUser, @Param('sessionId') sessionId: string) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.tools.redoLastTurn(owner, sessionId);
+  }
 }

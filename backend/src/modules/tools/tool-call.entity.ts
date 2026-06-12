@@ -9,6 +9,7 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 import { ToolCallStatus } from '../../common/enums/tool-status.enum';
+import { AgentTurn } from '../sessions/agent-turn.entity';
 import { Session } from '../sessions/session.entity';
 
 @Entity('tool_calls')
@@ -19,6 +20,10 @@ export class ToolCall {
   @ManyToOne(() => Session, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'session_id' })
   session: Relation<Session>;
+
+  @ManyToOne(() => AgentTurn, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'turn_id' })
+  turn?: Relation<AgentTurn> | null;
 
   @Column()
   name: string;
@@ -41,4 +46,3 @@ export class ToolCall {
   @UpdateDateColumn({ name: 'updated_at' })
   updatedAt: Date;
 }
-

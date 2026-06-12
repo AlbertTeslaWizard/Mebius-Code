@@ -4,23 +4,28 @@ import { spawn } from 'child_process';
 import { existsSync } from 'fs';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
-import { Repository } from 'typeorm';
+import { IsNull, Not, Repository } from 'typeorm';
 import {
   ApprovalStatus,
   CommandRunStatus,
   FilePatchStatus,
   ToolCallStatus,
 } from '../../common/enums/tool-status.enum';
+import { PlanStatus } from '../../common/enums/plan-status.enum';
 import { DEFAULT_PERMISSION_MODE } from '../../common/enums/permission-mode.enum';
+import { MessageRole } from '../../common/enums/message-role.enum';
 import { UserRole } from '../../common/enums/user-role.enum';
 import { CommandInspection, CommandPolicyService } from '../../common/security/command-policy.service';
 import { PathSandboxService } from '../../common/security/path-sandbox.service';
 import { AuditService } from '../audit/audit.service';
 import { PendingToolResumeContext } from '../agent/agent-resume.types';
 import { AgentService } from '../agent/agent.service';
+import { Plan } from '../agent/plan.entity';
 import { EventsService } from '../events/events.service';
 import { Project } from '../projects/project.entity';
+import { AgentTurn, AgentTurnKind, AgentTurnStatus } from '../sessions/agent-turn.entity';
 import { Session } from '../sessions/session.entity';
+import { Message } from '../sessions/message.entity';
 import { SessionsService } from '../sessions/sessions.service';
 import { User } from '../users/user.entity';
 import { CommandRun } from './command-run.entity';
@@ -95,6 +100,15 @@ interface PatchInputFile {
 
 type ToolActivityStatus = 'using_tools' | 'waiting_for_approval';
 
+export interface TurnUndoRedoResult {
+  direction: 'undo' | 'redo';
+  turnId?: string;
+  messageCount: number;
+  reverted: Array<{ path: string; patchId: string }>;
+  restored: Array<{ path: string; patchId: string }>;
+  conflicts: Array<{ path: string; patchId: string; reason: string }>;
+}
+
 @Injectable()
 export class ToolsService {
   constructor(
@@ -110,6 +124,12 @@ export class ToolsService {
     private readonly sessionCommandGrants: Repository<SessionCommandGrant>,
     @InjectRepository(SessionApprovalRule)
     private readonly sessionApprovalRules: Repository<SessionApprovalRule>,
+    @InjectRepository(Message)
+    private readonly messages: Repository<Message>,
+    @InjectRepository(AgentTurn)
+    private readonly turns: Repository<AgentTurn>,
+    @InjectRepository(Plan)
+    private readonly plans: Repository<Plan>,
     private readonly sessions: SessionsService,
     private readonly paths: PathSandboxService,
     private readonly commandPolicy: CommandPolicyService,
@@ -125,6 +145,7 @@ export class ToolsService {
     sessionId: string;
     name: string;
     args: Record<string, unknown>;
+    turn?: AgentTurn | null;
     resumeContext?: PendingToolResumeContext;
   }): Promise<ToolCall> {
     const session = await this.sessions.findOwned(input.owner.id, input.sessionId);
@@ -158,6 +179,7 @@ export class ToolsService {
     const toolCall = await this.toolCalls.save(
       this.toolCalls.create({
         session,
+        turn: input.turn ?? null,
         name: input.name,
         arguments: input.args,
         requiresApproval,
@@ -231,6 +253,7 @@ export class ToolsService {
       sessionId: string;
       name: string;
       args: Record<string, unknown>;
+      turn?: AgentTurn | null;
     },
     session: Session,
     reason: string,
@@ -241,6 +264,7 @@ export class ToolsService {
     const toolCall = await this.toolCalls.save(
       this.toolCalls.create({
         session,
+        turn: input.turn ?? null,
         name: input.name,
         arguments: input.args,
         requiresApproval: false,
@@ -264,7 +288,7 @@ export class ToolsService {
         status: ApprovalStatus.Pending,
         requester: { id: ownerId },
       },
-      relations: { toolCall: { session: { project: true } }, requester: true },
+      relations: { toolCall: { session: { project: true }, turn: true }, requester: true },
       order: { createdAt: 'DESC' },
     });
     return Promise.all(
@@ -301,12 +325,17 @@ export class ToolsService {
 
   async listSessionCommandRuns(ownerId: string, sessionId: string) {
     const session = await this.sessions.findOwned(ownerId, sessionId);
-    const runs = await this.commandRuns.find({
-      where: { session: { id: session.id } },
-      relations: { toolCall: true },
-      order: { createdAt: 'DESC' },
-      take: 50,
-    });
+    const runs = await this.commandRuns
+      .createQueryBuilder('run')
+      .leftJoinAndSelect('run.toolCall', 'toolCall')
+      .leftJoin('toolCall.turn', 'turn')
+      .where('run.session_id = :sessionId', { sessionId: session.id })
+      .andWhere('(toolCall.turn_id IS NULL OR turn.status = :activeStatus)', {
+        activeStatus: AgentTurnStatus.Active,
+      })
+      .orderBy('run.created_at', 'DESC')
+      .take(50)
+      .getMany();
     return runs.map((run) => this.serializeCommandRun(run));
   }
 
@@ -315,10 +344,16 @@ export class ToolsService {
     sessionId: string,
     input: { command: string; cwd?: string },
   ): Promise<ToolCall> {
+    const session = await this.sessions.findOwned(owner.id, sessionId);
+    const turn = await this.sessions.createTurn(session, AgentTurnKind.ManualCommand, {
+      command: input.command,
+      ...(input.cwd ? { cwd: input.cwd } : {}),
+    });
     return this.requestOrExecute({
       owner,
       sessionId,
       name: 'run_command',
+      turn,
       args: {
         command: input.command,
         ...(input.cwd ? { cwd: input.cwd } : {}),
@@ -473,6 +508,7 @@ export class ToolsService {
           saved.name,
           saved.status,
           result,
+          saved.turn,
         );
       }
       if (resumeContext) {
@@ -497,6 +533,7 @@ export class ToolsService {
           saved.name,
           saved.status,
           saved.resultText ?? 'Tool execution failed.',
+          saved.turn,
         );
       }
       this.events.publish(toolCall.session.id, 'agent_status', {
@@ -535,6 +572,7 @@ export class ToolsService {
         approval.toolCall.name,
         approval.toolCall.status,
         `Tool ${approval.toolCall.name} was rejected by the user.`,
+        approval.toolCall.turn,
       );
     }
     this.events.publish(approval.toolCall.session.id, 'agent_status', {
@@ -553,11 +591,340 @@ export class ToolsService {
     if (!patch) {
       throw new NotFoundException('Patch not found.');
     }
+    return this.revertPatchEntity(patch, patch.project as Project, owner);
+  }
+
+  async undoLastTurn(owner: User, sessionId: string): Promise<TurnUndoRedoResult> {
+    const session = await this.sessions.findOwned(owner.id, sessionId);
+    const pendingApproval = await this.sessions.findPendingApprovalTool(session.id);
+    if (pendingApproval?.toolCall) {
+      throw new BadRequestException(
+        `A tool approval is still pending for ${pendingApproval.toolCall.name}. Please approve or reject it before undoing.`,
+      );
+    }
+
+    const turn = await this.findUndoTurn(session);
+    if (!turn) return this.emptyTurnResult('undo');
+
+    const messages = await this.messages.find({
+      where: { turn: { id: turn.id }, deletedAt: IsNull() },
+      order: { createdAt: 'ASC' },
+    });
+    const patches = await this.turnPatches(turn.id, owner.id, FilePatchStatus.Applied);
+    const undoPatches = [...patches].reverse();
+    const conflicts = await this.patchSnapshotConflicts(undoPatches, 'undo');
+    if (conflicts.length > 0) {
+      return { ...this.emptyTurnResult('undo'), turnId: turn.id, conflicts };
+    }
+
+    const reverted: Array<{ path: string; patchId: string }> = [];
+    for (const patch of undoPatches) {
+      await this.writePatchSnapshot(patch, owner, patch.originalContent ?? null, FilePatchStatus.Reverted, 'undo');
+      reverted.push({ path: patch.relativePath, patchId: patch.id });
+    }
+
+    await this.applyPlanTurnState(turn, 'undo');
+    const now = new Date();
+    messages.forEach((message) => {
+      message.deletedAt = now;
+    });
+    if (messages.length > 0) {
+      await this.messages.save(messages);
+    }
+    turn.status = AgentTurnStatus.Undone;
+    turn.undoneAt = now;
+    await this.turns.save(turn);
+    await this.publishPlanVisibilityTurn(turn);
+    this.events.publish(session.id, 'turn_undone', {
+      turnId: turn.id,
+      kind: turn.kind,
+      messageCount: messages.length,
+      reverted,
+      conflicts: [],
+    });
+
+    return {
+      direction: 'undo',
+      turnId: turn.id,
+      messageCount: messages.length,
+      reverted,
+      restored: [],
+      conflicts: [],
+    };
+  }
+
+  async redoLastTurn(owner: User, sessionId: string): Promise<TurnUndoRedoResult> {
+    const session = await this.sessions.findOwned(owner.id, sessionId);
+    const turn = await this.findRedoTurn(session);
+    if (!turn) return this.emptyTurnResult('redo');
+
+    const messages = await this.messages.find({
+      where: { turn: { id: turn.id }, deletedAt: Not(IsNull()) },
+      order: { createdAt: 'ASC' },
+    });
+    const patches = await this.turnPatches(turn.id, owner.id, FilePatchStatus.Reverted);
+    const conflicts = await this.patchSnapshotConflicts(patches, 'redo');
+    if (conflicts.length > 0) {
+      return { ...this.emptyTurnResult('redo'), turnId: turn.id, conflicts };
+    }
+
+    const restored: Array<{ path: string; patchId: string }> = [];
+    for (const patch of patches) {
+      await this.writePatchSnapshot(patch, owner, patch.patchedContent, FilePatchStatus.Applied, 'redo');
+      restored.push({ path: patch.relativePath, patchId: patch.id });
+    }
+
+    messages.forEach((message) => {
+      message.deletedAt = null;
+    });
+    if (messages.length > 0) {
+      await this.messages.save(messages);
+    }
+    turn.status = AgentTurnStatus.Active;
+    turn.undoneAt = null;
+    await this.turns.save(turn);
+    await this.applyPlanTurnState(turn, 'redo');
+    await this.publishPlanVisibilityTurn(turn);
+    this.events.publish(session.id, 'turn_redone', {
+      turnId: turn.id,
+      kind: turn.kind,
+      messageCount: messages.length,
+      restored,
+      conflicts: [],
+    });
+
+    return {
+      direction: 'redo',
+      turnId: turn.id,
+      messageCount: messages.length,
+      reverted: [],
+      restored,
+      conflicts: [],
+    };
+  }
+
+  private emptyTurnResult(direction: 'undo' | 'redo'): TurnUndoRedoResult {
+    return {
+      direction,
+      messageCount: 0,
+      reverted: [],
+      restored: [],
+      conflicts: [],
+    };
+  }
+
+  private async findUndoTurn(session: Session): Promise<AgentTurn | null> {
+    const turn = await this.turns.findOne({
+      where: { session: { id: session.id }, status: AgentTurnStatus.Active },
+      relations: { session: true },
+      order: { createdAt: 'DESC' },
+    });
+    if (turn) return turn;
+    return this.createLegacyTurn(session);
+  }
+
+  private async findRedoTurn(session: Session): Promise<AgentTurn | null> {
+    const latestActive = await this.turns.findOne({
+      where: { session: { id: session.id }, status: AgentTurnStatus.Active },
+      order: { createdAt: 'DESC' },
+    });
+    const query = this.turns
+      .createQueryBuilder('turn')
+      .where('turn.session_id = :sessionId', { sessionId: session.id })
+      .andWhere('turn.status = :status', { status: AgentTurnStatus.Undone });
+    if (latestActive) {
+      query.andWhere('turn.created_at > :after', { after: latestActive.createdAt });
+    }
+    return query.orderBy('turn.created_at', 'ASC').getOne();
+  }
+
+  private async createLegacyTurn(session: Session): Promise<AgentTurn | null> {
+    const lastUserMessage = await this.messages
+      .createQueryBuilder('message')
+      .where('message.session_id = :sessionId', { sessionId: session.id })
+      .andWhere('message.role = :role', { role: MessageRole.User })
+      .andWhere('message.deleted_at IS NULL')
+      .andWhere('message.turn_id IS NULL')
+      .orderBy('message.created_at', 'DESC')
+      .getOne();
+    if (!lastUserMessage) return null;
+
+    const turn = await this.sessions.createTurn(session, AgentTurnKind.Legacy, {
+      migratedFrom: 'last_user_message',
+      userMessageId: lastUserMessage.id,
+    });
+    const messages = await this.messages
+      .createQueryBuilder('message')
+      .where('message.session_id = :sessionId', { sessionId: session.id })
+      .andWhere('message.created_at >= :after', { after: lastUserMessage.createdAt })
+      .andWhere('message.deleted_at IS NULL')
+      .andWhere('message.turn_id IS NULL')
+      .orderBy('message.created_at', 'ASC')
+      .getMany();
+    messages.forEach((message) => {
+      message.turn = turn;
+    });
+    if (messages.length > 0) await this.messages.save(messages);
+
+    const toolCalls = await this.toolCalls
+      .createQueryBuilder('toolCall')
+      .where('toolCall.session_id = :sessionId', { sessionId: session.id })
+      .andWhere('toolCall.created_at > :after', { after: lastUserMessage.createdAt })
+      .andWhere('toolCall.turn_id IS NULL')
+      .orderBy('toolCall.created_at', 'ASC')
+      .getMany();
+    toolCalls.forEach((toolCall) => {
+      toolCall.turn = turn;
+    });
+    if (toolCalls.length > 0) await this.toolCalls.save(toolCalls);
+
+    const plans = await this.plans
+      .createQueryBuilder('plan')
+      .where('plan.session_id = :sessionId', { sessionId: session.id })
+      .andWhere('plan.created_at >= :after', { after: lastUserMessage.createdAt })
+      .andWhere('plan.turn_id IS NULL')
+      .orderBy('plan.created_at', 'ASC')
+      .getMany();
+    plans.forEach((plan) => {
+      plan.turn = turn;
+    });
+    if (plans.length > 0) await this.plans.save(plans);
+
+    return turn;
+  }
+
+  private async turnPatches(
+    turnId: string,
+    ownerId: string,
+    status: FilePatchStatus,
+  ): Promise<FilePatch[]> {
+    return this.patches
+      .createQueryBuilder('patch')
+      .innerJoinAndSelect('patch.toolCall', 'toolCall')
+      .innerJoinAndSelect('patch.project', 'project')
+      .innerJoin('project.owner', 'owner')
+      .leftJoinAndSelect('patch.session', 'session')
+      .where('toolCall.turn_id = :turnId', { turnId })
+      .andWhere('owner.id = :ownerId', { ownerId })
+      .andWhere('patch.status = :status', { status })
+      .orderBy('patch.created_at', 'ASC')
+      .getMany();
+  }
+
+  private async patchSnapshotConflicts(
+    patches: FilePatch[],
+    direction: 'undo' | 'redo',
+  ): Promise<Array<{ path: string; patchId: string; reason: string }>> {
+    const simulated = new Map<string, string | null>();
+    const conflicts: Array<{ path: string; patchId: string; reason: string }> = [];
+
+    for (const patch of patches) {
+      const project = patch.project as Project;
+      const key = `${project.id}:${patch.relativePath}`;
+      const current = simulated.has(key) ? simulated.get(key)! : await this.currentPatchContent(patch, project);
+      const expected = direction === 'undo' ? patch.patchedContent : (patch.originalContent ?? null);
+      if (current !== expected) {
+        conflicts.push({
+          path: patch.relativePath,
+          patchId: patch.id,
+          reason:
+            direction === 'undo'
+              ? 'Patch cannot be reverted because the file changed after it was applied.'
+              : 'Patch cannot be restored because the file changed after it was reverted.',
+        });
+        continue;
+      }
+      simulated.set(key, direction === 'undo' ? (patch.originalContent ?? null) : patch.patchedContent);
+    }
+
+    return conflicts;
+  }
+
+  private async currentPatchContent(patch: FilePatch, project: Project): Promise<string | null> {
+    const target = await this.paths.resolveNewProjectPath(project.workspacePath, patch.relativePath);
+    return existsSync(target) ? readFile(target, 'utf8') : null;
+  }
+
+  private async writePatchSnapshot(
+    patch: FilePatch,
+    owner: User,
+    nextContent: string | null,
+    nextStatus: FilePatchStatus,
+    direction: 'undo' | 'redo',
+  ): Promise<FilePatch> {
+    const project = patch.project as Project;
+    const target = await this.paths.resolveNewProjectPath(project.workspacePath, patch.relativePath);
+    if (nextContent === null) {
+      await rm(target, { force: true });
+    } else {
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, nextContent, 'utf8');
+    }
+
+    patch.status = nextStatus;
+    const saved = await this.patches.save(patch);
+    await this.audit.record({
+      actor: owner,
+      action: direction === 'undo' ? 'tool.patch_reverted' : 'tool.patch_restored',
+      resourceType: 'file_patch',
+      resourceId: patch.id,
+      metadata: { path: patch.relativePath, toolCallId: patch.toolCall?.id },
+    });
+    this.events.publish((patch.session as { id: string }).id, direction === 'undo' ? 'patch_reverted' : 'patch_created', {
+      patchId: patch.id,
+      path: patch.relativePath,
+      status: saved.status,
+      targetPaths: [patch.relativePath],
+      activity: direction === 'undo' ? 'patch_reverted' : 'patch_restored',
+    });
+    return saved;
+  }
+
+  private async applyPlanTurnState(turn: AgentTurn, direction: 'undo' | 'redo'): Promise<void> {
+    if (turn.kind !== AgentTurnKind.PlanApproval) return;
+    const planId = typeof turn.metadata?.planId === 'string' ? turn.metadata.planId : undefined;
+    const status =
+      direction === 'undo'
+        ? typeof turn.metadata?.previousStatus === 'string'
+          ? turn.metadata.previousStatus
+          : undefined
+        : typeof turn.metadata?.nextStatus === 'string'
+          ? turn.metadata.nextStatus
+          : undefined;
+    if (!planId || !status) return;
+
+    const plan = await this.plans.findOne({
+      where: { id: planId, session: { id: (turn.session as Session).id } },
+      relations: { session: true },
+    });
+    if (!plan) return;
+    plan.status = status as PlanStatus;
+    const saved = await this.plans.save(plan);
+    this.events.publish((saved.session as Session).id, 'plan_updated', {
+      planId: saved.id,
+      status: saved.status,
+    });
+  }
+
+  private async publishPlanVisibilityTurn(turn: AgentTurn): Promise<void> {
+    if (turn.kind !== AgentTurnKind.Plan && turn.kind !== AgentTurnKind.Legacy) return;
+    const plan = await this.plans.findOne({
+      where: { turn: { id: turn.id } },
+      relations: { session: true },
+      order: { createdAt: 'DESC' },
+    });
+    if (!plan) return;
+    this.events.publish((plan.session as Session).id, 'plan_updated', {
+      planId: plan.id,
+      status: turn.status === AgentTurnStatus.Active ? plan.status : 'undone',
+    });
+  }
+
+  private async revertPatchEntity(patch: FilePatch, project: Project, owner: User): Promise<FilePatch> {
     if (patch.status !== FilePatchStatus.Applied) {
       throw new BadRequestException('Only applied patches can be reverted.');
     }
 
-    const project = patch.project as Project;
     const target = await this.paths.resolveNewProjectPath(project.workspacePath, patch.relativePath);
     const currentContent = existsSync(target) ? await readFile(target, 'utf8') : null;
     if (currentContent !== patch.patchedContent) {
@@ -786,7 +1153,7 @@ export class ToolsService {
         requester: { id: ownerId },
         status: ApprovalStatus.Pending,
       },
-      relations: { toolCall: { session: { project: true } }, requester: true },
+      relations: { toolCall: { session: { project: true }, turn: true }, requester: true },
     });
     if (!approval) {
       throw new NotFoundException('Pending approval not found.');

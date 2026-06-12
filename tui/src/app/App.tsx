@@ -203,6 +203,8 @@ const commandPaletteCommands: CommandPaletteCommand[] = [
   { label: '/plan-approve', insert: '/plan-approve', description: 'Approve the latest plan' },
   { label: '/approve', insert: '/approve', description: 'Approve the active tool request' },
   { label: '/reject', insert: '/reject', description: 'Reject the active tool request' },
+  { label: '/undo', insert: '/undo', description: 'Undo the last conversation turn' },
+  { label: '/redo', insert: '/redo', description: 'Redo the last undone conversation turn' },
   { label: '/stream-test', insert: '/stream-test', description: 'Test TUI streaming without a model provider' },
   { label: '/run <command>', insert: '/run ', description: 'Request a shell command run' },
   { label: '/open <path>', insert: '/open ', description: 'Open a project file' },
@@ -282,6 +284,20 @@ const slashCommands: SlashCommand[] = [
     description: 'Reject the active tool request',
     kind: 'immediate',
     run: (ctx) => ctx.runCommand('/reject'),
+  },
+  {
+    id: 'undo',
+    name: '/undo',
+    description: 'Undo the last conversation turn',
+    kind: 'immediate',
+    run: (ctx) => ctx.runCommand('/undo'),
+  },
+  {
+    id: 'redo',
+    name: '/redo',
+    description: 'Redo the last undone conversation turn',
+    kind: 'immediate',
+    run: (ctx) => ctx.runCommand('/redo'),
   },
   {
     id: 'stream-test',
@@ -1950,6 +1966,43 @@ export function App(props: AppProps) {
     await state().api.reject(approval.id);
   }
 
+  async function undoOrRedoLastTurn(direction: 'undo' | 'redo') {
+    const current = state();
+    setBusy(true);
+    setState((prev) => ({
+      ...prev,
+      activity: direction === 'undo' ? 'Undoing last turn' : 'Redoing last turn',
+      error: '',
+    }));
+    try {
+      const result = direction === 'undo'
+        ? await current.api.undo(current.session.id)
+        : await current.api.redo(current.session.id);
+      if (result.conflicts.length > 0) {
+        const first = result.conflicts[0];
+        const action = direction === 'undo' ? 'Undo' : 'Redo';
+        const message = `${action} blocked by ${result.conflicts.length} conflict${result.conflicts.length > 1 ? 's' : ''}${first ? `: ${first.path}` : ''}`;
+        setState((prev) => ({ ...prev, activity: `${action} blocked`, error: message }));
+        return;
+      }
+
+      const fileCount = direction === 'undo' ? result.reverted.length : result.restored.length;
+      const message = result.turnId
+        ? `${direction === 'undo' ? 'Undid' : 'Restored'} 1 turn: ${result.messageCount} message${result.messageCount === 1 ? '' : 's'}, ${fileCount} file${fileCount === 1 ? '' : 's'}`
+        : `Nothing to ${direction}`;
+      const [messages, updates] = await Promise.all([
+        current.api.listMessages(current.session.id),
+        refreshReviewData(current),
+      ]);
+      setState((prev) => ({ ...prev, ...updates, messages, activity: message }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : `${direction === 'undo' ? 'Undo' : 'Redo'} failed`;
+      setState((prev) => ({ ...prev, error: message }));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleCommand(value: string) {
     if (value === '/approve') {
       await approvePendingToolRequest('once');
@@ -1957,6 +2010,16 @@ export function App(props: AppProps) {
     }
     if (value === '/reject') {
       await rejectPendingToolRequest();
+      return;
+    }
+    if (value === '/undo' || value.startsWith('/undo ')) {
+      if (value !== '/undo') throw new Error('/undo does not accept arguments.');
+      await undoOrRedoLastTurn('undo');
+      return;
+    }
+    if (value === '/redo' || value.startsWith('/redo ')) {
+      if (value !== '/redo') throw new Error('/redo does not accept arguments.');
+      await undoOrRedoLastTurn('redo');
       return;
     }
     const current = state();

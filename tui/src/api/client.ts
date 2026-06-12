@@ -19,6 +19,15 @@ import type {
   TreeNode,
 } from '../types';
 
+export interface TurnUndoRedoResult {
+  direction: 'undo' | 'redo';
+  turnId?: string;
+  messageCount: number;
+  reverted: Array<{ path: string; patchId: string }>;
+  restored: Array<{ path: string; patchId: string }>;
+  conflicts: Array<{ path: string; patchId: string; reason: string }>;
+}
+
 export class ApiClient {
   constructor(
     readonly apiBaseUrl: string,
@@ -188,6 +197,14 @@ export class ApiClient {
 
   async reject(approvalId: string): Promise<unknown> {
     return this.request(`/approvals/${approvalId}/reject`, { method: 'POST' });
+  }
+
+  async undo(sessionId: string): Promise<TurnUndoRedoResult> {
+    return this.request<TurnUndoRedoResult>(`/sessions/${sessionId}/undo`, { method: 'POST' });
+  }
+
+  async redo(sessionId: string): Promise<TurnUndoRedoResult> {
+    return this.request<TurnUndoRedoResult>(`/sessions/${sessionId}/redo`, { method: 'POST' });
   }
 
   async tree(projectId: string, depth = 2): Promise<TreeNode[]> {

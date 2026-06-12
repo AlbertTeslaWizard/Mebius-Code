@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { FindOptionsWhere, Repository } from 'typeorm';
+import { FindOptionsWhere, IsNull, Repository } from 'typeorm';
 import { MessageRole } from '../../common/enums/message-role.enum';
 import { DEFAULT_PERMISSION_MODE, PermissionMode } from '../../common/enums/permission-mode.enum';
 import { SessionStatus } from '../../common/enums/session-status.enum';
@@ -11,6 +11,7 @@ import { ProjectsService } from '../projects/projects.service';
 import { ToolApproval } from '../tools/tool-approval.entity';
 import { ToolCall } from '../tools/tool-call.entity';
 import { User } from '../users/user.entity';
+import { AgentTurn, AgentTurnKind, AgentTurnStatus } from './agent-turn.entity';
 import { ConversationSummary } from './conversation-summary.entity';
 import { CreateMessageDto } from './dto/create-message.dto';
 import { CreateSessionDto } from './dto/create-session.dto';
@@ -57,6 +58,8 @@ export class SessionsService {
     private readonly messages: Repository<Message>,
     @InjectRepository(ConversationSummary)
     private readonly summaries: Repository<ConversationSummary>,
+    @InjectRepository(AgentTurn)
+    private readonly turns: Repository<AgentTurn>,
     @InjectRepository(ToolCall)
     private readonly toolCalls: Repository<ToolCall>,
     @InjectRepository(ToolApproval)
@@ -151,7 +154,7 @@ export class SessionsService {
   async listMessages(ownerId: string, sessionId: string): Promise<Message[]> {
     const session = await this.findOwned(ownerId, sessionId);
     return this.messages.find({
-      where: { session: { id: session.id } },
+      where: { session: { id: session.id }, deletedAt: IsNull() },
       order: { createdAt: 'ASC' },
     });
   }
@@ -179,12 +182,29 @@ export class SessionsService {
     role: MessageRole,
     content: string,
     metadata: Record<string, unknown> = {},
+    turn?: AgentTurn | null,
   ): Promise<Message> {
     return this.messages.save(
       this.messages.create({
         session,
+        turn: turn ?? null,
         role,
         content,
+        metadata,
+      }),
+    );
+  }
+
+  async createTurn(
+    session: Session,
+    kind: AgentTurnKind,
+    metadata: Record<string, unknown> = {},
+  ): Promise<AgentTurn> {
+    return this.turns.save(
+      this.turns.create({
+        session,
+        kind,
+        status: AgentTurnStatus.Active,
         metadata,
       }),
     );
@@ -270,7 +290,7 @@ export class SessionsService {
 
   async compact(session: Session): Promise<ConversationSummary> {
     const messages = await this.messages.find({
-      where: { session: { id: session.id } },
+      where: { session: { id: session.id }, deletedAt: IsNull() },
       order: { createdAt: 'ASC' },
       take: 100,
     });

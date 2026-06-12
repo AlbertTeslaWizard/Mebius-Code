@@ -7,6 +7,7 @@ import { ProjectsModule } from '../projects/projects.module';
 import { ToolApproval } from '../tools/tool-approval.entity';
 import { ToolCall } from '../tools/tool-call.entity';
 import { UsersModule } from '../users/users.module';
+import { AgentTurn } from './agent-turn.entity';
 import { ConversationSummary } from './conversation-summary.entity';
 import { Message } from './message.entity';
 import { Session } from './session.entity';
@@ -15,7 +16,7 @@ import { SessionsService } from './sessions.service';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Session, Message, ConversationSummary, ToolCall, ToolApproval]),
+    TypeOrmModule.forFeature([Session, Message, ConversationSummary, AgentTurn, ToolCall, ToolApproval]),
     AuthModule,
     EventsModule,
     UsersModule,
