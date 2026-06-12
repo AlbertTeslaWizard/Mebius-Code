@@ -4,6 +4,7 @@ import { CommonModule } from '../../common/common.module';
 import { AgentModule } from '../agent/agent.module';
 import { AuditModule } from '../audit/audit.module';
 import { EventsModule } from '../events/events.module';
+import { McpModule } from '../mcp/mcp.module';
 import { Plan } from '../agent/plan.entity';
 import { AgentTurn } from '../sessions/agent-turn.entity';
 import { SessionsModule } from '../sessions/sessions.module';
@@ -37,6 +38,7 @@ import { WebSearchService } from './web-search.service';
     forwardRef(() => AgentModule),
     AuditModule,
     EventsModule,
+    McpModule,
     SessionsModule,
     UsersModule,
   ],

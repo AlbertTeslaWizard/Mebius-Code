@@ -194,6 +194,7 @@ const commandPaletteCommands: CommandPaletteCommand[] = [
   { label: 'Select model', insert: '/models', action: 'models', description: 'Choose or configure the active model' },
   { label: 'Skills', insert: '/skills', action: 'skills', description: 'Browse skills' },
   { label: '/permissions', action: 'permissions', description: 'Change agent permission mode' },
+  { label: '/mcp', insert: '/mcp', description: 'Manage MCP servers and tools' },
   { label: '/sessions', action: 'sessions', description: 'Switch to a previous session' },
   { label: '/new <title>', insert: '/new ', description: 'Create and switch to a new session' },
   { label: '/clear', insert: '/clear', description: 'Clear the chat and model context' },
@@ -241,6 +242,7 @@ const slashCommands: SlashCommand[] = [
     kind: 'immediate',
     run: (ctx) => ctx.openPermissionsModal(),
   },
+  { id: 'mcp', name: '/mcp', description: 'Manage MCP servers and tools', kind: 'input' },
   { id: 'new', name: '/new', description: 'Create and switch to a new session', kind: 'input' },
   {
     id: 'clear',
@@ -2085,6 +2087,15 @@ export function App(props: AppProps) {
     }
     if (value === '/models' || value.startsWith('/models ')) {
       await openModelSelectModal();
+      return;
+    }
+    if (value === '/mcp' || value.startsWith('/mcp ')) {
+      const result = await current.api.runSessionCommand(current.session.id, value);
+      setState((prev) => ({
+        ...prev,
+        events: [{ type: 'command_result', data: result as Record<string, unknown>, time: new Date().toLocaleTimeString() }, ...prev.events].slice(0, 100),
+        activity: 'MCP command completed',
+      }));
       return;
     }
     const skillsQuery = parseSkillsCommand(value);

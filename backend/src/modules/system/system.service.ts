@@ -25,6 +25,7 @@ export class SystemService {
         planMode: true,
         toolApprovals: true,
         commandApprovals: true,
+        mcpTools: true,
       },
     };
   }

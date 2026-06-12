@@ -5,6 +5,7 @@ import { AgentModule } from './modules/agent/agent.module';
 import { AuditModule } from './modules/audit/audit.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { EventsModule } from './modules/events/events.module';
+import { McpModule } from './modules/mcp/mcp.module';
 import { ModelConfigsModule } from './modules/model-configs/model-configs.module';
 import { ProjectsModule } from './modules/projects/projects.module';
 import { SessionsModule } from './modules/sessions/sessions.module';
@@ -36,6 +37,7 @@ import { HealthController } from './health.controller';
     AuditModule,
     EventsModule,
     SystemModule,
+    McpModule,
     ModelConfigsModule,
     ProjectsModule,
     SessionsModule,

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthModule } from '../auth/auth.module';
 import { EventsModule } from '../events/events.module';
+import { McpModule } from '../mcp/mcp.module';
 import { ModelConfigsModule } from '../model-configs/model-configs.module';
 import { ProjectsModule } from '../projects/projects.module';
 import { ToolApproval } from '../tools/tool-approval.entity';
@@ -19,6 +20,7 @@ import { SessionsService } from './sessions.service';
     TypeOrmModule.forFeature([Session, Message, ConversationSummary, AgentTurn, ToolCall, ToolApproval]),
     AuthModule,
     EventsModule,
+    McpModule,
     UsersModule,
     ProjectsModule,
     ModelConfigsModule,

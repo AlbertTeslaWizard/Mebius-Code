@@ -52,21 +52,14 @@ describe('AgentService', () => {
   const tools = {
     requestOrExecute: jest.fn(),
     listAllowedCommands: jest.fn(),
+    listMcpToolSpecs: jest.fn(),
     webSearchEnabled: jest.fn(),
   } as unknown as jest.Mocked<ToolsService>;
   const events = {
     publish: jest.fn(),
     complete: jest.fn(),
   } as unknown as jest.Mocked<EventsService>;
-  const service = new AgentService(
-    plans,
-    planSteps,
-    sessions,
-    modelConfigs,
-    llm,
-    tools,
-    events,
-  );
+  const service = new AgentService(plans, planSteps, sessions, modelConfigs, llm, tools, events);
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -75,12 +68,18 @@ describe('AgentService', () => {
       turnFixture(kind, targetSession, metadata),
     );
     sessions.addMessage.mockImplementation(async (_session, role, content, metadata = {}) =>
-      messageFixture(`message-${String(role)}-${String(content)}`, role as Message['role'], content, metadata),
+      messageFixture(
+        `message-${String(role)}-${String(content)}`,
+        role as Message['role'],
+        content,
+        metadata,
+      ),
     );
     sessions.latestSummary.mockResolvedValue(null);
     sessions.listMessages.mockResolvedValue([userMessage]);
     sessions.findPendingApprovalTool.mockResolvedValue(null);
     tools.listAllowedCommands.mockResolvedValue([]);
+    tools.listMcpToolSpecs.mockResolvedValue([]);
     tools.webSearchEnabled.mockReturnValue(false);
     plans.findOne.mockResolvedValue(null);
     plans.create.mockImplementation((value) => value as Plan);
@@ -121,13 +120,18 @@ describe('AgentService', () => {
       updatedAt: new Date('2026-06-02T00:00:00.000Z'),
     }));
     (planSteps.save as jest.Mock).mockImplementationOnce(async (value: PlanStep[]) =>
-      (value as PlanStep[]).map((step, index) => ({
-        ...step,
-        id: `step-${index + 1}`,
-      }) as PlanStep),
+      (value as PlanStep[]).map(
+        (step, index) =>
+          ({
+            ...step,
+            id: `step-${index + 1}`,
+          }) as PlanStep,
+      ),
     );
 
-    const result = await service.createPlan(owner, session.id, { goal: 'Fix Plan Mode approval UX' });
+    const result = await service.createPlan(owner, session.id, {
+      goal: 'Fix Plan Mode approval UX',
+    });
 
     expect(plans.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -177,7 +181,9 @@ describe('AgentService', () => {
         summary: 'Fix the Plan Mode approval flow.',
       }),
     );
-    expect(result.plan).toEqual(expect.objectContaining({ id: 'plan-1', goal: 'Fix Plan Mode approval UX' }));
+    expect(result.plan).toEqual(
+      expect.objectContaining({ id: 'plan-1', goal: 'Fix Plan Mode approval UX' }),
+    );
     expect(result.steps).toHaveLength(2);
   });
 
@@ -215,7 +221,9 @@ describe('AgentService', () => {
       expect.arrayContaining([
         expect.objectContaining({
           role: 'system',
-          content: expect.stringContaining('Source: C:\\Users\\12722\\.claude\\skills\\feynman-perspective\\SKILL.md'),
+          content: expect.stringContaining(
+            'Source: C:\\Users\\12722\\.claude\\skills\\feynman-perspective\\SKILL.md',
+          ),
         }),
       ]),
     );
@@ -228,7 +236,9 @@ describe('AgentService', () => {
     const result = await service.approvePlan(owner, plan.id);
 
     expect(result.status).toBe(PlanStatus.Approved);
-    expect(plans.save).toHaveBeenCalledWith(expect.objectContaining({ id: plan.id, status: PlanStatus.Approved }));
+    expect(plans.save).toHaveBeenCalledWith(
+      expect.objectContaining({ id: plan.id, status: PlanStatus.Approved }),
+    );
     expect(sessions.addMessage).toHaveBeenCalledWith(
       plan.session,
       MessageRole.Assistant,
@@ -297,7 +307,9 @@ describe('AgentService', () => {
     const result = await service.cancelPlan(owner, plan.id);
 
     expect(result.status).toBe(PlanStatus.Cancelled);
-    expect(plans.save).toHaveBeenCalledWith(expect.objectContaining({ id: plan.id, status: PlanStatus.Cancelled }));
+    expect(plans.save).toHaveBeenCalledWith(
+      expect.objectContaining({ id: plan.id, status: PlanStatus.Cancelled }),
+    );
     expect(events.publish).toHaveBeenCalledWith(session.id, 'plan_updated', {
       planId: plan.id,
       status: PlanStatus.Cancelled,
@@ -305,7 +317,11 @@ describe('AgentService', () => {
   });
 
   it('runs an approved plan without mutating plan lifecycle status', async () => {
-    const plan = planFixture({ id: 'plan-1', status: PlanStatus.Approved, goal: 'Fix Plan Mode approval UX' });
+    const plan = planFixture({
+      id: 'plan-1',
+      status: PlanStatus.Approved,
+      goal: 'Fix Plan Mode approval UX',
+    });
     plans.findOne.mockResolvedValueOnce(plan);
     sessions.listMessages.mockResolvedValueOnce([
       messageFixture('message-plan-goal', MessageRole.User, plan.goal),
@@ -325,7 +341,9 @@ describe('AgentService', () => {
     expect(llm.streamChat.mock.calls[0][0].messages).toEqual(
       expect.arrayContaining([expect.objectContaining({ role: 'user', content: plan.goal })]),
     );
-    expect(result.assistant).toEqual(expect.objectContaining({ content: 'Implemented the approved plan.' }));
+    expect(result.assistant).toEqual(
+      expect.objectContaining({ content: 'Implemented the approved plan.' }),
+    );
   });
 
   it('rejects executing a plan that has not been approved', async () => {
@@ -379,9 +397,7 @@ describe('AgentService', () => {
       expect.arrayContaining([
         expect.objectContaining({
           role: 'assistant',
-          tool_calls: expect.arrayContaining([
-            expect.objectContaining({ id: 'call-1' }),
-          ]),
+          tool_calls: expect.arrayContaining([expect.objectContaining({ id: 'call-1' })]),
         }),
         expect.objectContaining({
           role: 'tool',
@@ -410,7 +426,9 @@ describe('AgentService', () => {
       {},
       expect.objectContaining({ kind: AgentTurnKind.Chat }),
     );
-    expect(events.publish).toHaveBeenCalledWith(session.id, 'agent_status', { status: 'completed' });
+    expect(events.publish).toHaveBeenCalledWith(session.id, 'agent_status', {
+      status: 'completed',
+    });
     expect(events.complete).toHaveBeenCalledWith(session.id);
     expect(result.assistant).toEqual(
       expect.objectContaining({
@@ -470,10 +488,51 @@ describe('AgentService', () => {
       expect.arrayContaining([
         expect.objectContaining({
           role: 'system',
-          content: expect.stringContaining('Use web_search when a task needs current public information'),
+          content: expect.stringContaining(
+            'Use web_search when a task needs current public information',
+          ),
         }),
       ]),
     );
+  });
+
+  it('exposes enabled MCP tools to the model context', async () => {
+    tools.listMcpToolSpecs.mockResolvedValueOnce([
+      {
+        type: 'function',
+        function: {
+          name: 'mcp__context7__query-docs',
+          description: '[MCP:context7] Retrieve current library documentation.',
+          parameters: {
+            type: 'object',
+            properties: {
+              libraryId: { type: 'string' },
+              query: { type: 'string' },
+            },
+          },
+        },
+      },
+    ]);
+    llm.streamChat.mockResolvedValueOnce({ content: 'Used Context7 docs.' });
+
+    await service.run(owner, session.id, { message: 'Use current NestJS docs' });
+
+    expect(llm.streamChat.mock.calls[0][0].tools).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          function: expect.objectContaining({ name: 'mcp__context7__query-docs' }),
+        }),
+      ]),
+    );
+    expect(llm.streamChat.mock.calls[0][0].messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'system',
+          content: expect.stringContaining('MCP tools are available for external context'),
+        }),
+      ]),
+    );
+    expect(llm.streamChat.mock.calls[0][0].messages[0].content).not.toContain('or MCP tools');
   });
 
   it('publishes model diagnostic events without exposing credentials', async () => {
@@ -762,7 +821,9 @@ describe('AgentService', () => {
       {},
       undefined,
     );
-    expect(events.publish).toHaveBeenCalledWith(session.id, 'agent_status', { status: 'completed' });
+    expect(events.publish).toHaveBeenCalledWith(session.id, 'agent_status', {
+      status: 'completed',
+    });
     expect(events.complete).toHaveBeenCalledWith(session.id);
   });
 
@@ -794,9 +855,9 @@ describe('AgentService', () => {
       approvedToolCallId: 'call-patch',
     };
 
-    await expect(service.resumeAfterToolApproval(owner, approvedToolCall, resumeContext)).rejects.toThrow(
-      'Model stream was interrupted. Please retry.',
-    );
+    await expect(
+      service.resumeAfterToolApproval(owner, approvedToolCall, resumeContext),
+    ).rejects.toThrow('Model stream was interrupted. Please retry.');
 
     expect(events.publish).toHaveBeenCalledWith(session.id, 'agent_status', {
       status: 'failed',
@@ -848,7 +909,9 @@ describe('AgentService', () => {
       messageFixture('message-final', MessageRole.Assistant, 'The file is in the project root.'),
       messageFixture('message-follow-up', MessageRole.User, 'Then why is it missing on GitHub?'),
     ]);
-    llm.streamChat.mockResolvedValueOnce({ content: 'The local file may not have been pushed yet.' });
+    llm.streamChat.mockResolvedValueOnce({
+      content: 'The local file may not have been pushed yet.',
+    });
 
     await service.run(owner, session.id, { message: 'Then why is it missing on GitHub?' });
 
@@ -885,7 +948,9 @@ describe('AgentService', () => {
       messageFixture('message-final', MessageRole.Assistant, 'The file is in the project root.'),
       messageFixture('message-follow-up', MessageRole.User, 'Then where is it stored?'),
     ]);
-    llm.streamChat.mockResolvedValueOnce({ content: 'It is stored in your local project workspace.' });
+    llm.streamChat.mockResolvedValueOnce({
+      content: 'It is stored in your local project workspace.',
+    });
 
     await service.run(owner, session.id, { message: 'Then where is it stored?' });
 

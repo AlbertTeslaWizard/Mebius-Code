@@ -2,6 +2,7 @@ import { Repository } from 'typeorm';
 import { ApprovalStatus, ToolCallStatus } from '../../common/enums/tool-status.enum';
 import { PermissionMode } from '../../common/enums/permission-mode.enum';
 import { SessionStatus } from '../../common/enums/session-status.enum';
+import { McpService } from '../mcp/mcp.service';
 import { ModelConfigsService } from '../model-configs/model-configs.service';
 import { ProjectsService } from '../projects/projects.service';
 import { ToolApproval } from '../tools/tool-approval.entity';
@@ -147,6 +148,9 @@ describe('SessionsService', () => {
     publish: jest.fn(),
     complete: jest.fn(),
   };
+  const mcp = {
+    handleCommand: jest.fn(),
+  } as unknown as jest.Mocked<McpService>;
   const service = new SessionsService(
     sessions,
     messages,
@@ -156,6 +160,7 @@ describe('SessionsService', () => {
     approvals,
     projects,
     modelConfigs,
+    mcp,
     events as never,
   );
 
@@ -167,6 +172,7 @@ describe('SessionsService', () => {
     sessions.findOne.mockResolvedValue(sessionFixture());
     approvals.findOne.mockResolvedValue(null);
     toolCalls.findOne.mockResolvedValue(null);
+    mcp.handleCommand.mockResolvedValue({ type: 'mcp.list', servers: [] });
     messages.find.mockResolvedValue([
       { role: 'user', content: 'Build the feature' },
       { role: 'assistant', content: 'I will inspect the code first.' },
@@ -216,7 +222,9 @@ describe('SessionsService', () => {
         content: 'This is a Mebius Code TUI streaming renderer test.',
       }),
     );
-    expect(events.publish).toHaveBeenCalledWith('session-1', 'agent_status', { status: 'completed' });
+    expect(events.publish).toHaveBeenCalledWith('session-1', 'agent_status', {
+      status: 'completed',
+    });
     expect(events.complete).toHaveBeenCalledWith('session-1');
   });
 
@@ -389,16 +397,13 @@ describe('SessionsService', () => {
       },
     });
 
-    expect(modelConfigs.connect).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'owner-1' }),
-      {
-        providerId: 'moonshot',
-        apiKey: 'sk-test',
-        modelName: 'moonshot-v1-8k',
-        displayName: undefined,
-        baseUrl: undefined,
-      },
-    );
+    expect(modelConfigs.connect).toHaveBeenCalledWith(expect.objectContaining({ id: 'owner-1' }), {
+      providerId: 'moonshot',
+      apiKey: 'sk-test',
+      modelName: 'moonshot-v1-8k',
+      displayName: undefined,
+      baseUrl: undefined,
+    });
     expect(sessions.save).toHaveBeenCalledWith(
       expect.objectContaining({
         activeModelConfig: { id: 'connected-model' },
@@ -436,12 +441,15 @@ describe('SessionsService', () => {
       args: { modelConfigId: 'model-2' },
     });
 
-    expect(modelConfigs.selectModel).toHaveBeenCalledWith(expect.objectContaining({ id: 'owner-1' }), {
-      modelConfigId: 'model-2',
-      providerId: undefined,
-      modelName: undefined,
-      apiKey: undefined,
-    });
+    expect(modelConfigs.selectModel).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'owner-1' }),
+      {
+        modelConfigId: 'model-2',
+        providerId: undefined,
+        modelName: undefined,
+        apiKey: undefined,
+      },
+    );
     expect(sessions.save).toHaveBeenCalledWith(
       expect.objectContaining({
         activeModelConfig: { id: 'model-2' },
@@ -467,6 +475,28 @@ describe('SessionsService', () => {
       }),
     );
     expect((result as { modelConfig?: unknown }).modelConfig).not.toHaveProperty('apiKey');
+  });
+
+  it('routes /mcp commands to the MCP service', async () => {
+    mcp.handleCommand.mockResolvedValueOnce({
+      type: 'mcp.connected',
+      server: { slug: 'context7' },
+    });
+
+    const result = await service.handleCommand('owner-1', 'session-1', {
+      command: '/mcp context7',
+      args: { apiKey: 'ctx7-secret' },
+    });
+
+    expect(mcp.handleCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'owner-1' }),
+      ['context7'],
+      { apiKey: 'ctx7-secret' },
+    );
+    expect(result).toEqual({
+      type: 'mcp.connected',
+      server: { slug: 'context7' },
+    });
   });
 
   it('updates the current session permission mode with /permissions', async () => {
@@ -501,12 +531,16 @@ describe('SessionsService', () => {
     expect(messages.createQueryBuilder).toHaveBeenCalledTimes(1);
     expect(messageDeleteQueryBuilder.delete).toHaveBeenCalled();
     expect(messageDeleteQueryBuilder.from).toHaveBeenCalledWith(Message);
-    expect(messageDeleteQueryBuilder.where).toHaveBeenCalledWith('session_id = :sessionId', { sessionId: 'session-1' });
+    expect(messageDeleteQueryBuilder.where).toHaveBeenCalledWith('session_id = :sessionId', {
+      sessionId: 'session-1',
+    });
     expect(messageDeleteQueryBuilder.execute).toHaveBeenCalled();
     expect(summaries.createQueryBuilder).toHaveBeenCalledTimes(1);
     expect(summaryDeleteQueryBuilder.delete).toHaveBeenCalled();
     expect(summaryDeleteQueryBuilder.from).toHaveBeenCalledWith(ConversationSummary);
-    expect(summaryDeleteQueryBuilder.where).toHaveBeenCalledWith('session_id = :sessionId', { sessionId: 'session-1' });
+    expect(summaryDeleteQueryBuilder.where).toHaveBeenCalledWith('session_id = :sessionId', {
+      sessionId: 'session-1',
+    });
     expect(summaryDeleteQueryBuilder.execute).toHaveBeenCalled();
     expect(events.publish).toHaveBeenCalledWith('session-1', 'agent_status', {
       status: 'context_cleared',

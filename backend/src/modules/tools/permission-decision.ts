@@ -6,6 +6,7 @@ export type PermissionDecision = 'allow' | 'ask' | 'deny';
 export interface ToolPermissionRequest {
   name: string;
   args: Record<string, unknown>;
+  readOnly?: boolean;
   commandInspection?: CommandInspection;
   inspectionError?: string;
 }
@@ -79,6 +80,11 @@ export function decidePermission(
 
   if (isWriteTool(request.name)) {
     return decideWritePermission(mode);
+  }
+
+  if (isMcpTool(request.name)) {
+    if (request.readOnly) return 'allow';
+    return mode === PermissionMode.ReadOnly ? 'deny' : mode === PermissionMode.FullAccess ? 'allow' : 'ask';
   }
 
   if (request.name === 'run_command') {
@@ -198,6 +204,10 @@ function isReadTool(name: string): boolean {
 
 function isWriteTool(name: string): boolean {
   return WRITE_TOOLS.has(name);
+}
+
+function isMcpTool(name: string): boolean {
+  return name.startsWith('mcp__');
 }
 
 function collectToolPaths(request: ToolPermissionRequest): string[] {

@@ -16,6 +16,7 @@ import { PendingToolResumeContext } from '../agent/agent-resume.types';
 import { Plan } from '../agent/plan.entity';
 import { AuditService } from '../audit/audit.service';
 import { EventsService } from '../events/events.service';
+import { McpService } from '../mcp/mcp.service';
 import { Session } from '../sessions/session.entity';
 import { AgentTurn, AgentTurnKind, AgentTurnStatus } from '../sessions/agent-turn.entity';
 import { Message } from '../sessions/message.entity';
@@ -32,7 +33,10 @@ import { WebSearchService } from './web-search.service';
 
 describe('ToolsService', () => {
   const owner = { id: 'owner-1' } as User;
-  const session = { id: 'session-1', project: { id: 'project-1', workspacePath: 'D:/workspace' } } as Session;
+  const session = {
+    id: 'session-1',
+    project: { id: 'project-1', workspacePath: 'D:/workspace' },
+  } as Session;
   const agentTurn = { id: 'turn-1' } as AgentTurn;
   const resumeContext: PendingToolResumeContext = {
     assistantContent: '',
@@ -147,6 +151,12 @@ describe('ToolsService', () => {
     isEnabled: jest.fn(),
     search: jest.fn(),
   } as unknown as jest.Mocked<WebSearchService>;
+  const mcp = {
+    enabledToolSpecs: jest.fn(),
+    isMcpToolName: jest.fn(),
+    resolveExposedTool: jest.fn(),
+    callExposedTool: jest.fn(),
+  } as unknown as jest.Mocked<McpService>;
   const agent = {
     resumeAfterToolApproval: jest.fn().mockResolvedValue(undefined),
     recordToolResultMessage: jest.fn().mockResolvedValue(undefined),
@@ -168,6 +178,7 @@ describe('ToolsService', () => {
     audit,
     events,
     webSearch,
+    mcp,
     agent,
   );
 
@@ -175,12 +186,19 @@ describe('ToolsService', () => {
     jest.restoreAllMocks();
     jest.clearAllMocks();
     pendingToolCall.status = ToolCallStatus.PendingApproval;
-    pendingToolCall.resultText = JSON.stringify({ kind: 'pending_tool_resume', payload: resumeContext });
+    pendingToolCall.resultText = JSON.stringify({
+      kind: 'pending_tool_resume',
+      payload: resumeContext,
+    });
     pendingToolCall.turn = agentTurn;
     approvals.findOne.mockResolvedValue(approval);
     sessions.findOwned.mockResolvedValue(session);
     sessions.findPendingApprovalTool.mockResolvedValue(null);
     turns.findOne.mockResolvedValue(null);
+    mcp.enabledToolSpecs.mockResolvedValue([]);
+    mcp.isMcpToolName.mockImplementation((name) => name.startsWith('mcp__'));
+    mcp.resolveExposedTool.mockResolvedValue(null);
+    mcp.callExposedTool.mockResolvedValue('MCP result');
     paths.resolveProjectPath.mockImplementation((_root, path) => `D:/workspace/${path}`);
     paths.resolveExistingProjectPath.mockImplementation((root, path = '.') =>
       Promise.resolve(path === '.' ? root : `${root}/${path}`),
@@ -191,7 +209,9 @@ describe('ToolsService', () => {
     paths.resolveExistingDirectory.mockImplementation((root, path = '.') =>
       Promise.resolve(path === '.' ? root : `${root}/${path}`),
     );
-    paths.assertExistingAbsolutePathInsideRoot.mockImplementation((_root, path) => Promise.resolve(path));
+    paths.assertExistingAbsolutePathInsideRoot.mockImplementation((_root, path) =>
+      Promise.resolve(path),
+    );
     paths.normalizeRelativePath.mockImplementation((path = '.') => path);
     paths.shouldIgnoreDirectory.mockImplementation((name) =>
       ['.git', 'node_modules', 'dist', 'build', 'datasets', 'models', 'checkpoints'].includes(name),
@@ -219,8 +239,16 @@ describe('ToolsService', () => {
       executionMode: 'argv',
       shellTokens: [],
     });
-    commandPolicy.parse.mockResolvedValue({ command: 'npm', args: ['test'], executionMode: 'argv' });
-    commandPolicy.parseAuthorized.mockReturnValue({ command: 'npm', args: ['test'], executionMode: 'argv' });
+    commandPolicy.parse.mockResolvedValue({
+      command: 'npm',
+      args: ['test'],
+      executionMode: 'argv',
+    });
+    commandPolicy.parseAuthorized.mockReturnValue({
+      command: 'npm',
+      args: ['test'],
+      executionMode: 'argv',
+    });
     commandPolicy.listAllowedCommands.mockResolvedValue(['npm test']);
     webSearch.isEnabled.mockReturnValue(false);
     webSearch.search.mockResolvedValue(
@@ -232,13 +260,16 @@ describe('ToolsService', () => {
     );
     sessionCommandGrants.findOne.mockResolvedValue(null);
     sessionApprovalRules.find.mockResolvedValue([]);
-    commandRuns.save.mockImplementation(async (value: any) => ({
-      id: 'run-1',
-      stdout: '',
-      stderr: '',
-      createdAt: new Date('2026-06-03T00:00:00.000Z'),
-      ...value,
-    }) as CommandRun);
+    commandRuns.save.mockImplementation(
+      async (value: any) =>
+        ({
+          id: 'run-1',
+          stdout: '',
+          stderr: '',
+          createdAt: new Date('2026-06-03T00:00:00.000Z'),
+          ...value,
+        }) as CommandRun,
+    );
     audit.record.mockResolvedValue({} as any);
   });
 
@@ -500,15 +531,21 @@ describe('ToolsService', () => {
         stderr: '',
         status: CommandRunStatus.Succeeded,
         createdAt: new Date('2026-06-03T00:00:00.000Z'),
-        toolCall: { id: 'tool-1', name: 'run_command', status: ToolCallStatus.Succeeded } as ToolCall,
+        toolCall: {
+          id: 'tool-1',
+          name: 'run_command',
+          status: ToolCallStatus.Succeeded,
+        } as ToolCall,
       } as CommandRun,
     ];
-    commandRuns.createQueryBuilder.mockReturnValueOnce(createCommandRunsQueryBuilder(runs) as never);
+    const queryBuilder = createCommandRunsQueryBuilder(runs);
+    commandRuns.createQueryBuilder.mockReturnValueOnce(queryBuilder as never);
 
     const result = await service.listSessionCommandRuns(owner.id, session.id);
 
     expect(sessions.findOwned).toHaveBeenCalledWith(owner.id, session.id);
     expect(commandRuns.createQueryBuilder).toHaveBeenCalledWith('run');
+    expect(queryBuilder.orderBy).toHaveBeenCalledWith('run.createdAt', 'DESC');
     expect(result[0]).toMatchObject({
       id: 'run-1',
       command: 'npm test',
@@ -560,10 +597,65 @@ describe('ToolsService', () => {
     );
   });
 
+  it('auto-executes read-only MCP tools', async () => {
+    mcp.resolveExposedTool.mockResolvedValueOnce({ readOnly: true } as never);
+    mcp.callExposedTool.mockResolvedValueOnce('Current documentation');
+
+    const result = await service.requestOrExecute({
+      owner,
+      sessionId: session.id,
+      name: 'mcp__context7__query-docs',
+      args: { libraryId: '/nestjs/docs', query: 'guards' },
+    });
+
+    expect(result.status).toBe(ToolCallStatus.Succeeded);
+    expect(approvals.save).not.toHaveBeenCalled();
+    expect(mcp.callExposedTool).toHaveBeenCalledWith(owner, 'mcp__context7__query-docs', {
+      libraryId: '/nestjs/docs',
+      query: 'guards',
+    });
+    expect(events.publish).toHaveBeenCalledWith(
+      session.id,
+      'tool_call_result',
+      expect.objectContaining({
+        name: 'mcp__context7__query-docs',
+        result: 'Current documentation',
+        server: 'context7',
+        mcpTool: 'query-docs',
+      }),
+    );
+  });
+
+  it('asks for approval before non-read-only MCP tools in ask-first mode', async () => {
+    mcp.resolveExposedTool.mockResolvedValueOnce({ readOnly: false } as never);
+
+    const result = await service.requestOrExecute({
+      owner,
+      sessionId: session.id,
+      name: 'mcp__github__create_issue',
+      args: { title: 'Bug' },
+    });
+
+    expect(result.status).toBe(ToolCallStatus.PendingApproval);
+    expect(approvals.save).toHaveBeenCalled();
+    expect(mcp.callExposedTool).not.toHaveBeenCalled();
+    expect(events.publish).toHaveBeenCalledWith(
+      session.id,
+      'tool_call_requested',
+      expect.objectContaining({
+        name: 'mcp__github__create_issue',
+        server: 'github',
+        mcpTool: 'create_issue',
+      }),
+    );
+  });
+
   it('does not list allowed commands when session ownership fails', async () => {
     sessions.findOwned.mockRejectedValueOnce(new Error('Session not found.'));
 
-    await expect(service.listSessionAllowedCommands(owner.id, 'missing-session')).rejects.toThrow('Session not found.');
+    await expect(service.listSessionAllowedCommands(owner.id, 'missing-session')).rejects.toThrow(
+      'Session not found.',
+    );
 
     expect(commandPolicy.listAllowedCommands).not.toHaveBeenCalled();
   });
@@ -579,7 +671,12 @@ describe('ToolsService', () => {
       arguments: { command: 'npm test' },
     } as unknown as ToolCall;
 
-    const result = await (service as any).runCommand(toolCall, owner, session.project, toolCall.arguments);
+    const result = await (service as any).runCommand(
+      toolCall,
+      owner,
+      session.project,
+      toolCall.arguments,
+    );
 
     expect(result).toContain('Command exited with 0');
     expect(events.publish).toHaveBeenCalledWith(
@@ -619,17 +716,28 @@ describe('ToolsService', () => {
       arguments: { command: 'npm test && npm run build' },
     } as unknown as ToolCall;
 
-    const result = await (service as any).runCommand(toolCall, owner, session.project, toolCall.arguments, true);
+    const result = await (service as any).runCommand(
+      toolCall,
+      owner,
+      session.project,
+      toolCall.arguments,
+      true,
+    );
 
     expect(result).toContain('Command exited with 0');
-    expect((service as any).spawnShellCommand).toHaveBeenCalledWith('npm test && npm run build', 'D:/workspace');
+    expect((service as any).spawnShellCommand).toHaveBeenCalledWith(
+      'npm test && npm run build',
+      'D:/workspace',
+    );
   });
 
   it('applies a multi-file patch set after validating snapshots', async () => {
     const workspace = await mkdtemp(join(tmpdir(), 'mebius-patch-'));
     try {
       await writeFile(join(workspace, 'existing.ts'), 'old', 'utf8');
-      paths.resolveNewProjectPath.mockImplementation((root, path = '.') => Promise.resolve(resolve(root, path)));
+      paths.resolveNewProjectPath.mockImplementation((root, path = '.') =>
+        Promise.resolve(resolve(root, path)),
+      );
       patches.find.mockResolvedValueOnce([]);
       patches.create.mockImplementation((value) => value as FilePatch);
       patches.save.mockImplementation(async (value: any) => {
@@ -655,7 +763,12 @@ describe('ToolsService', () => {
         },
       } as unknown as ToolCall;
 
-      const result = await (service as any).applyPatch(toolCall, owner, project, toolCall.arguments);
+      const result = await (service as any).applyPatch(
+        toolCall,
+        owner,
+        project,
+        toolCall.arguments,
+      );
 
       expect(result).toBe('Patch applied to existing.ts, nested/created.ts.');
       await expect(readFile(join(workspace, 'existing.ts'), 'utf8')).resolves.toBe('new');
@@ -670,7 +783,9 @@ describe('ToolsService', () => {
     const workspace = await mkdtemp(join(tmpdir(), 'mebius-conflict-'));
     try {
       await writeFile(join(workspace, 'demo.ts'), 'changed', 'utf8');
-      paths.resolveNewProjectPath.mockImplementation((root, path = '.') => Promise.resolve(resolve(root, path)));
+      paths.resolveNewProjectPath.mockImplementation((root, path = '.') =>
+        Promise.resolve(resolve(root, path)),
+      );
       const proposedPatch = {
         id: 'patch-conflict',
         project: { id: 'project-1', workspacePath: workspace },
@@ -686,7 +801,12 @@ describe('ToolsService', () => {
       patches.find.mockResolvedValueOnce([proposedPatch]);
 
       await expect(
-        (service as any).applyPatch(pendingToolCall, owner, proposedPatch.project, pendingToolCall.arguments),
+        (service as any).applyPatch(
+          pendingToolCall,
+          owner,
+          proposedPatch.project,
+          pendingToolCall.arguments,
+        ),
       ).rejects.toThrow('Patch conflict detected');
 
       expect(proposedPatch.status).toBe(FilePatchStatus.Conflicted);
@@ -700,7 +820,9 @@ describe('ToolsService', () => {
     const workspace = await mkdtemp(join(tmpdir(), 'mebius-revert-'));
     try {
       await writeFile(join(workspace, 'demo.ts'), 'new', 'utf8');
-      paths.resolveNewProjectPath.mockImplementation((root, path = '.') => Promise.resolve(resolve(root, path)));
+      paths.resolveNewProjectPath.mockImplementation((root, path = '.') =>
+        Promise.resolve(resolve(root, path)),
+      );
       const patch = {
         id: 'patch-revert',
         project: { id: 'project-1', workspacePath: workspace },
@@ -733,7 +855,9 @@ describe('ToolsService', () => {
     const workspace = await mkdtemp(join(tmpdir(), 'mebius-turn-undo-'));
     try {
       await writeFile(join(workspace, 'demo.ts'), 'new', 'utf8');
-      paths.resolveNewProjectPath.mockImplementation((root, path = '.') => Promise.resolve(resolve(root, path)));
+      paths.resolveNewProjectPath.mockImplementation((root, path = '.') =>
+        Promise.resolve(resolve(root, path)),
+      );
       const turn = turnFixture(session, 'turn-undo', AgentTurnStatus.Active);
       const message = { id: 'message-undo', deletedAt: null } as Message;
       const patch = turnPatchFixture(session, owner, workspace, {
@@ -774,9 +898,14 @@ describe('ToolsService', () => {
     const workspace = await mkdtemp(join(tmpdir(), 'mebius-turn-redo-'));
     try {
       await writeFile(join(workspace, 'demo.ts'), 'old', 'utf8');
-      paths.resolveNewProjectPath.mockImplementation((root, path = '.') => Promise.resolve(resolve(root, path)));
+      paths.resolveNewProjectPath.mockImplementation((root, path = '.') =>
+        Promise.resolve(resolve(root, path)),
+      );
       const turn = turnFixture(session, 'turn-redo', AgentTurnStatus.Undone);
-      const message = { id: 'message-redo', deletedAt: new Date('2026-06-03T00:00:00.000Z') } as Message;
+      const message = {
+        id: 'message-redo',
+        deletedAt: new Date('2026-06-03T00:00:00.000Z'),
+      } as Message;
       const patch = turnPatchFixture(session, owner, workspace, {
         id: 'patch-redo',
         status: FilePatchStatus.Reverted,

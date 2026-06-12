@@ -22,6 +22,7 @@ import { PendingToolResumeContext } from '../agent/agent-resume.types';
 import { AgentService } from '../agent/agent.service';
 import { Plan } from '../agent/plan.entity';
 import { EventsService } from '../events/events.service';
+import { McpService } from '../mcp/mcp.service';
 import { Project } from '../projects/project.entity';
 import { AgentTurn, AgentTurnKind, AgentTurnStatus } from '../sessions/agent-turn.entity';
 import { Session } from '../sessions/session.entity';
@@ -46,7 +47,7 @@ import {
 } from './session-command-grant.entity';
 import { ToolApproval } from './tool-approval.entity';
 import { ToolCall } from './tool-call.entity';
-import { codingToolNames } from './tool-specs';
+import { CodingToolSpec, codingToolNames } from './tool-specs';
 import { WebSearchService } from './web-search.service';
 
 const DIFF_PREVIEW_LIMIT = 20_000;
@@ -136,6 +137,7 @@ export class ToolsService {
     private readonly audit: AuditService,
     private readonly events: EventsService,
     private readonly webSearch: WebSearchService,
+    private readonly mcp: McpService,
     @Inject(forwardRef(() => AgentService))
     private readonly agent: AgentService,
   ) {}
@@ -162,9 +164,16 @@ export class ToolsService {
         inspectionError = error instanceof Error ? error.message : 'Command is blocked by permission policy.';
       }
     }
+    const mcpTool = this.mcp.isMcpToolName(input.name)
+      ? await this.mcp.resolveExposedTool(input.owner, input.name)
+      : null;
+    if (this.mcp.isMcpToolName(input.name) && !mcpTool) {
+      return this.rejectToolRequestByPermission(input, session, `MCP tool ${input.name} is not available.`);
+    }
     const permissionRequest: ToolPermissionRequest = {
       name: input.name,
       args: input.args,
+      readOnly: mcpTool?.readOnly,
       commandInspection,
       inspectionError,
     };
@@ -333,7 +342,7 @@ export class ToolsService {
       .andWhere('(toolCall.turn_id IS NULL OR turn.status = :activeStatus)', {
         activeStatus: AgentTurnStatus.Active,
       })
-      .orderBy('run.created_at', 'DESC')
+      .orderBy('run.createdAt', 'DESC')
       .take(50)
       .getMany();
     return runs.map((run) => this.serializeCommandRun(run));
@@ -368,6 +377,10 @@ export class ToolsService {
 
   webSearchEnabled(): boolean {
     return this.webSearch.isEnabled();
+  }
+
+  async listMcpToolSpecs(owner: User): Promise<CodingToolSpec[]> {
+    return this.mcp.enabledToolSpecs(owner);
   }
 
   async listSessionAllowedCommands(ownerId: string, sessionId: string): Promise<string[]> {
@@ -977,6 +990,9 @@ export class ToolsService {
       case 'web_search':
         return this.webSearch.search(toolCall.arguments);
       default:
+        if (this.mcp.isMcpToolName(toolCall.name)) {
+          return this.mcp.callExposedTool(owner, toolCall.name, toolCall.arguments);
+        }
         return `Error: Unknown tool "${toolCall.name}". Available tools: ${codingToolNames(this.webSearchEnabled()).join(', ')}. Do not call "${toolCall.name}" again.`;
     }
   }
@@ -1290,6 +1306,14 @@ export class ToolsService {
     }
     if (toolName === 'web_search' && typeof args.query === 'string') {
       metadata.query = args.query;
+    }
+    if (this.mcp.isMcpToolName(toolName)) {
+      const rest = toolName.slice('mcp__'.length);
+      const separator = rest.indexOf('__');
+      if (separator > 0) {
+        metadata.server = rest.slice(0, separator);
+        metadata.mcpTool = rest.slice(separator + 2);
+      }
     }
     return metadata;
   }

@@ -1,0 +1,226 @@
+import { Repository } from 'typeorm';
+import { EncryptionService } from '../../common/security/encryption.service';
+import { User } from '../users/user.entity';
+import { McpServerConfig, McpTransport } from './mcp-server-config.entity';
+import { McpService } from './mcp.service';
+
+describe('McpService', () => {
+  const owner = { id: 'owner-1' } as User;
+  const createdAt = new Date('2026-06-12T00:00:00.000Z');
+  const configs = {
+    create: jest.fn((value) => value),
+    save: jest.fn(
+      async (value) =>
+        ({
+          id: (value as McpServerConfig).id ?? 'mcp-1',
+          createdAt,
+          updatedAt: createdAt,
+          ...value,
+        }) as McpServerConfig,
+    ),
+    find: jest.fn(),
+    findOne: jest.fn(),
+    remove: jest.fn(async (value) => value),
+  } as unknown as jest.Mocked<Repository<McpServerConfig>>;
+  const encryption = {
+    encrypt: jest.fn((value: string) => `encrypted:${value}`),
+    decrypt: jest.fn((value: string) => value.replace(/^encrypted:/, '')),
+  } as unknown as jest.Mocked<EncryptionService>;
+
+  let service: McpService;
+  let fetchMock: jest.SpiedFunction<typeof fetch>;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    service = new McpService(configs, encryption);
+    configs.find.mockResolvedValue([]);
+    configs.findOne.mockResolvedValue(null);
+    fetchMock = jest.spyOn(globalThis, 'fetch');
+  });
+
+  afterEach(() => {
+    fetchMock.mockRestore();
+  });
+
+  it('creates the Context7 preset without leaking header values', async () => {
+    const result = await service.handleCommand(owner, ['context7'], { apiKey: 'ctx7-secret' });
+
+    expect(configs.findOne).toHaveBeenCalledWith({
+      where: { owner: { id: owner.id }, slug: 'context7' },
+    });
+    expect(encryption.encrypt).toHaveBeenCalledWith(
+      JSON.stringify({ CONTEXT7_API_KEY: 'ctx7-secret' }),
+    );
+    expect(configs.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        owner,
+        slug: 'context7',
+        name: 'Context7',
+        url: 'https://mcp.context7.com/mcp',
+        enabled: true,
+        isPreset: true,
+        encryptedHeaders: expect.stringContaining('ctx7-secret'),
+      }),
+    );
+    expect(result).toEqual({
+      type: 'mcp.connected',
+      server: expect.objectContaining({
+        slug: 'context7',
+        headerNames: ['CONTEXT7_API_KEY'],
+      }),
+    });
+    expect(JSON.stringify(result)).not.toContain('ctx7-secret');
+  });
+
+  it('discovers enabled MCP tools from an SSE JSON-RPC response', async () => {
+    configs.find.mockResolvedValueOnce([serverFixture({ slug: 'context7' })]);
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ jsonrpc: '2.0', id: 'init', result: {} }))
+      .mockResolvedValueOnce(textResponse(''))
+      .mockResolvedValueOnce(
+        textResponse(
+          [
+            'event: message',
+            `data: ${JSON.stringify({
+              jsonrpc: '2.0',
+              id: 'tools',
+              result: {
+                tools: [
+                  {
+                    name: 'query-docs',
+                    description: 'Retrieve documentation for a library.',
+                    inputSchema: {
+                      type: 'object',
+                      properties: {
+                        libraryId: { type: 'string' },
+                        query: { type: 'string' },
+                      },
+                      required: ['libraryId', 'query'],
+                    },
+                  },
+                ],
+              },
+            })}`,
+            '',
+          ].join('\n'),
+        ),
+      );
+
+    const specs = await service.enabledToolSpecs(owner);
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(specs).toEqual([
+      expect.objectContaining({
+        type: 'function',
+        function: expect.objectContaining({
+          name: 'mcp__context7__query-docs',
+          description: '[MCP:context7] Retrieve documentation for a library.',
+          parameters: expect.objectContaining({
+            required: ['libraryId', 'query'],
+          }),
+        }),
+      }),
+    ]);
+  });
+
+  it('maps exposed tool names back to provider tool names when calling MCP', async () => {
+    const server = serverFixture({ slug: 'context7' });
+    configs.findOne.mockResolvedValue(server);
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ jsonrpc: '2.0', id: 'init', result: {} }))
+      .mockResolvedValueOnce(textResponse(''))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          jsonrpc: '2.0',
+          id: 'tools',
+          result: {
+            tools: [
+              {
+                name: 'query-docs',
+                annotations: { readOnlyHint: true },
+                inputSchema: { type: 'object', properties: {} },
+              },
+            ],
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          jsonrpc: '2.0',
+          id: 'call',
+          result: {
+            content: [{ type: 'text', text: 'Current docs content' }],
+          },
+        }),
+      );
+
+    const result = await service.callExposedTool(owner, 'mcp__context7__query-docs', {
+      libraryId: '/nestjs/docs',
+      query: 'guards',
+    });
+
+    expect(result).toBe('Current docs content');
+    const callBody = JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body)) as {
+      method: string;
+      params: { name: string; arguments: Record<string, unknown> };
+    };
+    expect(callBody).toMatchObject({
+      method: 'tools/call',
+      params: {
+        name: 'query-docs',
+        arguments: { libraryId: '/nestjs/docs', query: 'guards' },
+      },
+    });
+  });
+
+  it('returns null for unavailable exposed MCP tools', async () => {
+    configs.findOne.mockResolvedValueOnce(null);
+
+    await expect(service.resolveExposedTool(owner, 'mcp__missing__query-docs')).resolves.toBeNull();
+  });
+
+  it('wraps invalid MCP responses as a gateway error', async () => {
+    const server = serverFixture({ slug: 'context7' });
+    configs.findOne.mockResolvedValue(server);
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ jsonrpc: '2.0', id: 'init', result: {} }))
+      .mockResolvedValueOnce(textResponse(''))
+      .mockResolvedValueOnce(textResponse('not json'));
+
+    await expect(service.callExposedTool(owner, 'mcp__context7__query-docs', {})).rejects.toThrow(
+      'MCP server returned an invalid JSON-RPC response.',
+    );
+  });
+});
+
+function serverFixture(input: Partial<McpServerConfig> = {}): McpServerConfig {
+  return {
+    id: input.id ?? 'mcp-1',
+    owner: input.owner ?? ({ id: 'owner-1' } as User),
+    name: input.name ?? 'Context7',
+    slug: input.slug ?? 'context7',
+    url: input.url ?? 'https://mcp.context7.com/mcp',
+    transport: input.transport ?? McpTransport.StreamableHttp,
+    enabled: input.enabled ?? true,
+    encryptedHeaders: input.encryptedHeaders ?? null,
+    isPreset: input.isPreset ?? true,
+    createdAt: input.createdAt ?? new Date('2026-06-12T00:00:00.000Z'),
+    updatedAt: input.updatedAt ?? new Date('2026-06-12T00:00:00.000Z'),
+  } as McpServerConfig;
+}
+
+function jsonResponse(payload: unknown, status = 200): Response {
+  return response(JSON.stringify(payload), status);
+}
+
+function textResponse(text: string, status = 200): Response {
+  return response(text, status);
+}
+
+function response(text: string, status = 200): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    text: jest.fn().mockResolvedValue(text),
+  } as unknown as Response;
+}

@@ -6,6 +6,7 @@ import { DEFAULT_PERMISSION_MODE, PermissionMode } from '../../common/enums/perm
 import { SessionStatus } from '../../common/enums/session-status.enum';
 import { ApprovalStatus, ToolCallStatus } from '../../common/enums/tool-status.enum';
 import { EventsService } from '../events/events.service';
+import { McpService } from '../mcp/mcp.service';
 import { ModelConfigsService, SanitizedModelConfig } from '../model-configs/model-configs.service';
 import { ProjectsService } from '../projects/projects.service';
 import { ToolApproval } from '../tools/tool-approval.entity';
@@ -66,6 +67,7 @@ export class SessionsService {
     private readonly approvals: Repository<ToolApproval>,
     private readonly projects: ProjectsService,
     private readonly modelConfigs: ModelConfigsService,
+    private readonly mcp: McpService,
     private readonly events: EventsService,
   ) {}
 
@@ -283,6 +285,10 @@ export class SessionsService {
 
     if (name === '/connect') {
       return this.connectModel(session, parts.join(' '), dto.args);
+    }
+
+    if (name === '/mcp') {
+      return this.mcp.handleCommand(session.owner as User, parts, dto.args);
     }
 
     throw new BadRequestException(`Unsupported slash command: ${name}`);
