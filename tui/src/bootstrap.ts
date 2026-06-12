@@ -376,12 +376,16 @@ function reduceEvent(state: WorkspaceState, event: SseEvent): WorkspaceState {
     }
 
     const now = new Date().toISOString();
+    let preservedMetadata: Record<string, unknown> | undefined;
     const messages = state.messages.filter((message) => {
       if (role === 'assistant' && message.streaming) return false;
-      if (role === 'user' && message.id.startsWith('local-user-') && message.content === content) return false;
+      if (role === 'user' && message.id.startsWith('local-user-') && message.content === content) {
+        preservedMetadata = message.metadata;
+        return false;
+      }
       return true;
     });
-    messages.push({ id, role, content, createdAt: now, updatedAt: now });
+    messages.push({ id, role, content, createdAt: now, updatedAt: now, ...(preservedMetadata ? { metadata: preservedMetadata } : {}) });
     return {
       ...state,
       events,

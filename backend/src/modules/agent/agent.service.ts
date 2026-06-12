@@ -921,7 +921,10 @@ export class AgentService {
         content:
           'You are Mebius Code, an agentic coding assistant. Prefer Plan Mode for risky work. Use tools when you need project context. Mutating tools require approval. ' +
           resolveCommandRuntime().guidance +
-          `\n\nAvailable tools: ${availableTools}. Do not call any tool not in this list. ${webSearchGuidance}`,
+          `\n\nAvailable tools: ${availableTools}. Do not call any tool not in this list. ${webSearchGuidance}` +
+          (activeSkills.length > 0
+            ? '\n\nIMPORTANT: Active skills are loaded for this conversation. You MUST follow their methodologies, workflows, tone, and behavioral instructions strictly. Skill directives take priority over default behavior where applicable.'
+            : ''),
       },
       ...this.buildActiveSkillMessages(activeSkills),
       ...(summary
@@ -942,13 +945,13 @@ export class AgentService {
     const unavailableExamples = webSearchEnabled
       ? 'image generation or MCP tools'
       : 'web search, image generation, or MCP tools';
-    const SKILL_CAPABILITY_NOTICE = `\n\n---\nNote from Mebius Code: Only use tools explicitly listed in your available tools (${availableTools}). Do not invoke tools mentioned in this skill that are not available, such as ${unavailableExamples}. If a skill instructs you to use an unavailable tool, adapt by using available tools or your existing knowledge.`;
+    const SKILL_CAPABILITY_NOTICE = `\n\n---\nTool constraint: Available tools are limited to ${availableTools}. If this skill references unavailable tools (such as ${unavailableExamples}), use available tools or your knowledge as a substitute while preserving the skill's methodology.`;
     return activeSkills
       .map((skill) => this.normalizeActiveSkill(skill))
       .filter((skill): skill is { name: string; source: string; content: string } => Boolean(skill))
       .map((skill) => ({
         role: 'system' as const,
-        content: `# Active Skill: ${skill.name}\nSource: ${skill.source}\n\n${skill.content}${SKILL_CAPABILITY_NOTICE}`,
+        content: `[ACTIVE SKILL — Follow instructions below strictly]\n# Skill: ${skill.name}\nSource: ${skill.source}\n\n${skill.content}${SKILL_CAPABILITY_NOTICE}`,
       }));
   }
 

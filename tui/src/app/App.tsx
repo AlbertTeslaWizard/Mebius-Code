@@ -2177,6 +2177,9 @@ export function App(props: AppProps) {
               role: 'user',
               content: trimmed,
               createdAt: new Date().toISOString(),
+              ...(activeSkills.length > 0
+                ? { metadata: { activeSkills: activeSkills.map((s) => s.name) } }
+                : {}),
             },
           ]
         : prev.messages,
@@ -3808,6 +3811,11 @@ function MessageBlock(props: { message: Accessor<Message> }) {
           {role()}
           {streamingLabel()}
         </text>
+        <Show when={isUserMessage() && props.message().metadata?.activeSkills}>
+          <text fg={theme().muted} style={{ width: '100%', minWidth: 0, flexShrink: 0 }}>
+            Skills: {(props.message().metadata?.activeSkills as string[]).join(', ')}
+          </text>
+        </Show>
         <MessageBody message={props.message} />
       </box>
     </box>

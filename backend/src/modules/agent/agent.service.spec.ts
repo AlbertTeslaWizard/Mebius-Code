@@ -199,7 +199,7 @@ describe('AgentService', () => {
       expect.arrayContaining([
         expect.objectContaining({
           role: 'system',
-          content: expect.stringContaining('# Active Skill: feynman-perspective'),
+          content: expect.stringContaining('# Skill: feynman-perspective'),
         }),
       ]),
     );
@@ -428,7 +428,7 @@ describe('AgentService', () => {
       expect.arrayContaining([
         expect.objectContaining({
           role: 'system',
-          content: expect.stringContaining('# Active Skill: frontend-design'),
+          content: expect.stringContaining('# Skill: frontend-design'),
         }),
       ]),
     );
