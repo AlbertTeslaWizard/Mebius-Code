@@ -11,6 +11,9 @@ import type {
   ActiveSkillContext,
   Approval,
   ApprovalPreview,
+  McpCommandResult,
+  McpDiagnosticStatus,
+  McpServerView,
   Message,
   ModelChoice,
   ModelsCommandResult,
@@ -21,6 +24,14 @@ import type {
   Session,
   TuiThemeName,
 } from '../types';
+import {
+  clampMcpSelection,
+  closeOrReturnMcpPaletteOnEscape,
+  filterMcpServers,
+  moveMcpSelection,
+  parseMcpPaletteCommand,
+  type McpPaletteModel,
+} from '../mcp/ui';
 import {
   SkillDetailCache,
   discoverSkills,
@@ -115,6 +126,7 @@ interface CommandPaletteState {
 
 export type SlashCommandContext = {
   openModelSelectModal: () => Promise<void>;
+  openMcpModal: (refresh?: boolean) => Promise<void>;
   openPermissionsModal: () => void;
   openSessionPalette: () => Promise<void>;
   openSkillsModal: () => void;
@@ -162,12 +174,13 @@ interface SkillsIndexState {
 }
 
 type SkillsPaletteState = SkillsPaletteModel;
+type McpPaletteState = McpPaletteModel;
 
 interface CommandPaletteCommand {
   label: string;
   description: string;
   insert?: string;
-  action?: 'models' | 'sessions' | 'permissions' | 'skills';
+  action?: 'models' | 'sessions' | 'permissions' | 'skills' | 'mcp';
 }
 
 interface ModelChoiceGroupRow {
@@ -194,7 +207,7 @@ const commandPaletteCommands: CommandPaletteCommand[] = [
   { label: 'Select model', insert: '/models', action: 'models', description: 'Choose or configure the active model' },
   { label: 'Skills', insert: '/skills', action: 'skills', description: 'Browse skills' },
   { label: '/permissions', action: 'permissions', description: 'Change agent permission mode' },
-  { label: '/mcp', insert: '/mcp', description: 'Manage MCP servers and tools' },
+  { label: '/mcp', action: 'mcp', description: 'Browse MCP servers and tools' },
   { label: '/sessions', action: 'sessions', description: 'Switch to a previous session' },
   { label: '/new <title>', insert: '/new ', description: 'Create and switch to a new session' },
   { label: '/clear', insert: '/clear', description: 'Clear the chat and model context' },
@@ -242,7 +255,13 @@ const slashCommands: SlashCommand[] = [
     kind: 'immediate',
     run: (ctx) => ctx.openPermissionsModal(),
   },
-  { id: 'mcp', name: '/mcp', description: 'Manage MCP servers and tools', kind: 'input' },
+  {
+    id: 'mcp',
+    name: '/mcp',
+    description: 'Browse MCP servers and tools',
+    kind: 'immediate',
+    run: (ctx) => ctx.openMcpModal(),
+  },
   { id: 'new', name: '/new', description: 'Create and switch to a new session', kind: 'input' },
   {
     id: 'clear',
@@ -437,6 +456,7 @@ export function App(props: AppProps) {
   const [sessionPalette, setSessionPalette] = createSignal<SessionPaletteState | null>(null);
   const [skillsIndex, setSkillsIndex] = createSignal<SkillsIndexState>(initialSkillsIndexState(props.initialState));
   const [skillsPalette, setSkillsPalette] = createSignal<SkillsPaletteState | null>(null);
+  const [mcpPalette, setMcpPalette] = createSignal<McpPaletteState | null>(null);
   const [activeSkillIds, setActiveSkillIds] = createSignal<string[]>([]);
   const [recentModelKeys, setRecentModelKeys] = createSignal<string[]>(initialRecentModelKeys(props.initialState.modelChoices));
   const renderer = useRenderer();
@@ -456,7 +476,7 @@ export function App(props: AppProps) {
     const plan = state().plan;
     if (!plan || activeApproval() || dismissedPlanDecisionId() === plan.plan.id) return undefined;
     if (plan.plan.status === 'planning_generating') return undefined;
-    if (modelPalette() || commandPalette() || themePalette() || permissionPalette() || sessionPalette() || skillsPalette()) return undefined;
+    if (modelPalette() || commandPalette() || themePalette() || permissionPalette() || sessionPalette() || skillsPalette() || mcpPalette()) return undefined;
     const status = plan.plan.status;
     const questions = planQuestions(plan);
     if (PLAN_READY_STATUSES.has(status)) return { mode: 'ready', plan };
@@ -514,7 +534,7 @@ export function App(props: AppProps) {
     return 'Status';
   });
   const slashQuery = createMemo(() => {
-    if (modelPalette() || commandPalette() || themePalette() || permissionPalette() || sessionPalette() || skillsPalette() || planDecisionPlan()) return null;
+    if (modelPalette() || commandPalette() || themePalette() || permissionPalette() || sessionPalette() || skillsPalette() || mcpPalette() || planDecisionPlan()) return null;
     return getSlashQuery(input(), composerCursorOffset());
   });
   const filteredSlashSuggestions = createMemo(() => {
@@ -528,6 +548,10 @@ export function App(props: AppProps) {
   const filteredSkillItems = createMemo(() => {
     const palette = skillsPalette();
     return filterSkills(skillsIndex().skills, palette?.query ?? '');
+  });
+  const filteredMcpServerItems = createMemo(() => {
+    const palette = mcpPalette();
+    return filterMcpServers(palette?.servers ?? [], palette?.query ?? '');
   });
   const activeSkillItems = createMemo(() => {
     const ids = new Set(activeSkillIds());
@@ -601,6 +625,16 @@ export function App(props: AppProps) {
   });
 
   createEffect(() => {
+    const palette = mcpPalette();
+    if (!palette || palette.view !== 'list') return;
+    const count = filteredMcpServerItems().length;
+    const selectedIndex = clampMcpSelection(palette.selectedIndex, count);
+    if (selectedIndex !== palette.selectedIndex) {
+      setMcpPalette({ ...palette, selectedIndex });
+    }
+  });
+
+  createEffect(() => {
     const plan = state().plan;
     if (!plan) return;
     const status = plan.plan.status;
@@ -639,7 +673,8 @@ export function App(props: AppProps) {
       !themePalette() &&
       !permissionPalette() &&
       !sessionPalette() &&
-      !skillsPalette()
+      !skillsPalette() &&
+      !mcpPalette()
     );
   }
 
@@ -707,6 +742,12 @@ export function App(props: AppProps) {
         event.preventDefault();
         event.stopPropagation();
         setSkillsPalette((current) => (current ? closeOrReturnSkillsPaletteOnEscape(current) : current));
+        return;
+      }
+      if (mcpPalette()) {
+        event.preventDefault();
+        event.stopPropagation();
+        setMcpPalette((current) => (current ? closeOrReturnMcpPaletteOnEscape(current) : current));
         return;
       }
       if (slashAutocompleteVisible()) {
@@ -808,6 +849,44 @@ export function App(props: AppProps) {
         if (skillPaletteState.view === 'list') {
           chooseSelectedSkillCommand();
         }
+        return;
+      }
+    }
+
+    const mcpPaletteState = mcpPalette();
+    if (mcpPaletteState) {
+      if (event.ctrl && name === 'r') {
+        event.preventDefault();
+        event.stopPropagation();
+        if (mcpPaletteState.view === 'detail') {
+          void refreshSelectedMcpServer();
+        } else {
+          void refreshMcpServers();
+        }
+        return;
+      }
+      if (mcpPaletteState.view === 'list' && name === 'up') {
+        event.preventDefault();
+        event.stopPropagation();
+        moveMcpServerSelection(-1);
+        return;
+      }
+      if (mcpPaletteState.view === 'list' && name === 'down') {
+        event.preventDefault();
+        event.stopPropagation();
+        moveMcpServerSelection(1);
+        return;
+      }
+      if (name === 'space') {
+        event.preventDefault();
+        event.stopPropagation();
+        void toggleSelectedMcpServer();
+        return;
+      }
+      if (mcpPaletteState.view === 'list' && (isEnterKey(name) || name === 'tab')) {
+        event.preventDefault();
+        event.stopPropagation();
+        void openSelectedMcpServerDetail();
         return;
       }
     }
@@ -919,7 +998,8 @@ export function App(props: AppProps) {
       !themePalette() &&
       !permissionPalette() &&
       !sessionPalette() &&
-      !skillsPalette()
+      !skillsPalette() &&
+      !mcpPalette()
     ) {
       event.preventDefault();
       event.stopPropagation();
@@ -942,6 +1022,8 @@ export function App(props: AppProps) {
     setPermissionPalette(null);
     setSessionPalette(null);
     setSkillsPalette(null);
+    setMcpPalette(null);
+    setMcpPalette(null);
     setCommandPalette({ selectedIndex: 0, query: '' });
   }
 
@@ -963,6 +1045,10 @@ export function App(props: AppProps) {
       openSkillsModal();
       return;
     }
+    if (command.action === 'mcp') {
+      await openMcpModal();
+      return;
+    }
     setInput(command.insert ?? '');
   }
 
@@ -974,6 +1060,7 @@ export function App(props: AppProps) {
   function slashCommandContext(): SlashCommandContext {
     return {
       openModelSelectModal,
+      openMcpModal,
       openPermissionsModal,
       openSessionPalette: () => openSessionPalette(),
       openSkillsModal,
@@ -1400,6 +1487,7 @@ export function App(props: AppProps) {
     setPermissionPalette(null);
     setSessionPalette(null);
     setSkillsPalette(null);
+    setMcpPalette(null);
     const selectedIndex = Math.max(
       tuiThemeList.findIndex((item) => item.name === themeName()),
       0,
@@ -1413,6 +1501,7 @@ export function App(props: AppProps) {
     setThemePalette(null);
     setSessionPalette(null);
     setSkillsPalette(null);
+    setMcpPalette(null);
     setInput('');
     setComposerCursorOffset(0);
     setPermissionPalette({
@@ -1521,6 +1610,7 @@ export function App(props: AppProps) {
     setThemePalette(null);
     setPermissionPalette(null);
     setSessionPalette(null);
+    setMcpPalette(null);
     const query = initialQuery.trimStart();
     setSkillsPalette({
       selectedIndex: 0,
@@ -1595,6 +1685,168 @@ export function App(props: AppProps) {
     });
   }
 
+  async function openMcpModal(refresh = false) {
+    const current = state();
+    setCommandPalette(null);
+    setModelPalette(null);
+    setThemePalette(null);
+    setPermissionPalette(null);
+    setSessionPalette(null);
+    setSkillsPalette(null);
+    setMcpPalette({
+      servers: mcpPalette()?.servers ?? [],
+      selectedIndex: 0,
+      query: '',
+      view: 'list',
+      loading: true,
+    });
+    try {
+      const result = await current.api.listMcpServers(current.session.id, refresh);
+      setMcpPalette((palette) =>
+        palette
+          ? {
+              ...palette,
+              servers: result.servers,
+              selectedIndex: clampMcpSelection(palette.selectedIndex, result.servers.length),
+              loading: false,
+              error: undefined,
+            }
+          : palette,
+      );
+      setState((prev) => ({ ...prev, activity: formatMcpCommandActivity(result as unknown as Record<string, unknown>), error: '' }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load MCP servers.';
+      setMcpPalette((palette) => (palette ? { ...palette, loading: false, error: message } : palette));
+      setState((prev) => ({ ...prev, error: message }));
+    }
+  }
+
+  async function refreshMcpServers() {
+    const current = state();
+    setMcpPalette((palette) => (palette ? { ...palette, loading: true, error: undefined } : palette));
+    try {
+      const result = await current.api.listMcpServers(current.session.id, true);
+      setMcpPalette((palette) =>
+        palette
+          ? {
+              ...palette,
+              servers: result.servers,
+              selectedIndex: clampMcpSelection(palette.selectedIndex, result.servers.length),
+              loading: false,
+              error: undefined,
+            }
+          : palette,
+      );
+      appendMcpCommandEvent(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to refresh MCP servers.';
+      setMcpPalette((palette) => (palette ? { ...palette, loading: false, error: message } : palette));
+      setState((prev) => ({ ...prev, error: message }));
+    }
+  }
+
+  function selectedMcpServer(): McpServerView | undefined {
+    const palette = mcpPalette();
+    if (!palette) return undefined;
+    if (palette.view === 'detail' && palette.detailSlug) {
+      return palette.servers.find((server) => server.slug === palette.detailSlug);
+    }
+    return filteredMcpServerItems()[palette.selectedIndex];
+  }
+
+  function moveMcpServerSelection(delta: number) {
+    setMcpPalette((current) => {
+      if (!current || current.view !== 'list') return current;
+      return {
+        ...current,
+        selectedIndex: moveMcpSelection(current.selectedIndex, delta, filteredMcpServerItems().length),
+      };
+    });
+  }
+
+  async function openSelectedMcpServerDetail(server = selectedMcpServer()) {
+    if (!server) return;
+    const current = state();
+    setMcpPalette((palette) =>
+      palette
+        ? {
+            ...palette,
+            view: 'detail',
+            detailSlug: server.slug,
+            detailTools: undefined,
+            detailLoading: true,
+            detailError: undefined,
+          }
+        : palette,
+    );
+    try {
+      const result = await current.api.listMcpTools(current.session.id, server.slug);
+      setMcpPalette((palette) =>
+        palette?.detailSlug === server.slug
+          ? {
+              ...palette,
+              servers: replaceMcpServer(palette.servers, result.server),
+              detailTools: result.tools,
+              detailLoading: false,
+              detailError: result.diagnostic.status === 'failed' ? result.diagnostic.error : undefined,
+            }
+          : palette,
+      );
+      appendMcpCommandEvent(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load MCP tools.';
+      setMcpPalette((palette) =>
+        palette?.detailSlug === server.slug ? { ...palette, detailLoading: false, detailError: message } : palette,
+      );
+      setState((prev) => ({ ...prev, error: message }));
+    }
+  }
+
+  async function refreshSelectedMcpServer() {
+    const server = selectedMcpServer();
+    if (server) {
+      await openSelectedMcpServerDetail(server);
+    }
+  }
+
+  async function toggleSelectedMcpServer(server = selectedMcpServer()) {
+    if (!server) return;
+    const current = state();
+    const enabled = !server.enabled;
+    setMcpPalette((palette) => (palette ? { ...palette, loading: palette.view === 'list', detailLoading: palette.view === 'detail' } : palette));
+    try {
+      const result = await current.api.setMcpServerEnabled(current.session.id, server.slug, enabled);
+      setMcpPalette((palette) =>
+        palette
+          ? {
+              ...palette,
+              servers: replaceMcpServer(palette.servers, result.server),
+              loading: false,
+              detailLoading: false,
+              detailTools: palette.detailSlug === server.slug ? [] : palette.detailTools,
+              detailError: undefined,
+            }
+          : palette,
+      );
+      appendMcpCommandEvent(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to update MCP server.';
+      setMcpPalette((palette) => (palette ? { ...palette, loading: false, detailLoading: false, error: message } : palette));
+      setState((prev) => ({ ...prev, error: message }));
+    }
+  }
+
+  function appendMcpCommandEvent(result: McpCommandResult) {
+    const data = result as unknown as Record<string, unknown>;
+    const event = { type: 'command_result', data, time: new Date().toLocaleTimeString() };
+    setState((prev) => ({
+      ...prev,
+      events: [event, ...prev.events].slice(0, 100),
+      activity: formatMcpCommandActivity(data),
+      error: '',
+    }));
+  }
+
   async function openSessionPalette(initialQuery = '') {
     const current = state();
     const query = initialQuery.trim();
@@ -1603,6 +1855,7 @@ export function App(props: AppProps) {
     setThemePalette(null);
     setPermissionPalette(null);
     setSkillsPalette(null);
+    setMcpPalette(null);
     setSessionPalette({
       sessions: current.sessions,
       selectedIndex: initialSessionSelectedIndex(current.sessions, query, current.session.id),
@@ -2091,9 +2344,14 @@ export function App(props: AppProps) {
       await openModelSelectModal();
       return;
     }
-    if (value === '/mcp' || value.startsWith('/mcp ')) {
-      const result = await current.api.runSessionCommand(current.session.id, value);
-      const event = { type: 'command_result', data: result as Record<string, unknown>, time: new Date().toLocaleTimeString() };
+    const mcpPaletteCommand = parseMcpPaletteCommand(value);
+    if (mcpPaletteCommand) {
+      await openMcpModal(mcpPaletteCommand.refresh);
+      return;
+    }
+    if (value.startsWith('/mcp ')) {
+      const result = await current.api.runSessionCommand<McpCommandResult>(current.session.id, value);
+      const event = { type: 'command_result', data: result as unknown as Record<string, unknown>, time: new Date().toLocaleTimeString() };
       setState((prev) => ({
         ...prev,
         events: [event, ...prev.events].slice(0, 100),
@@ -2432,7 +2690,8 @@ export function App(props: AppProps) {
                 !themePalette() &&
                 !permissionPalette() &&
                 !sessionPalette() &&
-                !skillsPalette(),
+                !skillsPalette() &&
+                !mcpPalette(),
               onInput: setInput,
               onCursorOffsetChange: setComposerCursorOffset,
               onSubmit: () => {
@@ -2579,6 +2838,27 @@ export function App(props: AppProps) {
               onQuery={(query) => setSkillsPalette((current) => (current ? { ...current, query, selectedIndex: 0 } : current))}
               onChoose={(skill) => {
                 chooseSelectedSkillCommand(skill);
+              }}
+            />
+          )}
+        </Show>
+
+        <Show when={mcpPalette()}>
+          {(palette) => (
+            <McpModal
+              palette={palette()}
+              filteredServers={filteredMcpServerItems()}
+              selectedServer={selectedMcpServer()}
+              onClose={() => setMcpPalette(null)}
+              onQuery={(query) => setMcpPalette((current) => (current ? { ...current, query, selectedIndex: 0 } : current))}
+              onChoose={(server) => {
+                void openSelectedMcpServerDetail(server);
+              }}
+              onToggle={(server) => {
+                void toggleSelectedMcpServer(server);
+              }}
+              onRefresh={() => {
+                void refreshMcpServers();
               }}
             />
           )}
@@ -3080,6 +3360,182 @@ function SkillsEmptyState(props: { index: SkillsIndexState }) {
         </For>
       </Show>
     </box>
+  );
+}
+
+function McpModal(props: {
+  palette: McpPaletteState;
+  filteredServers: McpServerView[];
+  selectedServer?: McpServerView;
+  onClose: () => void;
+  onQuery: (query: string) => void;
+  onChoose: (server: McpServerView) => void;
+  onToggle: (server: McpServerView) => void;
+  onRefresh: () => void;
+}) {
+  const theme = useTheme();
+  const dimensions = useTerminalDimensions();
+  const listRows = createMemo(() => {
+    if (props.palette.loading) return 1;
+    return Math.max(props.filteredServers.length, 1);
+  });
+  const listHeight = createMemo(() =>
+    clamp(listRows(), 4, Math.max(5, Math.floor(dimensions().height * 0.8) - 9)),
+  );
+  const detailServer = createMemo(
+    () =>
+      props.palette.servers.find((server) => server.slug === props.palette.detailSlug) ??
+      props.selectedServer,
+  );
+  const detailTools = createMemo(() => props.palette.detailTools ?? []);
+
+  return (
+    <ModalShell title="MCP servers" onClose={props.onClose}>
+      <Show
+        when={props.palette.view === 'detail'}
+        fallback={
+          <>
+            <PaletteSearch value={props.palette.query} placeholder="Search MCP servers..." onInput={props.onQuery} />
+            <scrollbox
+              scrollY
+              style={{ width: '100%', height: listHeight(), minHeight: 4, marginTop: 1, flexShrink: 0 }}
+              contentOptions={{ width: '100%', minWidth: '100%', flexDirection: 'column' }}
+            >
+              <Show when={!props.palette.loading} fallback={<text fg={theme().yellow}>Loading MCP servers...</text>}>
+                <Show when={!props.palette.error} fallback={<text fg={theme().red}>{props.palette.error}</text>}>
+                  <Show
+                    when={props.palette.servers.length > 0}
+                    fallback={
+                      <box style={{ flexDirection: 'column', width: '100%', minWidth: 0 }}>
+                        <text fg={theme().muted}>No MCP servers configured.</text>
+                        <text fg={theme().muted}>Use /mcp context7 or /mcp add &lt;slug&gt; &lt;url&gt;.</text>
+                      </box>
+                    }
+                  >
+                    <Show when={props.filteredServers.length > 0} fallback={<text fg={theme().muted}>No matching MCP servers found.</text>}>
+                      <For each={props.filteredServers}>
+                        {(server, index) => {
+                          const selected = createMemo(() => index() === props.palette.selectedIndex);
+                          const status = createMemo(() => mcpServerStatus(server));
+                          return (
+                            <box
+                              style={{
+                                width: '100%',
+                                height: 1,
+                                minHeight: 1,
+                                flexDirection: 'row',
+                                backgroundColor: selected() ? theme().selection : theme().input,
+                              }}
+                              onMouseDown={() => props.onChoose(server)}
+                            >
+                              <text fg={mcpStatusColor(status(), theme())} style={{ width: 10, flexShrink: 0 }}>
+                                {status()}
+                              </text>
+                              <text fg={theme().text} truncate style={{ width: 18, flexShrink: 0 }}>
+                                {server.slug}
+                              </text>
+                              <text fg={selected() ? theme().text : theme().muted} truncate style={{ flexGrow: 1, minWidth: 0 }}>
+                                {server.name}
+                              </text>
+                              <text fg={server.enabled ? theme().green : theme().muted} style={{ width: 9, flexShrink: 0 }}>
+                                {server.enabled ? 'enabled' : 'disabled'}
+                              </text>
+                              <text fg={selected() ? theme().text : theme().muted} style={{ width: 8, flexShrink: 0 }}>
+                                {mcpToolCountLabel(server)}
+                              </text>
+                              <text fg={selected() ? theme().text : theme().muted} style={{ width: 7, flexShrink: 0 }}>
+                                {server.isPreset ? 'preset' : 'user'}
+                              </text>
+                            </box>
+                          );
+                        }}
+                      </For>
+                    </Show>
+                  </Show>
+                </Show>
+              </Show>
+            </scrollbox>
+            <PaletteFooter items={[['Up/Down', 'navigate'], ['Enter/Tab', 'details'], ['Space', 'toggle'], ['Ctrl+R', 'refresh'], ['Esc', 'close']]} />
+          </>
+        }
+      >
+        <box style={{ flexDirection: 'column', marginTop: 1, width: '100%', minHeight: 0 }}>
+          <Show when={detailServer()} fallback={<text fg={theme().muted}>MCP server not found.</text>}>
+            {(server) => (
+              <>
+                <box style={{ width: '100%', height: 1, flexDirection: 'row' }}>
+                  <text fg={mcpStatusColor(mcpServerStatus(server()), theme())} style={{ width: 10, flexShrink: 0 }}>
+                    {mcpServerStatus(server())}
+                  </text>
+                  <text fg={theme().text} truncate style={{ flexGrow: 1, minWidth: 0 }}>
+                    {server().slug}
+                  </text>
+                  <text fg={server().enabled ? theme().green : theme().muted}>
+                    {server().enabled ? 'enabled' : 'disabled'}
+                  </text>
+                </box>
+                <text fg={theme().muted} truncate style={{ width: '100%', minWidth: 0 }}>
+                  name: {server().name}
+                </text>
+                <text fg={theme().muted} truncate style={{ width: '100%', minWidth: 0 }}>
+                  transport: {server().transport} - source: {server().isPreset ? 'preset' : 'user'}
+                </text>
+                <text fg={theme().muted} truncate style={{ width: '100%', minWidth: 0 }}>
+                  url: {mcpDisplayUrl(server())}
+                </text>
+                <text fg={theme().muted} truncate style={{ width: '100%', minWidth: 0 }}>
+                  headers: {server().headerNames.length > 0 ? server().headerNames.join(', ') : '-'}
+                </text>
+                <text fg={theme().muted} truncate style={{ width: '100%', minWidth: 0 }}>
+                  tools: {mcpToolCountLabel(server())} - checked: {server().diagnostic.checkedAt ?? '-'}
+                </text>
+                <Show when={server().diagnostic.error}>
+                  {(error) => (
+                    <text fg={theme().red} wrapMode="word" style={{ width: '100%', minWidth: 0 }}>
+                      {error()}
+                    </text>
+                  )}
+                </Show>
+                <Show when={props.palette.detailError}>
+                  <text fg={theme().red} wrapMode="word" style={{ width: '100%', minWidth: 0 }}>
+                    {props.palette.detailError}
+                  </text>
+                </Show>
+                <Show when={props.palette.detailLoading}>
+                  <text fg={theme().yellow}>Loading MCP tools...</text>
+                </Show>
+                <scrollbox
+                  scrollY
+                  style={{ width: '100%', height: Math.max(5, Math.floor(dimensions().height * 0.45)), minHeight: 5, marginTop: 1 }}
+                  contentOptions={{ width: '100%', minWidth: '100%', flexDirection: 'column' }}
+                >
+                  <Show when={detailTools().length > 0} fallback={<text fg={theme().muted}>No tools available.</text>}>
+                    <For each={detailTools()}>
+                      {(tool) => (
+                        <box style={{ width: '100%', minHeight: 2, flexDirection: 'column', marginBottom: 1 }}>
+                          <box style={{ width: '100%', height: 1, minHeight: 1, flexDirection: 'row' }}>
+                            <text fg={tool.readOnly ? theme().green : theme().yellow} style={{ width: 6, flexShrink: 0 }}>
+                              {tool.readOnly ? 'read' : 'write'}
+                            </text>
+                            <text fg={theme().text} truncate style={{ flexGrow: 1, minWidth: 0 }}>
+                              {tool.exposedName}
+                            </text>
+                          </box>
+                          <text fg={theme().muted} wrapMode="word" style={{ width: '100%', minWidth: 0 }}>
+                            {tool.description || tool.name}
+                          </text>
+                        </box>
+                      )}
+                    </For>
+                  </Show>
+                </scrollbox>
+                <PaletteFooter items={[['Space', 'toggle'], ['Ctrl+R', 'retry'], ['Esc', 'back']]} />
+              </>
+            )}
+          </Show>
+        </box>
+      </Show>
+    </ModalShell>
   );
 }
 
@@ -4328,6 +4784,33 @@ function isMcpToolEvent(event: StatusEvent): boolean {
   return MCP_TOOL_EVENT_TYPES.has(event.type) && Boolean(eventString(event, 'server') && eventString(event, 'mcpTool'));
 }
 
+function replaceMcpServer(servers: McpServerView[], server: McpServerView): McpServerView[] {
+  const index = servers.findIndex((item) => item.slug === server.slug);
+  if (index < 0) return [...servers, server];
+  return servers.map((item) => (item.slug === server.slug ? server : item));
+}
+
+function mcpServerStatus(server: McpServerView): McpDiagnosticStatus {
+  if (!server.enabled) return 'disabled';
+  return server.diagnostic.status;
+}
+
+function mcpStatusColor(status: McpDiagnosticStatus, theme: TuiTheme): string {
+  if (status === 'connected') return theme.green;
+  if (status === 'failed') return theme.red;
+  if (status === 'disabled') return theme.muted;
+  return theme.yellow;
+}
+
+function mcpToolCountLabel(server: McpServerView): string {
+  if (server.diagnostic.status === 'unknown') return 'tools ?';
+  return `${server.diagnostic.toolCount} tool${server.diagnostic.toolCount === 1 ? '' : 's'}`;
+}
+
+function mcpDisplayUrl(server: McpServerView): string {
+  return server.displayUrl ?? server.url ?? '-';
+}
+
 function formatMcpToolEvent(event: StatusEvent): string {
   const server = eventString(event, 'server') ?? 'mcp';
   const tool = eventString(event, 'mcpTool') ?? eventString(event, 'name') ?? 'tool';
@@ -4347,7 +4830,10 @@ function formatMcpCommandActivity(data: Record<string, unknown>): string {
   }
   if (type === 'mcp.list') {
     const servers = arrayFromRecord(data, 'servers') ?? [];
-    return `MCP servers: ${servers.length}`;
+    const failed = servers
+      .map((server) => recordFromValue(server))
+      .filter((server) => stringFromRecord(recordFromRecord(server, 'diagnostic'), 'status') === 'failed').length;
+    return failed > 0 ? `MCP servers: ${servers.length} (${failed} failed)` : `MCP servers: ${servers.length}`;
   }
   if (type === 'mcp.connected') return `MCP connected: ${mcpServerLabel(recordFromRecord(data, 'server'))}`;
   if (type === 'mcp.enabled') return `MCP enabled: ${mcpServerLabel(recordFromRecord(data, 'server'))}`;
@@ -4364,8 +4850,14 @@ function formatMcpCommandResult(data: Record<string, unknown>): string {
     const summary = servers
       .map((server) => {
         const value = recordFromValue(server);
-        const state = booleanFromRecord(value, 'enabled') === false ? 'disabled' : 'enabled';
-        return `${mcpServerLabel(value)} ${state}`;
+        const diagnostic = recordFromRecord(value, 'diagnostic');
+        const state =
+          booleanFromRecord(value, 'enabled') === false
+            ? 'disabled'
+            : stringFromRecord(diagnostic, 'status') ?? 'unknown';
+        const toolCount = numberFromRecord(diagnostic, 'toolCount');
+        const tools = typeof toolCount === 'number' && state !== 'unknown' ? `, ${toolCount} tools` : '';
+        return `${mcpServerLabel(value)} ${state}${tools}`;
       })
       .join(', ');
     return `MCP servers: ${servers.length} - ${summary}`;
@@ -4399,7 +4891,7 @@ function mcpServerLabel(server: Record<string, unknown> | undefined): string {
 }
 
 function mcpServerUrl(server: Record<string, unknown> | undefined): string | undefined {
-  return stringFromRecord(server, 'url');
+  return stringFromRecord(server, 'displayUrl') ?? stringFromRecord(server, 'url');
 }
 
 function mcpServerHeaders(server: Record<string, unknown> | undefined): string | undefined {
@@ -4429,6 +4921,11 @@ function stringFromRecord(source: Record<string, unknown> | undefined, key: stri
 function booleanFromRecord(source: Record<string, unknown> | undefined, key: string): boolean | undefined {
   const value = source?.[key];
   return typeof value === 'boolean' ? value : undefined;
+}
+
+function numberFromRecord(source: Record<string, unknown> | undefined, key: string): number | undefined {
+  const value = source?.[key];
+  return typeof value === 'number' ? value : undefined;
 }
 
 function shortId(value: string): string {

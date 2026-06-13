@@ -67,7 +67,123 @@ describe('McpService', () => {
       server: expect.objectContaining({
         slug: 'context7',
         headerNames: ['CONTEXT7_API_KEY'],
+        diagnostic: expect.objectContaining({ status: 'unknown' }),
       }),
+    });
+    expect(JSON.stringify(result)).not.toContain('ctx7-secret');
+  });
+
+  it('lists configured MCP servers without probing providers by default', async () => {
+    configs.find.mockResolvedValueOnce([
+      serverFixture({
+        slug: 'context7',
+        url: 'https://mcp.context7.com/mcp?api_key=ctx7-secret',
+        encryptedHeaders: 'encrypted:{"Authorization":"Bearer ctx7-secret"}',
+      }),
+    ]);
+
+    const result = await service.handleCommand(owner, []);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'mcp.list',
+      refreshed: false,
+      servers: [
+        expect.objectContaining({
+          slug: 'context7',
+          url: 'https://mcp.context7.com/mcp?api_key=*****',
+          displayUrl: 'https://mcp.context7.com/mcp?api_key=*****',
+          headerNames: ['Authorization'],
+          diagnostic: {
+            status: 'unknown',
+            toolCount: 0,
+            cached: false,
+          },
+        }),
+      ],
+    });
+    expect(JSON.stringify(result)).not.toContain('ctx7-secret');
+  });
+
+  it('refreshes MCP diagnostics and caches successful tool counts', async () => {
+    configs.find.mockResolvedValue([serverFixture({ slug: 'context7' })]);
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ jsonrpc: '2.0', id: 'init', result: {} }))
+      .mockResolvedValueOnce(textResponse(''))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          jsonrpc: '2.0',
+          id: 'tools',
+          result: {
+            tools: [
+              { name: 'resolve-library-id' },
+              { name: 'query-docs', annotations: { readOnlyHint: true } },
+            ],
+          },
+        }),
+      );
+
+    const refreshed = await service.handleCommand(owner, ['refresh']);
+    const cached = await service.handleCommand(owner, []);
+
+    expect(refreshed).toEqual({
+      type: 'mcp.list',
+      refreshed: true,
+      verbose: false,
+      servers: [
+        expect.objectContaining({
+          slug: 'context7',
+          diagnostic: expect.objectContaining({
+            status: 'connected',
+            toolCount: 2,
+            cached: false,
+            checkedAt: expect.any(String),
+          }),
+        }),
+      ],
+    });
+    expect(cached).toEqual({
+      type: 'mcp.list',
+      refreshed: false,
+      servers: [
+        expect.objectContaining({
+          diagnostic: expect.objectContaining({
+            status: 'connected',
+            toolCount: 2,
+            cached: true,
+          }),
+        }),
+      ],
+    });
+  });
+
+  it('returns failed diagnostics for provider errors instead of failing the MCP tools command', async () => {
+    const server = serverFixture({ slug: 'context7' });
+    configs.findOne.mockResolvedValue(server);
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ jsonrpc: '2.0', id: 'init', result: {} }))
+      .mockResolvedValueOnce(textResponse(''))
+      .mockResolvedValueOnce(textResponse('Authorization: Bearer ctx7-secret', 401));
+
+    const result = await service.handleCommand(owner, ['tools', 'context7']);
+
+    expect(result).toEqual({
+      type: 'mcp.tools',
+      server: expect.objectContaining({
+        slug: 'context7',
+        diagnostic: expect.objectContaining({
+          status: 'failed',
+          toolCount: 0,
+          cached: false,
+          checkedAt: expect.any(String),
+          error: expect.stringContaining('*****'),
+        }),
+      }),
+      diagnostic: expect.objectContaining({
+        status: 'failed',
+        error: expect.stringContaining('*****'),
+      }),
+      tools: [],
     });
     expect(JSON.stringify(result)).not.toContain('ctx7-secret');
   });

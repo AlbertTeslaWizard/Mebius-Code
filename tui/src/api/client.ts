@@ -6,6 +6,7 @@ import type {
   GitStatus,
   ListResponse,
   Message,
+  McpCommandResult,
   ModelChoice,
   ModelsCommandResult,
   PermissionMode,
@@ -123,6 +124,31 @@ export class ApiClient {
       method: 'POST',
       body: JSON.stringify({ command, ...(args ? { args } : {}) }),
     });
+  }
+
+  async listMcpServers(sessionId: string, refresh = false): Promise<Extract<McpCommandResult, { type: 'mcp.list' }>> {
+    return this.runSessionCommand<Extract<McpCommandResult, { type: 'mcp.list' }>>(
+      sessionId,
+      refresh ? '/mcp refresh' : '/mcp',
+    );
+  }
+
+  async listMcpTools(sessionId: string, slug: string): Promise<Extract<McpCommandResult, { type: 'mcp.tools' }>> {
+    return this.runSessionCommand<Extract<McpCommandResult, { type: 'mcp.tools' }>>(
+      sessionId,
+      `/mcp tools ${slug}`,
+    );
+  }
+
+  async setMcpServerEnabled(
+    sessionId: string,
+    slug: string,
+    enabled: boolean,
+  ): Promise<Extract<McpCommandResult, { type: 'mcp.enabled' | 'mcp.disabled' }>> {
+    return this.runSessionCommand<Extract<McpCommandResult, { type: 'mcp.enabled' | 'mcp.disabled' }>>(
+      sessionId,
+      `/mcp ${enabled ? 'enable' : 'disable'} ${slug}`,
+    );
   }
 
   async listMessages(sessionId: string): Promise<Message[]> {

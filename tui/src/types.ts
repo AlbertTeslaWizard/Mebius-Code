@@ -105,6 +105,46 @@ export type PermissionsCommandResult =
   | { type: 'permissions.current'; permissionMode: PermissionMode; session: Session }
   | { type: 'permissions.updated'; permissionMode: PermissionMode; session: Session };
 
+export type McpDiagnosticStatus = 'unknown' | 'disabled' | 'connected' | 'failed';
+
+export interface McpServerDiagnostic {
+  status: McpDiagnosticStatus;
+  toolCount: number;
+  cached: boolean;
+  checkedAt?: string;
+  error?: string;
+}
+
+export interface McpServerView {
+  id: string;
+  name: string;
+  slug: string;
+  url?: string;
+  displayUrl?: string;
+  transport: string;
+  enabled: boolean;
+  isPreset: boolean;
+  headerNames: string[];
+  diagnostic: McpServerDiagnostic;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface McpToolView {
+  name: string;
+  exposedName: string;
+  description: string;
+  readOnly: boolean;
+}
+
+export type McpCommandResult =
+  | { type: 'mcp.list'; refreshed: boolean; verbose?: boolean; servers: McpServerView[] }
+  | { type: 'mcp.connected'; server: McpServerView }
+  | { type: 'mcp.enabled'; server: McpServerView }
+  | { type: 'mcp.disabled'; server: McpServerView }
+  | { type: 'mcp.removed'; slug: string }
+  | { type: 'mcp.tools'; server: McpServerView; diagnostic: McpServerDiagnostic; tools: McpToolView[] };
+
 export interface AgentActivity {
   status: 'thinking' | 'responding' | 'using_tools' | 'waiting_for_approval' | 'failed' | string;
   toolName?: string;

@@ -29,15 +29,34 @@ interface ResolvedMcpTool {
   readOnly: boolean;
 }
 
+type McpDiagnosticStatus = 'unknown' | 'disabled' | 'connected' | 'failed';
+
+interface McpServerDiagnostic {
+  status: McpDiagnosticStatus;
+  toolCount: number;
+  cached: boolean;
+  checkedAt?: string;
+  error?: string;
+}
+
+interface McpToolView {
+  name: string;
+  exposedName: string;
+  description: string;
+  readOnly: boolean;
+}
+
 interface McpServerView {
   id: string;
   name: string;
   slug: string;
   url: string;
+  displayUrl: string;
   transport: McpTransport;
   enabled: boolean;
   isPreset: boolean;
   headerNames: string[];
+  diagnostic: McpServerDiagnostic;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -53,6 +72,7 @@ const READ_ONLY_CONTEXT7_TOOLS = new Set(['resolve-library-id', 'query-docs', 'g
 @Injectable()
 export class McpService {
   private readonly toolCache = new Map<string, { expiresAt: number; tools: McpTool[] }>();
+  private readonly diagnosticCache = new Map<string, McpServerDiagnostic>();
   private readonly sessionIds = new Map<string, string>();
 
   constructor(
@@ -68,9 +88,24 @@ export class McpService {
   ): Promise<unknown> {
     const [action, ...rest] = parts;
     if (!action) {
+      const servers = await this.list(owner.id);
       return {
         type: 'mcp.list',
-        servers: (await this.list(owner.id)).map((server) => this.toView(server)),
+        refreshed: false,
+        servers: servers.map((server) => this.toView(server)),
+      };
+    }
+
+    if (action === 'verbose' || action === 'refresh') {
+      const servers = await this.list(owner.id);
+      const diagnostics = await Promise.all(
+        servers.map((server) => this.inspectTools(server, true).then((result) => result.diagnostic)),
+      );
+      return {
+        type: 'mcp.list',
+        refreshed: true,
+        verbose: action === 'verbose',
+        servers: servers.map((server, index) => this.toView(server, diagnostics[index])),
       };
     }
 
@@ -114,16 +149,12 @@ export class McpService {
       const slug = this.normalizeSlug(rest[0] ?? '');
       if (!slug) throw new BadRequestException('Usage: /mcp tools <slug>');
       const server = await this.findOwned(owner.id, slug);
-      const tools = await this.listTools(server, true);
+      const result = await this.inspectTools(server, true);
       return {
         type: 'mcp.tools',
-        server: this.toView(server),
-        tools: tools.map((tool) => ({
-          name: tool.name,
-          exposedName: this.exposedToolName(server.slug, tool.name),
-          description: tool.description ?? '',
-          readOnly: this.isReadOnlyTool(server, tool),
-        })),
+        server: this.toView(server, result.diagnostic),
+        diagnostic: result.diagnostic,
+        tools: result.tools.map((tool) => this.toToolView(server, tool)),
       };
     }
 
@@ -341,6 +372,7 @@ export class McpService {
 
   private clearRuntimeState(serverId: string): void {
     this.toolCache.delete(serverId);
+    this.diagnosticCache.delete(serverId);
     this.sessionIds.delete(serverId);
   }
 
@@ -491,16 +523,82 @@ export class McpService {
     }
   }
 
-  private toView(server: McpServerConfig): McpServerView {
+  private toToolView(server: McpServerConfig, tool: McpTool): McpToolView {
+    return {
+      name: tool.name,
+      exposedName: this.exposedToolName(server.slug, tool.name),
+      description: tool.description ?? '',
+      readOnly: this.isReadOnlyTool(server, tool),
+    };
+  }
+
+  private async inspectTools(
+    server: McpServerConfig,
+    refresh: boolean,
+  ): Promise<{ tools: McpTool[]; diagnostic: McpServerDiagnostic }> {
+    if (!server.enabled) {
+      const diagnostic: McpServerDiagnostic = {
+        status: 'disabled',
+        toolCount: 0,
+        cached: false,
+      };
+      this.diagnosticCache.set(server.id, diagnostic);
+      return { tools: [], diagnostic };
+    }
+
+    try {
+      const tools = await this.listTools(server, refresh);
+      const diagnostic: McpServerDiagnostic = {
+        status: 'connected',
+        toolCount: tools.length,
+        checkedAt: new Date().toISOString(),
+        cached: false,
+      };
+      this.diagnosticCache.set(server.id, diagnostic);
+      return { tools, diagnostic };
+    } catch (error) {
+      const diagnostic: McpServerDiagnostic = {
+        status: 'failed',
+        toolCount: 0,
+        checkedAt: new Date().toISOString(),
+        cached: false,
+        error: this.sanitizeDiagnosticError(error),
+      };
+      this.diagnosticCache.set(server.id, diagnostic);
+      return { tools: [], diagnostic };
+    }
+  }
+
+  private cachedDiagnostic(server: McpServerConfig): McpServerDiagnostic {
+    if (!server.enabled) {
+      return {
+        status: 'disabled',
+        toolCount: 0,
+        cached: false,
+      };
+    }
+    const cached = this.diagnosticCache.get(server.id);
+    if (cached) return { ...cached, cached: true };
+    return {
+      status: 'unknown',
+      toolCount: 0,
+      cached: false,
+    };
+  }
+
+  private toView(server: McpServerConfig, diagnostic = this.cachedDiagnostic(server)): McpServerView {
+    const displayUrl = this.redactedDisplayUrl(server.url);
     return {
       id: server.id,
       name: server.name,
       slug: server.slug,
-      url: server.url,
+      url: displayUrl,
+      displayUrl,
       transport: server.transport,
       enabled: server.enabled,
       isPreset: server.isPreset,
       headerNames: Object.keys(this.decryptHeaders(server)),
+      diagnostic,
       createdAt: server.createdAt,
       updatedAt: server.updatedAt,
     };
@@ -538,6 +636,35 @@ export class McpService {
     return trimmed
       ? `MCP server returned ${status}: ${this.truncate(trimmed, 600)}`
       : `MCP server returned ${status}.`;
+  }
+
+  private sanitizeDiagnosticError(error: unknown): string {
+    const message = error instanceof Error ? error.message : 'MCP request failed.';
+    return this.redactSensitiveText(this.truncate(message, 600));
+  }
+
+  private redactedDisplayUrl(value: string): string {
+    try {
+      const url = new URL(value);
+      for (const key of [...url.searchParams.keys()]) {
+        if (this.isSensitiveName(key)) {
+          url.searchParams.set(key, '*****');
+        }
+      }
+      return url.toString();
+    } catch {
+      return this.redactSensitiveText(value);
+    }
+  }
+
+  private redactSensitiveText(value: string): string {
+    return value
+      .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer *****')
+      .replace(/((?:api[_-]?key|token|secret|password|authorization)\s*[:=]\s*)[^\s,;]+/gi, '$1*****');
+  }
+
+  private isSensitiveName(value: string): boolean {
+    return /api[_-]?key|token|secret|password|authorization|credential/i.test(value);
   }
 
   private truncate(value: string, max: number): string {

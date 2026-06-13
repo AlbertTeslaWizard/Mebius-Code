@@ -35,6 +35,10 @@ Slash commands always use command handling, regardless of the active composer mo
 ## Commands
 
 - `/models`: choose or configure the active model.
+- `/mcp`: browse configured MCP servers and tools.
+- `/mcp refresh` or `/mcp verbose`: open the MCP browser and probe enabled servers.
+- `/mcp context7`, `/mcp add <slug> <url>`, `/mcp tools <slug>`, `/mcp enable <slug>`, `/mcp disable <slug>`, `/mcp remove <slug>`: run MCP management commands.
+- MCP browser shortcuts: `Up/Down` navigate, `Enter` or `Tab` opens server details, `Space` enables or disables the selected server, `Ctrl+R` refreshes diagnostics, `Esc` goes back or closes.
 - `/new <title>`: create and switch to a new session, inheriting the current model.
 - `/clear`: clear the current chat and model context.
 - `/compact`: compact the current chat into model context.
