@@ -212,6 +212,7 @@ const commandPaletteCommands: CommandPaletteCommand[] = [
   { label: '/new <title>', insert: '/new ', description: 'Create and switch to a new session' },
   { label: '/clear', insert: '/clear', description: 'Clear the chat and model context' },
   { label: '/compact', insert: '/compact', description: 'Compact the chat into model context' },
+  { label: '/init', insert: '/init', description: 'Create an AGENTS.md project instruction file' },
   { label: '/themes', insert: '/themes', description: 'Switch the TUI theme' },
   { label: '/plan <goal>', insert: '/plan ', description: 'Create a plan for a goal' },
   { label: '/plan-approve', insert: '/plan-approve', description: 'Approve the latest plan' },
@@ -276,6 +277,13 @@ const slashCommands: SlashCommand[] = [
     description: 'Compact the chat into model context',
     kind: 'immediate',
     run: (ctx) => ctx.runCommand('/compact'),
+  },
+  {
+    id: 'init',
+    name: '/init',
+    description: 'Create an AGENTS.md project instruction file',
+    kind: 'immediate',
+    run: (ctx) => ctx.runCommand('/init'),
   },
   {
     id: 'themes',
@@ -2306,6 +2314,10 @@ export function App(props: AppProps) {
     if (value.startsWith('/compact ')) {
       throw new Error('/compact does not accept arguments.');
     }
+    if (value === '/init' || value.startsWith('/init ')) {
+      await runInitCommand(value);
+      return;
+    }
     if (value.startsWith('/plan ')) {
       const prepared = await prepareSkillPrompt(value.slice('/plan '.length));
       if (prepared.missingPromptSkill) {
@@ -2382,6 +2394,33 @@ export function App(props: AppProps) {
     }
 
     await runAgentPrompt(value);
+  }
+
+  async function runInitCommand(value: string) {
+    const current = state();
+    const result = await current.api.runSessionCommand<Record<string, unknown>>(current.session.id, value);
+    const event = {
+      type: 'command_result',
+      data: result,
+      time: new Date().toLocaleTimeString(),
+    };
+    const type = typeof result.type === 'string' ? result.type : '';
+    const path = typeof result.path === 'string' ? result.path : '';
+    let currentFile = state().currentFile;
+    if (path && type !== 'init.preview') {
+      try {
+        currentFile = await current.api.file(current.project.id, path);
+      } catch {
+        currentFile = state().currentFile;
+      }
+    }
+    setInput('');
+    setState((prev) => ({
+      ...prev,
+      currentFile,
+      events: [event, ...prev.events].slice(0, 100),
+      activity: typeof result.summary === 'string' ? result.summary : 'Init command completed',
+    }));
   }
 
   async function createNewSessionFromCommand(value: string) {

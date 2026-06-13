@@ -259,6 +259,10 @@ export class SessionsService {
       return this.modelsCommand(session, ownerId, dto.args, parts);
     }
 
+    if (name === '/init') {
+      return this.initCommand(session, dto.args, parts);
+    }
+
     if (name === '/permissions') {
       return this.permissionsCommand(session, dto.args, parts);
     }
@@ -429,6 +433,29 @@ export class SessionsService {
       permissionMode: requestedMode,
       session: this.toView(saved),
     };
+  }
+
+  private async initCommand(
+    session: Session,
+    args: Record<string, unknown> | undefined,
+    parts: string[],
+  ): Promise<unknown> {
+    const allowedFlags = new Set(['--preview', '--replace']);
+    const unknownFlag = parts.find((part) => !allowedFlags.has(part));
+    if (unknownFlag) {
+      throw new BadRequestException(`Unsupported /init argument: ${unknownFlag}`);
+    }
+
+    const preview = args?.preview === true || parts.includes('--preview');
+    const replace = args?.replace === true || parts.includes('--replace');
+    if (preview && replace) {
+      throw new BadRequestException('/init --preview cannot be combined with --replace.');
+    }
+
+    return this.projects.initAgentInstructions(session.owner as User, session.project.id, {
+      preview,
+      replace,
+    });
   }
 
   private async connectModel(

@@ -7,8 +7,10 @@ import { PlanStepStatus } from '../../common/enums/plan-step-status.enum';
 import { ToolCallStatus } from '../../common/enums/tool-status.enum';
 import { EventsService } from '../events/events.service';
 import { ModelConfigsService } from '../model-configs/model-configs.service';
+import { ProjectAgentInstructions, ProjectsService } from '../projects/projects.service';
 import { AgentTurn, AgentTurnKind, AgentTurnStatus } from '../sessions/agent-turn.entity';
 import { Message } from '../sessions/message.entity';
+import { Session } from '../sessions/session.entity';
 import { SessionsService } from '../sessions/sessions.service';
 import { User } from '../users/user.entity';
 import { ToolsService } from '../tools/tools.service';
@@ -68,6 +70,7 @@ export class AgentService {
     @Inject(forwardRef(() => ToolsService))
     private readonly tools: ToolsService,
     private readonly events: EventsService,
+    private readonly projects: ProjectsService,
   ) {}
 
   async createPlan(owner: User, sessionId: string, dto: CreatePlanDto): Promise<{
@@ -98,6 +101,7 @@ export class AgentService {
 
     const modelConfigId = dto.modelConfigId ?? session.activeModelConfig?.id;
     const config = await this.modelConfigs.findRuntime(owner.id, modelConfigId);
+    const projectInstructions = await this.readProjectInstructionsForSession(owner.id, session);
     let parsed: ParsedPlan;
     try {
       const response = await this.withModelDiagnostics(session.id, config, 'plan', 0, () =>
@@ -112,6 +116,7 @@ export class AgentService {
                 'markdown must be a complete Markdown plan with sections: requirements understanding, technical choices, target outcome, modules, file structure, implementation steps, risks/tradeoffs. ' +
                 'steps must be an array of {title, detail}. questions must be an array and may be empty. Each question must be data-driven with id, title, prompt, choices, recommendedChoiceId, allowCustomAnswer, notes, required, and multiSelect when useful. Do not execute tools.',
             },
+            ...this.buildProjectInstructionMessages(projectInstructions),
             ...this.buildActiveSkillMessages(dto.activeSkills ?? [], []),
             {
               role: 'user',
@@ -214,6 +219,7 @@ export class AgentService {
     const session = await this.sessions.findOwned(owner.id, plan.session.id);
     const modelConfigId = session.activeModelConfig?.id;
     const config = await this.modelConfigs.findRuntime(owner.id, modelConfigId);
+    const projectInstructions = await this.readProjectInstructionsForSession(owner.id, session);
     let finalized: FinalizedPlan;
 
     try {
@@ -228,6 +234,7 @@ export class AgentService {
                 'You are finalizing a Mebius Code Plan Mode draft after user clarification answers. ' +
                 'Return strict JSON with keys summary, markdown, and steps. markdown must be a complete Markdown plan and include the user selections. Do not execute tools.',
             },
+            ...this.buildProjectInstructionMessages(projectInstructions),
             {
               role: 'user',
               content: this.buildFinalizePrompt(plan, steps),
@@ -321,7 +328,14 @@ export class AgentService {
         this.sessions.listMessages(owner.id, session.id),
         this.tools.listMcpToolSpecs(owner),
       ]);
-      const messages = this.buildModelMessages(summary?.content, history, dto.activeSkills, mcpToolSpecs);
+      const projectInstructions = await this.readProjectInstructionsForSession(owner.id, session);
+      const messages = this.buildModelMessages(
+        summary?.content,
+        history,
+        dto.activeSkills,
+        mcpToolSpecs,
+        projectInstructions,
+      );
       if (approvedPlan && !dto.message) {
         messages.push({
           role: 'user',
@@ -353,7 +367,8 @@ export class AgentService {
       this.sessions.listMessages(owner.id, session.id),
       this.tools.listMcpToolSpecs(owner),
     ]);
-    const messages = this.buildModelMessages(summary?.content, history, [], mcpToolSpecs);
+    const projectInstructions = await this.readProjectInstructionsForSession(owner.id, session);
+    const messages = this.buildModelMessages(summary?.content, history, [], mcpToolSpecs, projectInstructions);
     if (!this.hasAssistantToolCall(messages, resumeContext.approvedToolCallId)) {
       messages.push({
         role: 'assistant',
@@ -913,6 +928,21 @@ export class AgentService {
     return project?.id;
   }
 
+  private async readProjectInstructionsForSession(
+    ownerId: string,
+    session: Session,
+  ): Promise<ProjectAgentInstructions | null> {
+    const projectId = this.getProjectId(session);
+    if (!projectId) {
+      return null;
+    }
+    try {
+      return await this.projects.readAgentInstructions(ownerId, projectId);
+    } catch {
+      return null;
+    }
+  }
+
   private async withModelDiagnostics<T>(
     sessionId: string,
     config: Awaited<ReturnType<ModelConfigsService['findRuntime']>>,
@@ -996,6 +1026,7 @@ export class AgentService {
     history: Message[],
     activeSkills: ActiveSkillDto[] = [],
     mcpToolSpecs: CodingToolSpec[] = [],
+    projectInstructions: ProjectAgentInstructions | null = null,
   ): LlmMessage[] {
     const webSearchEnabled = this.tools.webSearchEnabled();
     const mcpToolNames = mcpToolSpecs.map((tool) => tool.function.name);
@@ -1017,6 +1048,7 @@ export class AgentService {
             ? '\n\nIMPORTANT: Active skills are loaded for this conversation. You MUST follow their methodologies, workflows, tone, and behavioral instructions strictly. Skill directives take priority over default behavior where applicable.'
             : ''),
       },
+      ...this.buildProjectInstructionMessages(projectInstructions),
       ...this.buildActiveSkillMessages(activeSkills, mcpToolNames),
       ...(summary
         ? [
@@ -1027,6 +1059,24 @@ export class AgentService {
           ]
         : []),
       ...this.normalizeHistory(history.slice(-50)),
+    ];
+  }
+
+  private buildProjectInstructionMessages(projectInstructions: ProjectAgentInstructions | null): LlmMessage[] {
+    if (!projectInstructions?.content.trim()) {
+      return [];
+    }
+    const truncatedNotice = projectInstructions.truncated
+      ? '\n\n[Note: This project instruction file was truncated to fit the context limit.]'
+      : '';
+    return [
+      {
+        role: 'system' as const,
+        content:
+          `# Project Instructions (${projectInstructions.path})\n` +
+          'Follow these repository-level instructions unless they conflict with higher-priority system or developer instructions.\n\n' +
+          `${projectInstructions.content}${truncatedNotice}`,
+      },
     ];
   }
 

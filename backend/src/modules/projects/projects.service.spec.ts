@@ -119,6 +119,79 @@ describe('ProjectsService', () => {
     }
   });
 
+  it('creates AGENTS.md with detected project commands', async () => {
+    const project = projectFixture(paths.getProjectRoot('project-1'));
+    await mkdir(join(project.workspacePath, 'backend'), { recursive: true });
+    await writeFile(
+      join(project.workspacePath, 'backend', 'package.json'),
+      JSON.stringify({ scripts: { test: 'jest', lint: 'eslint src' } }),
+    );
+    await writeFile(join(project.workspacePath, 'backend', 'package-lock.json'), '{}');
+    projects.findOne.mockResolvedValue(project);
+
+    const result = await service.initAgentInstructions(owner, project.id);
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        type: 'init.created',
+        path: 'AGENTS.md',
+        summary: 'AGENTS.md created.',
+      }),
+    );
+    await expect(readFile(join(project.workspacePath, 'AGENTS.md'), 'utf8')).resolves.toContain(
+      'cd backend && npm run test',
+    );
+    expect(audit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'project.agent_instructions_created',
+        metadata: expect.objectContaining({ path: 'AGENTS.md' }),
+      }),
+    );
+  });
+
+  it('previews AGENTS.md without writing a file', async () => {
+    const project = projectFixture(paths.getProjectRoot('project-1'));
+    await mkdir(project.workspacePath, { recursive: true });
+    projects.findOne.mockResolvedValue(project);
+
+    const result = await service.initAgentInstructions(owner, project.id, { preview: true });
+
+    expect(result.type).toBe('init.preview');
+    expect(result.content).toContain('# AGENTS.md');
+    await expect(access(join(project.workspacePath, 'AGENTS.md'))).rejects.toThrow();
+    expect(audit.record).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'project.agent_instructions_created' }),
+    );
+  });
+
+  it('does not overwrite existing AGENTS.md unless replace is requested', async () => {
+    const project = projectFixture(paths.getProjectRoot('project-1'));
+    await mkdir(project.workspacePath, { recursive: true });
+    await writeFile(join(project.workspacePath, 'AGENTS.md'), '# Existing\n');
+    projects.findOne.mockResolvedValue(project);
+
+    const existing = await service.initAgentInstructions(owner, project.id);
+
+    expect(existing).toEqual(
+      expect.objectContaining({
+        type: 'init.exists',
+        content: '# Existing\n',
+        suggestedContent: expect.stringContaining('# AGENTS.md'),
+      }),
+    );
+    await expect(readFile(join(project.workspacePath, 'AGENTS.md'), 'utf8')).resolves.toBe('# Existing\n');
+
+    const replaced = await service.initAgentInstructions(owner, project.id, { replace: true });
+
+    expect(replaced.type).toBe('init.replaced');
+    await expect(readFile(join(project.workspacePath, 'AGENTS.md'), 'utf8')).resolves.toContain(
+      'Project instructions for Mebius Code',
+    );
+    expect(audit.record).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'project.agent_instructions_replaced' }),
+    );
+  });
+
   it('rejects invalid local project paths', async () => {
     const fileRoot = await mkdtemp(join(tmpdir(), 'mebius-local-file-'));
     const filePath = join(fileRoot, 'not-a-dir.txt');

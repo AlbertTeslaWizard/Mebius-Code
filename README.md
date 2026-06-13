@@ -54,6 +54,9 @@ Shell commands can be requested from the workspace **Runs** tab. Every command
 requires review before execution. Administrators manage Git, Node.js, Python,
 and custom command permissions from **Settings > Command permissions**.
 
+Mebius Code reads a project root `AGENTS.md` as repository-level agent
+instructions. In the TUI, run `/init` to generate a starter file.
+
 ## TUI Quick Start
 
 The TUI connects to an already running backend API. It does not start the

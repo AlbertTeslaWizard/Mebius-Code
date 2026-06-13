@@ -51,6 +51,7 @@ describe('SessionsService', () => {
   } as unknown as jest.Mocked<Repository<ToolApproval>>;
   const projects = {
     findOwned: jest.fn(),
+    initAgentInstructions: jest.fn(),
   } as unknown as jest.Mocked<ProjectsService>;
   const modelConfigs = {
     sanitize: jest.fn((config) => ({
@@ -173,6 +174,19 @@ describe('SessionsService', () => {
     approvals.findOne.mockResolvedValue(null);
     toolCalls.findOne.mockResolvedValue(null);
     mcp.handleCommand.mockResolvedValue({ type: 'mcp.list', servers: [] });
+    projects.initAgentInstructions.mockResolvedValue({
+      type: 'init.created',
+      path: 'AGENTS.md',
+      content: '# AGENTS.md\n',
+      summary: 'AGENTS.md created.',
+      detected: {
+        manifests: [],
+        commands: [],
+        stackHints: [],
+        rootFiles: [],
+        rootDirectories: [],
+      },
+    });
     messages.find.mockResolvedValue([
       { role: 'user', content: 'Build the feature' },
       { role: 'assistant', content: 'I will inspect the code first.' },
@@ -521,6 +535,45 @@ describe('SessionsService', () => {
         session: expect.objectContaining({ permissionMode: PermissionMode.Auto }),
       }),
     );
+  });
+
+  it('creates project instructions with /init', async () => {
+    const result = await service.handleCommand('owner-1', 'session-1', {
+      command: '/init',
+    });
+
+    expect(projects.initAgentInstructions).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'owner-1' }),
+      'project-1',
+      { preview: false, replace: false },
+    );
+    expect(result).toEqual(expect.objectContaining({ type: 'init.created' }));
+  });
+
+  it('passes /init preview and replace flags and rejects unknown args', async () => {
+    await service.handleCommand('owner-1', 'session-1', {
+      command: '/init --preview',
+    });
+    expect(projects.initAgentInstructions).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: 'owner-1' }),
+      'project-1',
+      { preview: true, replace: false },
+    );
+
+    await service.handleCommand('owner-1', 'session-1', {
+      command: '/init --replace',
+    });
+    expect(projects.initAgentInstructions).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: 'owner-1' }),
+      'project-1',
+      { preview: false, replace: true },
+    );
+
+    await expect(
+      service.handleCommand('owner-1', 'session-1', {
+        command: '/init --force',
+      }),
+    ).rejects.toThrow('Unsupported /init argument: --force');
   });
 
   it('clears session messages and summaries with /clear', async () => {

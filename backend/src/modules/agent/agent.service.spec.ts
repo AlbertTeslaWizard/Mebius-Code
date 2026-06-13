@@ -5,6 +5,7 @@ import { PlanStatus } from '../../common/enums/plan-status.enum';
 import { ApprovalStatus, ToolCallStatus } from '../../common/enums/tool-status.enum';
 import { EventsService } from '../events/events.service';
 import { ModelConfigsService, RuntimeModelConfig } from '../model-configs/model-configs.service';
+import { ProjectsService } from '../projects/projects.service';
 import { AgentTurn, AgentTurnKind, AgentTurnStatus } from '../sessions/agent-turn.entity';
 import { Message } from '../sessions/message.entity';
 import { Session } from '../sessions/session.entity';
@@ -19,7 +20,11 @@ import { PlanStep } from './plan-step.entity';
 import { Plan } from './plan.entity';
 
 describe('AgentService', () => {
-  const session = { id: 'session-1', activeModelConfig: { id: 'config-1' } } as Session;
+  const session = {
+    id: 'session-1',
+    project: { id: 'project-1' },
+    activeModelConfig: { id: 'config-1' },
+  } as Session;
   const owner = { id: 'owner-1' } as User;
   const userMessage = messageFixture('message-user', MessageRole.User, 'Explain this project');
 
@@ -59,7 +64,10 @@ describe('AgentService', () => {
     publish: jest.fn(),
     complete: jest.fn(),
   } as unknown as jest.Mocked<EventsService>;
-  const service = new AgentService(plans, planSteps, sessions, modelConfigs, llm, tools, events);
+  const projects = {
+    readAgentInstructions: jest.fn(),
+  } as unknown as jest.Mocked<ProjectsService>;
+  const service = new AgentService(plans, planSteps, sessions, modelConfigs, llm, tools, events, projects);
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -81,6 +89,7 @@ describe('AgentService', () => {
     tools.listAllowedCommands.mockResolvedValue([]);
     tools.listMcpToolSpecs.mockResolvedValue([]);
     tools.webSearchEnabled.mockReturnValue(false);
+    projects.readAgentInstructions.mockResolvedValue(null);
     plans.findOne.mockResolvedValue(null);
     plans.create.mockImplementation((value) => value as Plan);
     plans.save.mockImplementation(async (value) => value as Plan);
@@ -224,6 +233,41 @@ describe('AgentService', () => {
           content: expect.stringContaining(
             'Source: C:\\Users\\12722\\.claude\\skills\\feynman-perspective\\SKILL.md',
           ),
+        }),
+      ]),
+    );
+  });
+
+  it('injects AGENTS.md into the plan model context', async () => {
+    projects.readAgentInstructions.mockResolvedValueOnce({
+      path: 'AGENTS.md',
+      content: '# Team Rules\n\nRun npm test before finishing.',
+      size: 42,
+      truncated: false,
+    });
+    llm.chat.mockResolvedValueOnce({
+      content: JSON.stringify({
+        summary: 'Explain the project.',
+        markdown: '# Plan\n\nExplain the project.',
+        steps: [{ title: 'Read guidance', detail: 'Follow project instructions.' }],
+        questions: [],
+      }),
+    });
+
+    await service.createPlan(owner, session.id, {
+      goal: 'Explain the project',
+    });
+
+    expect(projects.readAgentInstructions).toHaveBeenCalledWith(owner.id, 'project-1');
+    expect(llm.chat.mock.calls[0]?.[0].messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'system',
+          content: expect.stringContaining('# Project Instructions (AGENTS.md)'),
+        }),
+        expect.objectContaining({
+          role: 'system',
+          content: expect.stringContaining('Run npm test before finishing.'),
         }),
       ]),
     );
@@ -466,6 +510,32 @@ describe('AgentService', () => {
         expect.objectContaining({
           role: 'system',
           content: expect.stringContaining('Source: ~/.claude/skills/frontend-design/SKILL.md'),
+        }),
+      ]),
+    );
+  });
+
+  it('injects AGENTS.md into the model system context for the run', async () => {
+    projects.readAgentInstructions.mockResolvedValueOnce({
+      path: 'AGENTS.md',
+      content: '# Project Rules\n\nUse the existing service patterns.',
+      size: 50,
+      truncated: false,
+    });
+    llm.streamChat.mockResolvedValueOnce({ content: 'Followed project rules.' });
+
+    await service.run(owner, session.id, { message: 'Add a small feature' });
+
+    expect(projects.readAgentInstructions).toHaveBeenCalledWith(owner.id, 'project-1');
+    expect(llm.streamChat.mock.calls[0][0].messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'system',
+          content: expect.stringContaining('# Project Instructions (AGENTS.md)'),
+        }),
+        expect.objectContaining({
+          role: 'system',
+          content: expect.stringContaining('Use the existing service patterns.'),
         }),
       ]),
     );

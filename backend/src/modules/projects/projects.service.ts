@@ -2,7 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { InjectRepository } from '@nestjs/typeorm';
 import { spawn } from 'child_process';
 import { Dirent } from 'fs';
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'fs/promises';
+import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'fs/promises';
 import { basename, delimiter, dirname, join, relative, resolve } from 'path';
 import { Repository } from 'typeorm';
 import { inflateRawSync } from 'zlib';
@@ -15,6 +15,8 @@ import { ImportGitDto } from './dto/import-git.dto';
 import { Project, ProjectDeletePolicy, ProjectSourceType, ProjectWorkspaceMode } from './project.entity';
 
 export const PROJECT_ARCHIVE_MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+export const AGENT_INSTRUCTIONS_FILENAME = 'AGENTS.md';
+export const AGENT_INSTRUCTIONS_MAX_BYTES = 32 * 1024;
 
 const PROJECT_ARCHIVE_MAX_EXTRACTED_BYTES = 100 * 1024 * 1024;
 const PROJECT_ARCHIVE_MAX_FILES = 5000;
@@ -25,6 +27,37 @@ const ZIP_MAX_EOCD_SEARCH_BYTES = 65_557;
 const ZIP_COMPRESSION_STORE = 0;
 const ZIP_COMPRESSION_DEFLATE = 8;
 const ARCHIVE_BLOCKED_SEGMENTS = new Set(['.git', '.env', 'node_modules', 'dist', 'coverage']);
+const PACKAGE_SCRIPT_COMMANDS = ['build', 'test', 'lint', 'typecheck', 'check', 'dev', 'start'];
+const AGENT_INIT_SCAN_MAX_DIRECTORIES = 24;
+
+export interface ProjectAgentInstructions {
+  path: typeof AGENT_INSTRUCTIONS_FILENAME;
+  content: string;
+  size: number;
+  truncated: boolean;
+}
+
+export interface AgentInstructionInitOptions {
+  preview?: boolean;
+  replace?: boolean;
+}
+
+export interface AgentInstructionInitDetected {
+  manifests: string[];
+  commands: string[];
+  stackHints: string[];
+  rootFiles: string[];
+  rootDirectories: string[];
+}
+
+export interface AgentInstructionInitResult {
+  type: 'init.created' | 'init.exists' | 'init.preview' | 'init.replaced';
+  path: typeof AGENT_INSTRUCTIONS_FILENAME;
+  content: string;
+  suggestedContent?: string;
+  summary: string;
+  detected: AgentInstructionInitDetected;
+}
 
 export interface TreeNode {
   name: string;
@@ -300,6 +333,87 @@ export class ProjectsService {
       path: this.toRelative(projectRoot, absolutePath),
       content: await readFile(absolutePath, 'utf8'),
       size: info.size,
+    };
+  }
+
+  async readAgentInstructions(ownerId: string, projectId: string): Promise<ProjectAgentInstructions | null> {
+    const project = await this.findOwned(ownerId, projectId);
+    const projectRoot = await this.ensureCurrentWorkspacePath(project);
+    const absolutePath = this.paths.resolveProjectPath(projectRoot, AGENT_INSTRUCTIONS_FILENAME);
+    const info = await stat(absolutePath).catch(() => null);
+    if (!info) {
+      return null;
+    }
+    if (!info.isFile()) {
+      return null;
+    }
+
+    const { content, truncated } = await this.readTextFilePrefix(absolutePath, AGENT_INSTRUCTIONS_MAX_BYTES);
+    return {
+      path: AGENT_INSTRUCTIONS_FILENAME,
+      content,
+      size: info.size,
+      truncated,
+    };
+  }
+
+  async initAgentInstructions(
+    owner: User,
+    projectId: string,
+    options: AgentInstructionInitOptions = {},
+  ): Promise<AgentInstructionInitResult> {
+    const project = await this.findOwned(owner.id, projectId);
+    const projectRoot = await this.ensureCurrentWorkspacePath(project);
+    const detected = await this.inspectProjectForAgentInstructions(projectRoot);
+    const generatedContent = this.renderAgentInstructions(project, detected);
+    const absolutePath = this.paths.resolveProjectPath(projectRoot, AGENT_INSTRUCTIONS_FILENAME);
+
+    if (options.preview) {
+      return {
+        type: 'init.preview',
+        path: AGENT_INSTRUCTIONS_FILENAME,
+        content: generatedContent,
+        summary: `${AGENT_INSTRUCTIONS_FILENAME} preview generated. No files were changed.`,
+        detected,
+      };
+    }
+
+    const existing = await stat(absolutePath).catch(() => null);
+    if (existing && !existing.isFile()) {
+      throw new BadRequestException(`${AGENT_INSTRUCTIONS_FILENAME} exists but is not a file.`);
+    }
+
+    if (existing && !options.replace) {
+      const { content } = await this.readTextFilePrefix(absolutePath, AGENT_INSTRUCTIONS_MAX_BYTES);
+      return {
+        type: 'init.exists',
+        path: AGENT_INSTRUCTIONS_FILENAME,
+        content,
+        suggestedContent: generatedContent,
+        summary: `${AGENT_INSTRUCTIONS_FILENAME} already exists. Use /init --replace to overwrite it.`,
+        detected,
+      };
+    }
+
+    await writeFile(absolutePath, generatedContent, 'utf8');
+    const written = await stat(absolutePath);
+    const type = existing ? 'init.replaced' : 'init.created';
+    await this.audit.record({
+      actor: owner,
+      action: existing ? 'project.agent_instructions_replaced' : 'project.agent_instructions_created',
+      resourceType: 'project',
+      resourceId: project.id,
+      metadata: { path: AGENT_INSTRUCTIONS_FILENAME, size: written.size },
+    });
+
+    return {
+      type,
+      path: AGENT_INSTRUCTIONS_FILENAME,
+      content: generatedContent,
+      summary: existing
+        ? `${AGENT_INSTRUCTIONS_FILENAME} replaced.`
+        : `${AGENT_INSTRUCTIONS_FILENAME} created.`,
+      detected,
     };
   }
 
@@ -633,6 +747,231 @@ export class ProjectsService {
     }
 
     return workspacePath;
+  }
+
+  private async inspectProjectForAgentInstructions(projectRoot: string): Promise<AgentInstructionInitDetected> {
+    const entries = await readdir(projectRoot, { withFileTypes: true }).catch(() => []);
+    const visibleEntries = entries
+      .filter((entry) => !this.isHiddenOrBlocked(entry))
+      .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
+    const rootDirectories = visibleEntries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .slice(0, 20);
+    const rootFiles = visibleEntries
+      .filter((entry) => entry.isFile())
+      .map((entry) => entry.name)
+      .slice(0, 30);
+
+    const detected: AgentInstructionInitDetected = {
+      manifests: [],
+      commands: [],
+      stackHints: [],
+      rootFiles,
+      rootDirectories,
+    };
+    const scanDirectories = ['.', ...rootDirectories.slice(0, AGENT_INIT_SCAN_MAX_DIRECTORIES)];
+    for (const directory of scanDirectories) {
+      await this.inspectManifestDirectory(projectRoot, directory, detected);
+    }
+
+    return {
+      manifests: this.unique(detected.manifests),
+      commands: this.unique(detected.commands),
+      stackHints: this.unique(detected.stackHints),
+      rootFiles,
+      rootDirectories,
+    };
+  }
+
+  private async inspectManifestDirectory(
+    projectRoot: string,
+    directory: string,
+    detected: AgentInstructionInitDetected,
+  ): Promise<void> {
+    const directoryPath = directory === '.' ? projectRoot : join(projectRoot, directory);
+    const localEntries = await readdir(directoryPath, { withFileTypes: true }).catch(() => []);
+    const localNames = new Set(localEntries.map((entry) => entry.name));
+
+    if (localNames.has('package.json')) {
+      await this.inspectPackageJson(projectRoot, directory, detected);
+    }
+    if (localNames.has('pyproject.toml')) {
+      detected.manifests.push(this.relativeManifestPath(directory, 'pyproject.toml'));
+      detected.stackHints.push('Python');
+      const command = localNames.has('uv.lock') ? 'uv run pytest' : 'python -m pytest';
+      detected.commands.push(this.prefixDirectoryCommand(directory, command));
+    }
+    if (localNames.has('Cargo.toml')) {
+      detected.manifests.push(this.relativeManifestPath(directory, 'Cargo.toml'));
+      detected.stackHints.push('Rust');
+      detected.commands.push(this.prefixDirectoryCommand(directory, 'cargo test'));
+      detected.commands.push(this.prefixDirectoryCommand(directory, 'cargo build'));
+    }
+    if (localNames.has('go.mod')) {
+      detected.manifests.push(this.relativeManifestPath(directory, 'go.mod'));
+      detected.stackHints.push('Go');
+      detected.commands.push(this.prefixDirectoryCommand(directory, 'go test ./...'));
+    }
+    const readme = ['README.md', 'README.MD'].find((name) => localNames.has(name));
+    if (readme) {
+      detected.manifests.push(this.relativeManifestPath(directory, readme));
+    }
+    const makefile = ['Makefile', 'makefile'].find((name) => localNames.has(name));
+    if (makefile) {
+      detected.manifests.push(this.relativeManifestPath(directory, makefile));
+      const makefileContent = await this.readOptionalText(join(directoryPath, makefile), 64 * 1024);
+      if (/^test\s*:/m.test(makefileContent)) {
+        detected.commands.push(this.prefixDirectoryCommand(directory, 'make test'));
+      }
+      if (/^lint\s*:/m.test(makefileContent)) {
+        detected.commands.push(this.prefixDirectoryCommand(directory, 'make lint'));
+      }
+      if (/^build\s*:/m.test(makefileContent)) {
+        detected.commands.push(this.prefixDirectoryCommand(directory, 'make build'));
+      }
+    }
+  }
+
+  private async inspectPackageJson(
+    projectRoot: string,
+    directory: string,
+    detected: AgentInstructionInitDetected,
+  ): Promise<void> {
+    const packagePath = join(directory === '.' ? projectRoot : join(projectRoot, directory), 'package.json');
+    const content = await this.readOptionalText(packagePath, 256 * 1024);
+    if (!content) {
+      return;
+    }
+
+    detected.manifests.push(this.relativeManifestPath(directory, 'package.json'));
+    detected.stackHints.push('Node.js');
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(content) as Record<string, unknown>;
+    } catch {
+      return;
+    }
+
+    const scripts = parsed.scripts && typeof parsed.scripts === 'object'
+      ? (parsed.scripts as Record<string, unknown>)
+      : {};
+    const packageManager = await this.detectPackageManager(projectRoot, directory);
+    for (const scriptName of PACKAGE_SCRIPT_COMMANDS) {
+      if (typeof scripts[scriptName] === 'string') {
+        detected.commands.push(this.prefixDirectoryCommand(directory, `${packageManager} run ${scriptName}`));
+      }
+    }
+  }
+
+  private async detectPackageManager(projectRoot: string, directory: string): Promise<string> {
+    const directoryPath = directory === '.' ? projectRoot : join(projectRoot, directory);
+    const has = async (filename: string) => Boolean(await stat(join(directoryPath, filename)).catch(() => null));
+    if (await has('bun.lock') || await has('bun.lockb')) return 'bun';
+    if (await has('pnpm-lock.yaml')) return 'pnpm';
+    if (await has('yarn.lock')) return 'yarn';
+    return 'npm';
+  }
+
+  private renderAgentInstructions(project: Project, detected: AgentInstructionInitDetected): string {
+    const stackHints = detected.stackHints.length > 0 ? detected.stackHints.join(', ') : 'Not detected yet';
+    const manifests = detected.manifests.length > 0 ? detected.manifests.map((item) => `- ${item}`).join('\n') : '- None detected';
+    const commands = detected.commands.length > 0
+      ? detected.commands.map((command) => `- \`${command}\``).join('\n')
+      : '- Add the build, lint, test, and typecheck commands for this project.';
+    const directories = detected.rootDirectories.length > 0
+      ? detected.rootDirectories.map((item) => `- ${item}/`).join('\n')
+      : '- None detected';
+    const files = detected.rootFiles.length > 0
+      ? detected.rootFiles.slice(0, 12).map((item) => `- ${item}`).join('\n')
+      : '- None detected';
+
+    return [
+      '# AGENTS.md',
+      '',
+      'Project instructions for Mebius Code and other coding agents. Keep this file short, accurate, and updated when project conventions change.',
+      '',
+      '## Project Overview',
+      '',
+      `- Project: ${project.name}`,
+      `- Detected stack: ${stackHints}`,
+      '- Work from the repository root unless a command below includes `cd`.',
+      '',
+      '## Important Files',
+      '',
+      manifests,
+      '',
+      'Top-level directories:',
+      '',
+      directories,
+      '',
+      'Top-level files:',
+      '',
+      files,
+      '',
+      '## Commands',
+      '',
+      commands,
+      '',
+      '## Working Guidelines',
+      '',
+      '- Read the relevant files before editing.',
+      '- Keep changes scoped to the requested task.',
+      '- Follow existing naming, formatting, and module boundaries.',
+      '- Do not edit generated output, dependency directories, or secrets files.',
+      '- Prefer project scripts over ad hoc commands when validating work.',
+      '',
+      '## Verification',
+      '',
+      '- Run the smallest relevant check first.',
+      '- For broader changes, run lint/typecheck/test commands when available.',
+      '- If a verification command cannot run, report the command and the reason.',
+      '',
+    ].join('\n');
+  }
+
+  private relativeManifestPath(directory: string, filename: string): string {
+    return directory === '.' ? filename : `${directory}/${filename}`;
+  }
+
+  private prefixDirectoryCommand(directory: string, command: string): string {
+    if (directory === '.') {
+      return command;
+    }
+    return `cd ${this.shellPath(directory)} && ${command}`;
+  }
+
+  private shellPath(path: string): string {
+    return /^[A-Za-z0-9_./-]+$/.test(path) ? path : `"${path.replaceAll('"', '\\"')}"`;
+  }
+
+  private async readOptionalText(path: string, maxBytes: number): Promise<string> {
+    const info = await stat(path).catch(() => null);
+    if (!info?.isFile()) {
+      return '';
+    }
+    const { content } = await this.readTextFilePrefix(path, maxBytes);
+    return content;
+  }
+
+  private async readTextFilePrefix(path: string, maxBytes: number): Promise<{ content: string; truncated: boolean }> {
+    const handle = await open(path, 'r');
+    try {
+      const buffer = Buffer.alloc(maxBytes + 1);
+      const { bytesRead } = await handle.read(buffer, 0, maxBytes + 1, 0);
+      const size = Math.min(bytesRead, maxBytes);
+      return {
+        content: buffer.subarray(0, size).toString('utf8'),
+        truncated: bytesRead > maxBytes,
+      };
+    } finally {
+      await handle.close();
+    }
+  }
+
+  private unique(values: string[]): string[] {
+    return [...new Set(values.filter((value) => value.trim().length > 0))];
   }
 
   private async readTree(projectRoot: string, currentPath: string, depth: number): Promise<TreeNode[]> {

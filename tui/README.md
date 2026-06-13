@@ -42,6 +42,7 @@ Slash commands always use command handling, regardless of the active composer mo
 - `/new <title>`: create and switch to a new session, inheriting the current model.
 - `/clear`: clear the current chat and model context.
 - `/compact`: compact the current chat into model context.
+- `/init`: create an `AGENTS.md` project instruction file. Use `/init --preview` to preview without writing and `/init --replace` to overwrite an existing file.
 - `/plan <goal>`: create a plan.
 - `/plan-approve`: approve the latest plan.
 - `/approve`: approve the active tool request.
