@@ -388,6 +388,8 @@ const HIGH_LEVEL_EVENT_TYPES = new Set([
   'error',
   'done',
 ]);
+const MCP_TOOL_EVENT_TYPES = new Set(['tool_call_requested', 'tool_call_result']);
+const MCP_TOOL_DISPLAY_LIMIT = 10;
 const RUNNING_AGENT_STATUSES = new Set([
   'thinking',
   'responding',
@@ -2091,10 +2093,11 @@ export function App(props: AppProps) {
     }
     if (value === '/mcp' || value.startsWith('/mcp ')) {
       const result = await current.api.runSessionCommand(current.session.id, value);
+      const event = { type: 'command_result', data: result as Record<string, unknown>, time: new Date().toLocaleTimeString() };
       setState((prev) => ({
         ...prev,
-        events: [{ type: 'command_result', data: result as Record<string, unknown>, time: new Date().toLocaleTimeString() }, ...prev.events].slice(0, 100),
-        activity: 'MCP command completed',
+        events: [event, ...prev.events].slice(0, 100),
+        activity: formatMcpCommandActivity(event.data),
       }));
       return;
     }
@@ -4226,7 +4229,7 @@ function estimateContextTokens(messages: Message[]): number {
 }
 
 function isHighLevelEvent(event: StatusEvent): boolean {
-  return HIGH_LEVEL_EVENT_TYPES.has(event.type);
+  return HIGH_LEVEL_EVENT_TYPES.has(event.type) || isMcpCommandResult(event) || isMcpToolEvent(event);
 }
 
 function isErrorEvent(event: StatusEvent | undefined): boolean {
@@ -4246,6 +4249,13 @@ function statusColor(status: TaskStatus, theme: TuiTheme): string {
 
 function eventColor(event: StatusEvent, theme: TuiTheme): string {
   if (isErrorEvent(event)) return theme.red;
+  if (isMcpToolEvent(event)) {
+    const status = eventString(event, 'status');
+    if (status === 'failed' || status === 'rejected') return theme.red;
+    if (status === 'succeeded') return theme.green;
+    return theme.yellow;
+  }
+  if (isMcpCommandResult(event)) return theme.green;
   if (event.type === 'done' || event.type === 'model_call_completed') return theme.green;
   if (event.type === 'plan_updated') {
     const status = eventString(event, 'status');
@@ -4263,6 +4273,12 @@ function eventColor(event: StatusEvent, theme: TuiTheme): string {
 }
 
 function formatEvent(event: StatusEvent): string {
+  if (isMcpCommandResult(event)) {
+    return formatMcpCommandResult(event.data);
+  }
+  if (isMcpToolEvent(event)) {
+    return formatMcpToolEvent(event);
+  }
   if (event.type === 'agent_status') {
     return eventSummary(event, eventString(event, 'status'), eventString(event, 'activity'), eventString(event, 'message'));
   }
@@ -4302,6 +4318,117 @@ function eventSummary(event: StatusEvent, ...parts: Array<string | undefined>): 
 function eventString(event: StatusEvent, key: string): string | undefined {
   const value = event.data[key];
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function isMcpCommandResult(event: StatusEvent): boolean {
+  return event.type === 'command_result' && stringFromRecord(event.data, 'type')?.startsWith('mcp.') === true;
+}
+
+function isMcpToolEvent(event: StatusEvent): boolean {
+  return MCP_TOOL_EVENT_TYPES.has(event.type) && Boolean(eventString(event, 'server') && eventString(event, 'mcpTool'));
+}
+
+function formatMcpToolEvent(event: StatusEvent): string {
+  const server = eventString(event, 'server') ?? 'mcp';
+  const tool = eventString(event, 'mcpTool') ?? eventString(event, 'name') ?? 'tool';
+  if (event.type === 'tool_call_requested') {
+    return `MCP ${server}: ${tool} - waiting for approval`;
+  }
+  const status = eventString(event, 'status') ?? eventString(event, 'activity') ?? 'completed';
+  return `MCP ${server}: ${tool} - ${status}`;
+}
+
+function formatMcpCommandActivity(data: Record<string, unknown>): string {
+  const type = stringFromRecord(data, 'type');
+  if (type === 'mcp.tools') {
+    const server = recordFromRecord(data, 'server');
+    const tools = arrayFromRecord(data, 'tools') ?? [];
+    return `MCP tools: ${mcpServerLabel(server)} (${tools.length})`;
+  }
+  if (type === 'mcp.list') {
+    const servers = arrayFromRecord(data, 'servers') ?? [];
+    return `MCP servers: ${servers.length}`;
+  }
+  if (type === 'mcp.connected') return `MCP connected: ${mcpServerLabel(recordFromRecord(data, 'server'))}`;
+  if (type === 'mcp.enabled') return `MCP enabled: ${mcpServerLabel(recordFromRecord(data, 'server'))}`;
+  if (type === 'mcp.disabled') return `MCP disabled: ${mcpServerLabel(recordFromRecord(data, 'server'))}`;
+  if (type === 'mcp.removed') return `MCP removed: ${stringFromRecord(data, 'slug') ?? '-'}`;
+  return 'MCP command completed';
+}
+
+function formatMcpCommandResult(data: Record<string, unknown>): string {
+  const type = stringFromRecord(data, 'type');
+  if (type === 'mcp.list') {
+    const servers = arrayFromRecord(data, 'servers') ?? [];
+    if (servers.length === 0) return 'MCP servers: none';
+    const summary = servers
+      .map((server) => {
+        const value = recordFromValue(server);
+        const state = booleanFromRecord(value, 'enabled') === false ? 'disabled' : 'enabled';
+        return `${mcpServerLabel(value)} ${state}`;
+      })
+      .join(', ');
+    return `MCP servers: ${servers.length} - ${summary}`;
+  }
+  if (type === 'mcp.connected' || type === 'mcp.enabled' || type === 'mcp.disabled') {
+    const server = recordFromRecord(data, 'server');
+    const state = type.slice('mcp.'.length);
+    return [`MCP ${state}: ${mcpServerLabel(server)}`, mcpServerUrl(server), mcpServerHeaders(server)].filter(Boolean).join(' - ');
+  }
+  if (type === 'mcp.removed') {
+    return `MCP removed: ${stringFromRecord(data, 'slug') ?? '-'}`;
+  }
+  if (type === 'mcp.tools') {
+    const server = recordFromRecord(data, 'server');
+    const tools = arrayFromRecord(data, 'tools') ?? [];
+    const names = tools
+      .map((tool) => recordFromValue(tool))
+      .map((tool) => stringFromRecord(tool, 'exposedName') ?? stringFromRecord(tool, 'name'))
+      .filter((name): name is string => Boolean(name))
+      .slice(0, MCP_TOOL_DISPLAY_LIMIT);
+    const more = tools.length > names.length ? `\n... ${tools.length - names.length} more` : '';
+    return names.length > 0
+      ? `MCP tools: ${mcpServerLabel(server)} - ${tools.length} tools\n${names.join('\n')}${more}`
+      : `MCP tools: ${mcpServerLabel(server)} - none`;
+  }
+  return formatMcpCommandActivity(data);
+}
+
+function mcpServerLabel(server: Record<string, unknown> | undefined): string {
+  return stringFromRecord(server, 'slug') ?? stringFromRecord(server, 'name') ?? '-';
+}
+
+function mcpServerUrl(server: Record<string, unknown> | undefined): string | undefined {
+  return stringFromRecord(server, 'url');
+}
+
+function mcpServerHeaders(server: Record<string, unknown> | undefined): string | undefined {
+  const headers = arrayFromRecord(server, 'headerNames')?.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+  return headers && headers.length > 0 ? `headers: ${headers.join(', ')}` : undefined;
+}
+
+function recordFromRecord(source: Record<string, unknown> | undefined, key: string): Record<string, unknown> | undefined {
+  if (!source) return undefined;
+  return recordFromValue(source[key]);
+}
+
+function recordFromValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+function arrayFromRecord(source: Record<string, unknown> | undefined, key: string): unknown[] | undefined {
+  const value = source?.[key];
+  return Array.isArray(value) ? value : undefined;
+}
+
+function stringFromRecord(source: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = source?.[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function booleanFromRecord(source: Record<string, unknown> | undefined, key: string): boolean | undefined {
+  const value = source?.[key];
+  return typeof value === 'boolean' ? value : undefined;
 }
 
 function shortId(value: string): string {

@@ -75,7 +75,11 @@ describe('McpService', () => {
   it('discovers enabled MCP tools from an SSE JSON-RPC response', async () => {
     configs.find.mockResolvedValueOnce([serverFixture({ slug: 'context7' })]);
     fetchMock
-      .mockResolvedValueOnce(jsonResponse({ jsonrpc: '2.0', id: 'init', result: {} }))
+      .mockResolvedValueOnce(
+        jsonResponse({ jsonrpc: '2.0', id: 'init', result: {} }, 200, {
+          'mcp-session-id': 'ctx-session-1',
+        }),
+      )
       .mockResolvedValueOnce(textResponse(''))
       .mockResolvedValueOnce(
         textResponse(
@@ -107,8 +111,14 @@ describe('McpService', () => {
       );
 
     const specs = await service.enabledToolSpecs(owner);
+    const initHeaders = fetchMock.mock.calls[0]?.[1]?.headers as Record<string, string>;
+    const initializedHeaders = fetchMock.mock.calls[1]?.[1]?.headers as Record<string, string>;
+    const toolsHeaders = fetchMock.mock.calls[2]?.[1]?.headers as Record<string, string>;
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(initHeaders).not.toHaveProperty('Mcp-Session-Id');
+    expect(initializedHeaders).toMatchObject({ 'Mcp-Session-Id': 'ctx-session-1' });
+    expect(toolsHeaders).toMatchObject({ 'Mcp-Session-Id': 'ctx-session-1' });
     expect(specs).toEqual([
       expect.objectContaining({
         type: 'function',
@@ -209,18 +219,28 @@ function serverFixture(input: Partial<McpServerConfig> = {}): McpServerConfig {
   } as McpServerConfig;
 }
 
-function jsonResponse(payload: unknown, status = 200): Response {
-  return response(JSON.stringify(payload), status);
+function jsonResponse(
+  payload: unknown,
+  status = 200,
+  headers: Record<string, string> = {},
+): Response {
+  return response(JSON.stringify(payload), status, headers);
 }
 
-function textResponse(text: string, status = 200): Response {
-  return response(text, status);
+function textResponse(text: string, status = 200, headers: Record<string, string> = {}): Response {
+  return response(text, status, headers);
 }
 
-function response(text: string, status = 200): Response {
+function response(text: string, status = 200, headers: Record<string, string> = {}): Response {
+  const normalizedHeaders = Object.fromEntries(
+    Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value]),
+  );
   return {
     ok: status >= 200 && status < 300,
     status,
+    headers: {
+      get: jest.fn((name: string) => normalizedHeaders[name.toLowerCase()] ?? null),
+    },
     text: jest.fn().mockResolvedValue(text),
   } as unknown as Response;
 }

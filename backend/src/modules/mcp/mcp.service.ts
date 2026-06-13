@@ -53,6 +53,7 @@ const READ_ONLY_CONTEXT7_TOOLS = new Set(['resolve-library-id', 'query-docs', 'g
 @Injectable()
 export class McpService {
   private readonly toolCache = new Map<string, { expiresAt: number; tools: McpTool[] }>();
+  private readonly sessionIds = new Map<string, string>();
 
   constructor(
     @InjectRepository(McpServerConfig)
@@ -231,7 +232,11 @@ export class McpService {
           ? this.encryption.encrypt(JSON.stringify(input.headers))
           : null,
     };
-    return this.configs.save(this.configs.create(existing ? { ...existing, ...values } : values));
+    const saved = await this.configs.save(
+      this.configs.create(existing ? { ...existing, ...values } : values),
+    );
+    if (existing?.id) this.clearRuntimeState(existing.id);
+    return saved;
   }
 
   private async ensureContext7(owner: User, apiKey?: string): Promise<McpServerConfig> {
@@ -248,7 +253,7 @@ export class McpService {
   private async remove(ownerId: string, slug: string): Promise<void> {
     const server = await this.findOwned(ownerId, slug);
     await this.configs.remove(server);
-    this.toolCache.delete(server.id);
+    this.clearRuntimeState(server.id);
   }
 
   private async setEnabled(
@@ -258,7 +263,9 @@ export class McpService {
   ): Promise<McpServerConfig> {
     const server = await this.findOwned(ownerId, slug);
     server.enabled = enabled;
-    return this.configs.save(server);
+    const saved = await this.configs.save(server);
+    this.clearRuntimeState(server.id);
+    return saved;
   }
 
   private async findOwned(ownerId: string, slug: string): Promise<McpServerConfig> {
@@ -309,6 +316,7 @@ export class McpService {
           Accept: 'application/json, text/event-stream',
           'Content-Type': 'application/json',
           ...this.decryptHeaders(server),
+          ...this.sessionHeaders(server, method),
         },
         body,
         signal: controller.signal,
@@ -321,6 +329,7 @@ export class McpService {
       if (!response.ok) {
         throw new BadGatewayException(this.providerErrorMessage(response.status, text));
       }
+      this.rememberSessionId(server, response);
       if (notification) return null;
       const payload = this.parseMcpResponse(text);
       if (payload.error) throw new BadGatewayException(payload.error);
@@ -328,6 +337,23 @@ export class McpService {
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  private clearRuntimeState(serverId: string): void {
+    this.toolCache.delete(serverId);
+    this.sessionIds.delete(serverId);
+  }
+
+  private sessionHeaders(server: McpServerConfig, method: string): Record<string, string> {
+    if (method === 'initialize') return {};
+    const sessionId = this.sessionIds.get(server.id);
+    return sessionId ? { 'Mcp-Session-Id': sessionId } : {};
+  }
+
+  private rememberSessionId(server: McpServerConfig, response: Response): void {
+    const headers = response.headers as Headers | undefined;
+    const sessionId = headers?.get?.('mcp-session-id')?.trim();
+    if (sessionId) this.sessionIds.set(server.id, sessionId);
   }
 
   private parseMcpResponse(body: string): { result?: unknown; error?: string } {
