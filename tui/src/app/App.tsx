@@ -2586,6 +2586,7 @@ export function App(props: AppProps) {
     }
     const approved = plan.plan.status === 'approved' ? plan.plan : await state().api.approvePlan(plan.plan.id);
     setDismissedPlanDecisionId(plan.plan.id);
+    setComposerMode('build'); // Switch to build mode after approving plan
     setState((prev) => ({
       ...prev,
       plan: { ...plan, plan: approved },
