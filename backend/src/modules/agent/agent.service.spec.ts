@@ -344,6 +344,73 @@ describe('AgentService', () => {
     }
   });
 
+  it('turns prompt-only clarification questions into custom-answer questions', async () => {
+    llm.chat.mockResolvedValueOnce({
+      content: JSON.stringify({
+        summary: 'Build an archery game.',
+        markdown: '# Plan\n\nBuild an archery game.',
+        steps: [{ title: 'Choose the interface', detail: 'Clarify terminal or graphical UI.' }],
+        questions: [
+          {
+            id: 'interface',
+            title: 'Interface style',
+            prompt: 'Which interface should the game use?',
+            choices: [],
+            notes: 'Terminal mode changes the implementation.',
+          },
+        ],
+      }),
+    });
+
+    const result = await service.createPlan(owner, session.id, {
+      goal: 'Build an archery game',
+    });
+
+    expect(result.plan.questions).toEqual([
+      expect.objectContaining({
+        id: 'interface',
+        allowCustomAnswer: true,
+        choices: [],
+      }),
+    ]);
+    expect(result.plan.status).toBe(PlanStatus.PlanCustomizing);
+  });
+
+  it('extracts inline clarification choices from prompt text', async () => {
+    llm.chat.mockResolvedValueOnce({
+      content: JSON.stringify({
+        summary: 'Build an archery game.',
+        markdown: '# Plan\n\nBuild an archery game.',
+        steps: [{ title: 'Choose the game library', detail: 'Clarify library preference.' }],
+        questions: [
+          {
+            id: 'library',
+            title: '选择游戏库',
+            prompt:
+              '您希望使用哪个Python游戏库来开发？Pygame最通用但较重， Pyxel简洁复古， Arcade易上手， Kivy可跨平台但更适合应用。',
+          },
+        ],
+      }),
+    });
+
+    const result = await service.createPlan(owner, session.id, {
+      goal: 'Build an archery game',
+    });
+
+    expect(result.plan.questions[0]).toEqual(
+      expect.objectContaining({
+        id: 'library',
+        choices: [
+          expect.objectContaining({ id: 'pygame', label: 'Pygame' }),
+          expect.objectContaining({ id: 'pyxel', label: 'Pyxel' }),
+          expect.objectContaining({ id: 'arcade', label: 'Arcade' }),
+          expect.objectContaining({ id: 'kivy', label: 'Kivy' }),
+        ],
+        required: true,
+      }),
+    );
+  });
+
   it('cancels an owned plan and publishes a plan update', async () => {
     const plan = planFixture({ id: 'plan-1', status: PlanStatus.PlanReadyPendingApproval });
     plans.findOne.mockResolvedValueOnce(plan);
@@ -358,6 +425,90 @@ describe('AgentService', () => {
       planId: plan.id,
       status: PlanStatus.Cancelled,
     });
+  });
+
+  it('rejects cancelling an approved plan', async () => {
+    const plan = planFixture({ id: 'plan-1', status: PlanStatus.Approved });
+    plans.findOne.mockResolvedValueOnce(plan);
+
+    await expect(service.cancelPlan(owner, plan.id)).rejects.toThrow('cannot be cancelled');
+
+    expect(plans.save).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid clarification choices', async () => {
+    const plan = planFixture({
+      id: 'plan-1',
+      status: PlanStatus.PlanCustomizing,
+      questions: [
+        {
+          id: 'interface',
+          title: 'Interface style',
+          prompt: 'Which interface should the game use?',
+          choices: [{ id: 'pygame', label: 'Pygame' }],
+          allowCustomAnswer: false,
+          required: true,
+        },
+      ],
+    });
+    plans.findOne.mockResolvedValueOnce(plan);
+
+    await expect(
+      service.updatePlanAnswers(owner, plan.id, {
+        answers: [{ questionId: 'interface', choiceId: 'terminal' }],
+      }),
+    ).rejects.toThrow('Invalid choice');
+
+    expect(plans.save).not.toHaveBeenCalled();
+  });
+
+  it('rejects saving an empty required clarification answer', async () => {
+    const plan = planFixture({
+      id: 'plan-1',
+      status: PlanStatus.PlanCustomizing,
+      questions: [
+        {
+          id: 'phase',
+          title: 'Current phase',
+          prompt: 'What phase is the project in right now?',
+          choices: [],
+          allowCustomAnswer: true,
+          required: true,
+        },
+      ],
+    });
+    plans.findOne.mockResolvedValueOnce(plan);
+
+    await expect(
+      service.updatePlanAnswers(owner, plan.id, {
+        answers: [{ questionId: 'phase', notes: 'Need to clarify what to continue.' }],
+      }),
+    ).rejects.toThrow('Required plan question is unanswered');
+
+    expect(plans.save).not.toHaveBeenCalled();
+  });
+
+  it('rejects finalizing when a required clarification is unanswered', async () => {
+    const plan = planFixture({
+      id: 'plan-1',
+      status: PlanStatus.PlanCustomizing,
+      questions: [
+        {
+          id: 'interface',
+          title: 'Interface style',
+          prompt: 'Which interface should the game use?',
+          choices: [{ id: 'pygame', label: 'Pygame' }],
+          allowCustomAnswer: false,
+          required: true,
+        },
+      ],
+      answers: [],
+    });
+    plans.findOne.mockResolvedValueOnce(plan);
+
+    await expect(service.finalizePlan(owner, plan.id)).rejects.toThrow('Required plan question is unanswered');
+
+    expect(llm.chat).not.toHaveBeenCalled();
   });
 
   it('runs an approved plan without mutating plan lifecycle status', async () => {
@@ -450,8 +601,7 @@ describe('AgentService', () => {
         }),
       ]),
     );
-    expect(sessions.addMessage).toHaveBeenNthCalledWith(
-      2,
+    expect(sessions.addMessage).toHaveBeenCalledWith(
       session,
       'tool',
       'README.md\nsrc/main.ts',
@@ -783,6 +933,125 @@ describe('AgentService', () => {
     expect(result.toolCalls).toHaveLength(1);
   });
 
+  it('auto-continues after each configured tool-turn segment', async () => {
+    for (let index = 0; index < 5; index += 1) {
+      llm.streamChat.mockResolvedValueOnce({
+        content: '',
+        tool_calls: [
+          {
+            id: `call-list-${index}`,
+            type: 'function',
+            function: { name: 'list_files', arguments: '{"path":"."}' },
+          },
+        ],
+      });
+    }
+    llm.streamChat.mockResolvedValueOnce({ content: 'Finished after inspecting the project.' });
+    tools.requestOrExecute.mockImplementation(async (input) =>
+      toolCallFixture({
+        id: `tool-${tools.requestOrExecute.mock.calls.length}`,
+        name: input.name,
+        status: ToolCallStatus.Succeeded,
+        resultText: '[]',
+      }),
+    );
+
+    const result = await service.run(owner, session.id, { message: 'Inspect thoroughly' });
+
+    expect(llm.streamChat).toHaveBeenCalledTimes(6);
+    expect(tools.requestOrExecute).toHaveBeenCalledTimes(5);
+    expect(events.publish).toHaveBeenCalledWith(
+      session.id,
+      'agent_status',
+      expect.objectContaining({
+        status: 'using_tools',
+        activity: 'auto_continue',
+        completedToolTurns: 4,
+      }),
+    );
+    expect(result.assistant).toEqual(
+      expect.objectContaining({ content: 'Finished after inspecting the project.' }),
+    );
+  });
+
+  it('stops with needs_continuation after the hard auto-continue limit', async () => {
+    for (let index = 0; index < 17; index += 1) {
+      llm.streamChat.mockResolvedValueOnce({
+        content: '',
+        tool_calls: [
+          {
+            id: `call-list-${index}`,
+            type: 'function',
+            function: { name: 'list_files', arguments: '{"path":"."}' },
+          },
+        ],
+      });
+    }
+    tools.requestOrExecute.mockImplementation(async (input) =>
+      toolCallFixture({
+        id: `tool-${tools.requestOrExecute.mock.calls.length}`,
+        name: input.name,
+        status: ToolCallStatus.Succeeded,
+        resultText: '[]',
+      }),
+    );
+
+    const result = await service.run(owner, session.id, { message: 'Keep inspecting' });
+
+    expect(llm.streamChat).toHaveBeenCalledTimes(17);
+    expect(tools.requestOrExecute).toHaveBeenCalledTimes(16);
+    expect(events.publish).toHaveBeenCalledWith(
+      session.id,
+      'agent_status',
+      expect.objectContaining({
+        status: 'needs_continuation',
+        completedToolTurns: 16,
+        maxToolTurns: 16,
+      }),
+    );
+    expect(events.publish).not.toHaveBeenCalledWith(session.id, 'agent_status', { status: 'completed' });
+    expect(result.assistant?.content).toContain('Ask me to continue');
+  });
+
+  it('persists empty assistant tool turns as hidden recoverable history', async () => {
+    llm.streamChat
+      .mockResolvedValueOnce({
+        content: '',
+        reasoning_content: 'Need repository structure first.',
+        tool_calls: [
+          {
+            id: 'call-list-hidden',
+            type: 'function',
+            function: { name: 'list_files', arguments: '{"path":"."}' },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ content: 'I found the project files.' });
+    tools.requestOrExecute.mockResolvedValue(
+      toolCallFixture({
+        id: 'tool-list-hidden',
+        name: 'list_files',
+        status: ToolCallStatus.Succeeded,
+        resultText: '["README.md"]',
+      }),
+    );
+
+    await service.run(owner, session.id, { message: 'Inspect files' });
+
+    expect(sessions.addMessage).toHaveBeenCalledWith(
+      session,
+      'assistant',
+      '',
+      expect.objectContaining({
+        kind: 'assistant_tool_turn',
+        hidden: true,
+        reasoningContent: 'Need repository structure first.',
+        toolCalls: expect.arrayContaining([expect.objectContaining({ id: 'call-list-hidden' })]),
+      }),
+      expect.objectContaining({ kind: AgentTurnKind.Chat }),
+    );
+  });
+
   it('resumes the model turn after an approved tool call', async () => {
     sessions.listMessages.mockResolvedValue([
       userMessage,
@@ -1001,6 +1270,52 @@ describe('AgentService', () => {
     );
   });
 
+  it('reuses hidden assistant tool turns when rebuilding history for a later run', async () => {
+    sessions.listMessages.mockResolvedValue([
+      userMessage,
+      messageFixture('message-hidden-tool-turn', MessageRole.Assistant, '', {
+        kind: 'assistant_tool_turn',
+        hidden: true,
+        reasoningContent: 'Need repository structure first.',
+        toolCalls: [
+          {
+            id: 'call-hidden-list',
+            type: 'function',
+            function: { name: 'list_files', arguments: '{"path":"."}' },
+          },
+        ],
+      }),
+      messageFixture('message-hidden-tool-result', MessageRole.Tool, '["README.md"]', {
+        kind: 'tool_result',
+        toolCallId: 'call-hidden-list',
+        toolName: 'list_files',
+        status: ToolCallStatus.Succeeded,
+      }),
+      messageFixture('message-follow-up', MessageRole.User, 'Summarize it.'),
+    ]);
+    llm.streamChat.mockResolvedValueOnce({
+      content: 'The workspace contains a README.',
+    });
+
+    await service.run(owner, session.id, { message: 'Summarize it.' });
+
+    expect(llm.streamChat.mock.calls[0][0].messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'assistant',
+          content: '',
+          reasoning_content: 'Need repository structure first.',
+          tool_calls: expect.arrayContaining([expect.objectContaining({ id: 'call-hidden-list' })]),
+        }),
+        expect.objectContaining({
+          role: 'tool',
+          tool_call_id: 'call-hidden-list',
+          content: '["README.md"]',
+        }),
+      ]),
+    );
+  });
+
   it('downgrades orphaned assistant tool calls to plain assistant history', async () => {
     sessions.listMessages.mockResolvedValue([
       userMessage,
@@ -1074,6 +1389,8 @@ function planFixture(input: {
   status: PlanStatus;
   goal?: string;
   summary?: string;
+  questions?: Plan['questions'];
+  answers?: Plan['answers'];
 }): Plan {
   return {
     id: input.id,
@@ -1083,8 +1400,8 @@ function planFixture(input: {
     summary: input.summary ?? 'Fix the Plan Mode approval flow.',
     draftMarkdown: '# Plan\n\nFix the Plan Mode approval flow.',
     finalMarkdown: null,
-    questions: [],
-    answers: [],
+    questions: input.questions ?? [],
+    answers: input.answers ?? [],
     clientRequestId: null,
     createdAt: new Date('2026-06-02T00:00:00.000Z'),
     updatedAt: new Date('2026-06-02T00:00:00.000Z'),

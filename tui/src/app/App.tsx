@@ -60,6 +60,7 @@ import {
   PlanReadyPanel,
   PlanReviewPanel,
   type PlanDecisionChoice,
+  type PlanQuestionFocusTarget,
 } from './PlanApprovalPanel';
 import { getTuiTheme, resolveTuiThemeName, tuiThemeList, type TuiTheme } from './theme';
 
@@ -117,6 +118,11 @@ type ComposerMode = 'build' | 'plan';
 interface ActiveModelInfo {
   modelName: string;
   providerDisplay: string;
+}
+
+interface PlanQuestionFocusRow {
+  target: PlanQuestionFocusTarget;
+  choiceIndex?: number;
 }
 
 interface CommandPaletteState {
@@ -427,12 +433,13 @@ const RUNNING_AGENT_STATUSES = new Set([
 ]);
 const COMPLETED_AGENT_STATUSES = new Set(['completed']);
 const ERROR_AGENT_STATUSES = new Set(['failed', 'error']);
+const NEEDS_CONTINUATION_AGENT_STATUSES = new Set(['needs_continuation']);
 const MIN_SESSION_TITLE_LENGTH = 2;
 const MAX_SESSION_TITLE_LENGTH = 120;
 const SESSION_WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const SESSION_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-type TaskStatus = 'idle' | 'running' | 'completed' | 'error' | 'awaiting_plan_decision';
+type TaskStatus = 'idle' | 'running' | 'completed' | 'error' | 'awaiting_plan_decision' | 'needs_continuation';
 type StatusEvent = WorkspaceState['events'][number];
 type PlanWorkflowMode = 'ready' | 'question' | 'review';
 type PlanWorkflow = { mode: PlanWorkflowMode; plan: PlanBundle };
@@ -458,7 +465,10 @@ export function App(props: AppProps) {
   const [dismissedPlanDecisionId, setDismissedPlanDecisionId] = createSignal<string | null>(null);
   const [planQuestionIndex, setPlanQuestionIndex] = createSignal(0);
   const [planQuestionSelectedIndex, setPlanQuestionSelectedIndex] = createSignal(0);
+  const [planQuestionFocusTarget, setPlanQuestionFocusTarget] = createSignal<PlanQuestionFocusTarget>('choices');
   const [planQuestionCustomAnswer, setPlanQuestionCustomAnswer] = createSignal('');
+  const [planQuestionNotes, setPlanQuestionNotes] = createSignal('');
+  const [planQuestionError, setPlanQuestionError] = createSignal('');
   const [themePalette, setThemePalette] = createSignal<ThemePaletteState | null>(null);
   const [permissionPalette, setPermissionPalette] = createSignal<PermissionPaletteState | null>(null);
   const [sessionPalette, setSessionPalette] = createSignal<SessionPaletteState | null>(null);
@@ -592,8 +602,11 @@ export function App(props: AppProps) {
     const preferredId =
       answer?.choiceId ?? answer?.choiceIds?.[0] ?? question.recommendedChoiceId ?? choices[0]?.id;
     const preferredIndex = preferredId ? choices.findIndex((choice) => choice.id === preferredId) : -1;
-    setPlanQuestionSelectedIndex(preferredIndex >= 0 ? preferredIndex : question.allowCustomAnswer ? choices.length : 0);
+    setPlanQuestionSelectedIndex(preferredIndex >= 0 ? preferredIndex : isCustomQuestionEnabled(question) ? choices.length : 0);
+    setPlanQuestionFocusTarget(resolveInitialQuestionFocus(question));
     setPlanQuestionCustomAnswer(answer?.customAnswer ?? '');
+    setPlanQuestionNotes(answer?.notes ?? '');
+    setPlanQuestionError('');
   });
 
   createEffect(() => {
@@ -1159,9 +1172,16 @@ export function App(props: AppProps) {
     const name = event.name.toLowerCase();
     const question = currentPlanQuestion();
     if (!question) return false;
-    const customIndex = question.choices.length;
-    const customSelected = question.allowCustomAnswer && planQuestionSelectedIndex() === customIndex;
+    const textInputFocused = planQuestionFocusTarget() === 'custom' || planQuestionFocusTarget() === 'notes';
 
+    if (name === 'tab') {
+      if (event.shift) {
+        focusPlanQuestionAnswer(question);
+      } else {
+        focusPlanQuestionNotes(question);
+      }
+      return true;
+    }
     if (name === 'up' || name === 'arrowup') {
       movePlanQuestionSelection(-1);
       return true;
@@ -1182,7 +1202,7 @@ export function App(props: AppProps) {
       void cancelPendingPlanDecision();
       return true;
     }
-    return !customSelected;
+    return !textInputFocused;
   }
 
   function handlePlanReviewKeyDown(event: KeyEvent): boolean {
@@ -1221,14 +1241,16 @@ export function App(props: AppProps) {
   function movePlanQuestionSelection(delta: number) {
     const question = currentPlanQuestion();
     if (!question) return;
-    const optionCount = question.choices.length + (question.allowCustomAnswer ? 1 : 0);
-    if (optionCount <= 0) return;
-    setPlanQuestionSelectedIndex((current) => moveIndex(current, delta, optionCount));
+    const rows = planQuestionFocusRows(question);
+    if (rows.length === 0) return;
+    const currentIndex = planQuestionFocusRowIndex(question, planQuestionFocusTarget(), planQuestionSelectedIndex());
+    focusPlanQuestionRow(rows[moveIndex(currentIndex, delta, rows.length)], question);
   }
 
   function toggleSelectedPlanQuestionChoice() {
     const question = currentPlanQuestion();
     if (!question) return;
+    if (planQuestionFocusTarget() !== 'choices') return;
     const choice = question.choices[planQuestionSelectedIndex()];
     if (!choice) return;
     togglePlanQuestionChoice(question, choice.id);
@@ -1247,10 +1269,43 @@ export function App(props: AppProps) {
         : [choiceId];
       const answers = mergePlanAnswer(
         planAnswers(plan),
-        buildPlanQuestionAnswer(question, question.multiSelect ? undefined : choiceId, planQuestionCustomAnswer(), nextIds),
+        buildPlanQuestionAnswer(
+          question,
+          question.multiSelect ? undefined : choiceId,
+          planQuestionCustomAnswer(),
+          nextIds,
+          planQuestionNotes(),
+        ),
       );
       return { ...prev, plan: { ...plan, answers, plan: { ...plan.plan, answers } } };
     });
+  }
+
+  function focusPlanQuestionRow(row: PlanQuestionFocusRow, question: PlanQuestion) {
+    setPlanQuestionFocusTarget(row.target);
+    if (row.target === 'choices') {
+      setPlanQuestionSelectedIndex(Math.max(0, row.choiceIndex ?? 0));
+      return;
+    }
+    if (row.target === 'custom') {
+      setPlanQuestionSelectedIndex(Math.max(0, question.choices.length));
+    }
+  }
+
+  function focusPlanQuestionNotes(question: PlanQuestion) {
+    const rows = planQuestionFocusRows(question);
+    const row = rows.find((item) => item.target === 'notes') ?? rows[rows.length - 1];
+    if (row) focusPlanQuestionRow(row, question);
+  }
+
+  function focusPlanQuestionAnswer(question: PlanQuestion) {
+    const rows = planQuestionFocusRows(question);
+    const row =
+      rows.find((item) => item.target === 'choices' && item.choiceIndex === Math.min(planQuestionSelectedIndex(), question.choices.length - 1)) ??
+      rows.find((item) => item.target === 'choices') ??
+      rows.find((item) => item.target === 'custom') ??
+      rows[0];
+    if (row) focusPlanQuestionRow(row, question);
   }
 
   function selectedPlanQuestionChoiceId(): string | undefined {
@@ -1263,6 +1318,7 @@ export function App(props: AppProps) {
     const answer = currentPlanAnswers().find((item) => item.questionId === question.id);
     if (answer?.choiceIds?.length) return answer.choiceIds;
     if (answer?.choiceId) return [answer.choiceId];
+    if (planQuestionFocusTarget() === 'custom') return [];
     const selectedId = selectedPlanQuestionChoiceId();
     return selectedId ? [selectedId] : [];
   }
@@ -1351,25 +1407,35 @@ export function App(props: AppProps) {
     const workflow = activePlanWorkflow();
     const question = currentPlanQuestion();
     if (workflow?.mode !== 'question' || !question) return;
-    await runInlinePlanDecisionAction(async () => {
-      const answer = buildPlanQuestionAnswer(
-        question,
-        question.multiSelect ? undefined : selectedPlanQuestionChoiceId(),
-        planQuestionCustomAnswer(),
-        question.multiSelect ? selectedPlanQuestionChoiceIds(question) : undefined,
-      );
-      const mergedAnswers = mergePlanAnswer(planAnswers(workflow.plan), answer);
-      const updated = await state().api.updatePlanAnswers(workflow.plan.plan.id, mergedAnswers);
-      const nextIndex = planQuestionIndex() + 1;
-      if (nextIndex < planQuestions(updated).length) {
-        setPlanQuestionIndex(nextIndex);
-        setState((prev) => ({ ...prev, plan: updated, activity: 'Answer saved', error: '' }));
-        return;
-      }
-      const finalized = await state().api.finalizePlan(workflow.plan.plan.id);
-      setPlanQuestionIndex(0);
-      setState((prev) => ({ ...prev, plan: finalized, activity: 'Plan review ready', error: '' }));
-    });
+    const answer = buildPlanQuestionAnswer(
+      question,
+      question.multiSelect || planQuestionFocusTarget() === 'custom' ? undefined : selectedPlanQuestionChoiceId(),
+      planQuestionCustomAnswer(),
+      question.multiSelect ? selectedPlanQuestionChoiceIds(question) : undefined,
+      planQuestionNotes(),
+    );
+    const validationError = planQuestionAnswerError(question, answer);
+    if (validationError) {
+      setPlanQuestionError(validationError);
+      return;
+    }
+    setPlanQuestionError('');
+    await runInlinePlanDecisionAction(
+      async () => {
+        const mergedAnswers = mergePlanAnswer(planAnswers(workflow.plan), answer);
+        const updated = await state().api.updatePlanAnswers(workflow.plan.plan.id, mergedAnswers);
+        const nextIndex = planQuestionIndex() + 1;
+        if (nextIndex < planQuestions(updated).length) {
+          setPlanQuestionIndex(nextIndex);
+          setState((prev) => ({ ...prev, plan: updated, activity: 'Answer saved', error: '' }));
+          return;
+        }
+        const finalized = await state().api.finalizePlan(workflow.plan.plan.id);
+        setPlanQuestionIndex(0);
+        setState((prev) => ({ ...prev, plan: finalized, activity: 'Plan review ready', error: '' }));
+      },
+      { onError: setPlanQuestionError },
+    );
   }
 
   async function returnToPlanCustomization() {
@@ -1382,7 +1448,10 @@ export function App(props: AppProps) {
     });
   }
 
-  async function runInlinePlanDecisionAction(action: () => Promise<void>) {
+  async function runInlinePlanDecisionAction(
+    action: () => Promise<void>,
+    options: { onError?: (message: string) => void } = {},
+  ) {
     if (busy()) return;
     setBusy(true);
     try {
@@ -1391,10 +1460,12 @@ export function App(props: AppProps) {
       setState((current) => ({ ...current, ...updates }));
     } catch (error) {
       const updates = await refreshReviewData(state()).catch(() => ({}));
+      const message = error instanceof Error ? error.message : 'Operation failed.';
+      options.onError?.(message);
       setState((current) => ({
         ...current,
         ...updates,
-        error: error instanceof Error ? error.message : 'Operation failed.',
+        error: options.onError ? '' : message,
       }));
     } finally {
       setBusy(false);
@@ -2776,18 +2847,30 @@ export function App(props: AppProps) {
                     question: currentPlanQuestion()!,
                     questionIndex: planQuestionIndex(),
                     selectedIndex: planQuestionSelectedIndex(),
+                    focusTarget: planQuestionFocusTarget(),
                     selectedChoiceIds: selectedPlanQuestionChoiceIds(currentPlanQuestion()!),
                     customAnswer: planQuestionCustomAnswer(),
+                    notes: planQuestionNotes(),
+                    error: planQuestionError(),
                     busy: busy(),
                     onSelectIndex: setPlanQuestionSelectedIndex,
+                    onFocusTarget: setPlanQuestionFocusTarget,
                     onToggleChoice: (choiceId) => {
                       const question = currentPlanQuestion();
                       if (!question) return;
                       const index = question.choices.findIndex((choice) => choice.id === choiceId);
                       if (index >= 0) setPlanQuestionSelectedIndex(index);
+                      setPlanQuestionFocusTarget('choices');
                       togglePlanQuestionChoice(question, choiceId);
                     },
-                    onCustomAnswer: setPlanQuestionCustomAnswer,
+                    onCustomAnswer: (value) => {
+                      setPlanQuestionCustomAnswer(value);
+                      setPlanQuestionError('');
+                    },
+                    onNotes: (value) => {
+                      setPlanQuestionNotes(value);
+                      setPlanQuestionError('');
+                    },
                     onSubmit: () => {
                       void submitCurrentPlanQuestionAnswer();
                     },
@@ -4135,12 +4218,17 @@ function ChatPanel(props: {
     question: PlanQuestion;
     questionIndex: number;
     selectedIndex: number;
+    focusTarget: PlanQuestionFocusTarget;
     selectedChoiceIds: string[];
     customAnswer: string;
+    notes: string;
+    error: string;
     busy: boolean;
     onSelectIndex: (index: number) => void;
+    onFocusTarget: (target: PlanQuestionFocusTarget) => void;
     onToggleChoice: (choiceId: string) => void;
     onCustomAnswer: (value: string) => void;
+    onNotes: (value: string) => void;
     onSubmit: () => void;
     onCancel: () => void;
   };
@@ -4155,7 +4243,8 @@ function ChatPanel(props: {
 }) {
   const theme = useTheme();
   const panelPending = createMemo(() => Boolean(props.approvalInline || props.planApproval || props.planQuestion || props.planReview));
-  const isEmptySession = createMemo(() => Boolean(props.messages.length === 0 && !panelPending()));
+  const visibleMessages = createMemo(() => props.messages.filter(isVisibleTranscriptMessage));
+  const isEmptySession = createMemo(() => Boolean(visibleMessages().length === 0 && !panelPending()));
   return (
     <box
       border
@@ -4196,7 +4285,7 @@ function ChatPanel(props: {
         <Show when={props.error}>
           <text fg={theme().red}>{props.error}</text>
         </Show>
-        <Index each={props.messages}>
+        <Index each={visibleMessages()}>
           {(message) => <MessageBlock message={message} />}
         </Index>
       </scrollbox>
@@ -4253,13 +4342,18 @@ function ChatPanel(props: {
                 questionIndex={planQuestion().questionIndex}
                 questionCount={planQuestions(planQuestion().plan).length}
                 selectedIndex={planQuestion().selectedIndex}
-                selectedChoiceIds={planQuestion().selectedChoiceIds}
-                customAnswer={planQuestion().customAnswer}
-                busy={planQuestion().busy}
+                focusTarget={planQuestion().focusTarget}
+                  selectedChoiceIds={planQuestion().selectedChoiceIds}
+                  customAnswer={planQuestion().customAnswer}
+                  notes={planQuestion().notes}
+                  error={planQuestion().error}
+                  busy={planQuestion().busy}
                 theme={theme()}
                 onSelectIndex={planQuestion().onSelectIndex}
+                onFocusTarget={planQuestion().onFocusTarget}
                 onToggleChoice={planQuestion().onToggleChoice}
                 onCustomAnswer={planQuestion().onCustomAnswer}
+                onNotes={planQuestion().onNotes}
                 onSubmit={planQuestion().onSubmit}
                 onCancel={planQuestion().onCancel}
               />
@@ -4355,6 +4449,11 @@ function SlashCommandAutocomplete(props: {
       </scrollbox>
     </box>
   );
+}
+
+function isVisibleTranscriptMessage(message: Message): boolean {
+  const metadata = message.metadata;
+  return !(message.role === 'assistant' && metadata?.kind === 'assistant_tool_turn' && metadata.hidden === true);
 }
 
 function MessageBlock(props: { message: Accessor<Message> }) {
@@ -4668,8 +4767,10 @@ function buildPlanQuestionAnswer(
   choiceId?: string,
   customAnswer = '',
   choiceIds?: string[],
+  notes = '',
 ): PlanQuestionAnswer {
   const cleanCustom = customAnswer.trim();
+  const cleanNotes = notes.trim();
   const answer: PlanQuestionAnswer = { questionId: question.id };
   if (question.multiSelect && choiceIds?.length) {
     answer.choiceIds = choiceIds;
@@ -4677,11 +4778,61 @@ function buildPlanQuestionAnswer(
     answer.choiceId = choiceId;
   }
   if (cleanCustom) answer.customAnswer = cleanCustom;
+  if (cleanNotes) answer.notes = cleanNotes;
   return answer;
 }
 
 function mergePlanAnswer(answers: PlanQuestionAnswer[], answer: PlanQuestionAnswer): PlanQuestionAnswer[] {
   return [...answers.filter((item) => item.questionId !== answer.questionId), answer];
+}
+
+function planQuestionAnswerError(question: PlanQuestion, answer: PlanQuestionAnswer): string | undefined {
+  if (question.required === false) return undefined;
+  if (hasPlanQuestionAnswerValue(question, answer)) return undefined;
+  return `${question.title} requires an answer.`;
+}
+
+function hasPlanQuestionAnswerValue(question: PlanQuestion, answer: PlanQuestionAnswer): boolean {
+  if (question.multiSelect) return Boolean(answer.choiceIds?.length || answer.customAnswer?.trim());
+  return Boolean(answer.choiceId || answer.customAnswer?.trim());
+}
+
+function isCustomQuestionEnabled(question: PlanQuestion): boolean {
+  return question.allowCustomAnswer || question.choices.length === 0;
+}
+
+function planQuestionFocusRows(question: PlanQuestion): PlanQuestionFocusRow[] {
+  return [
+    ...question.choices.map((_, choiceIndex) => ({ target: 'choices' as const, choiceIndex })),
+    ...(isCustomQuestionEnabled(question) ? [{ target: 'custom' as const }] : []),
+    { target: 'notes' as const },
+  ];
+}
+
+function planQuestionFocusRowIndex(
+  question: PlanQuestion,
+  target: PlanQuestionFocusTarget,
+  selectedIndex: number,
+): number {
+  const rows = planQuestionFocusRows(question);
+  const index = rows.findIndex((row) =>
+    target === 'choices'
+      ? row.target === 'choices' && row.choiceIndex === Math.min(selectedIndex, Math.max(question.choices.length - 1, 0))
+      : row.target === target,
+  );
+  return index >= 0 ? index : 0;
+}
+
+function planQuestionFocusTargets(question: PlanQuestion): PlanQuestionFocusTarget[] {
+  return [
+    ...(question.choices.length > 0 ? (['choices'] as PlanQuestionFocusTarget[]) : []),
+    ...(isCustomQuestionEnabled(question) ? (['custom'] as PlanQuestionFocusTarget[]) : []),
+    'notes',
+  ];
+}
+
+function resolveInitialQuestionFocus(question: PlanQuestion): PlanQuestionFocusTarget {
+  return planQuestionFocusTargets(question)[0] ?? 'notes';
 }
 
 function createClientRequestId(): string {
@@ -4703,6 +4854,9 @@ function deriveTaskStatus(state: WorkspaceState, busy: boolean, awaitingPlanDeci
   }
   if (awaitingPlanDecision) {
     return 'awaiting_plan_decision';
+  }
+  if (latestAgentStatus && NEEDS_CONTINUATION_AGENT_STATUSES.has(latestAgentStatus)) {
+    return 'needs_continuation';
   }
   if (latest?.type === 'done' || (latestAgentStatus && COMPLETED_AGENT_STATUSES.has(latestAgentStatus))) {
     return 'completed';
@@ -4738,6 +4892,7 @@ function statusColor(status: TaskStatus, theme: TuiTheme): string {
   if (status === 'completed') return theme.green;
   if (status === 'running') return theme.yellow;
   if (status === 'awaiting_plan_decision') return theme.yellow;
+  if (status === 'needs_continuation') return theme.yellow;
   if (status === 'error') return theme.red;
   return theme.muted;
 }
@@ -4763,6 +4918,7 @@ function eventColor(event: StatusEvent, theme: TuiTheme): string {
   if (event.type === 'model_call_started') return theme.yellow;
   const status = eventString(event, 'status');
   if (status && COMPLETED_AGENT_STATUSES.has(status)) return theme.green;
+  if (status && NEEDS_CONTINUATION_AGENT_STATUSES.has(status)) return theme.yellow;
   if (status && RUNNING_AGENT_STATUSES.has(status)) return theme.yellow;
   return theme.text;
 }

@@ -43,6 +43,7 @@ interface AssistantToolTurnMetadata extends Record<string, unknown> {
   kind: 'assistant_tool_turn';
   reasoningContent?: string;
   toolCalls: LlmToolCall[];
+  hidden?: boolean;
 }
 
 interface ToolResultMessageMetadata extends Record<string, unknown> {
@@ -52,10 +53,23 @@ interface ToolResultMessageMetadata extends Record<string, unknown> {
   status: string;
 }
 
-const MAX_TOOL_TURNS = 4;
+const TOOL_TURN_SEGMENT_LIMIT = 4;
+const MAX_AUTO_TOOL_TURNS = 16;
 const PLAN_IDEMPOTENCY_WINDOW_MS = 15_000;
 const LEGACY_PENDING_APPROVAL_STATUS = 'pending_approval';
 const LEGACY_REJECTED_STATUS = 'rejected';
+const PLAN_QUESTION_CHOICE_STOPWORDS = new Set([
+  'which',
+  'what',
+  'when',
+  'where',
+  'who',
+  'why',
+  'how',
+  'do',
+  'does',
+  'should',
+]);
 
 @Injectable()
 export class AgentService {
@@ -114,7 +128,7 @@ export class AgentService {
               content:
                 'You are Mebius Code Plan Mode. Return strict JSON with keys summary, markdown, steps, and questions. ' +
                 'markdown must be a complete Markdown plan with sections: requirements understanding, technical choices, target outcome, modules, file structure, implementation steps, risks/tradeoffs. ' +
-                'steps must be an array of {title, detail}. questions must be an array and may be empty. Each question must be data-driven with id, title, prompt, choices, recommendedChoiceId, allowCustomAnswer, notes, required, and multiSelect when useful. Do not execute tools.',
+                'steps must be an array of {title, detail}. questions must be an array and may be empty. Each question must be answerable: either provide 2-4 meaningful choices, or set allowCustomAnswer true for open-ended input. Each question must be data-driven with id, title, prompt, choices, recommendedChoiceId, allowCustomAnswer, notes, required, and multiSelect when useful. Do not execute tools.',
             },
             ...this.buildProjectInstructionMessages(projectInstructions),
             ...this.buildActiveSkillMessages(dto.activeSkills ?? [], []),
@@ -179,6 +193,9 @@ export class AgentService {
 
   async cancelPlan(owner: User, planId: string): Promise<Plan> {
     const plan = await this.findOwnedPlan(owner.id, planId);
+    if (!this.isCancellablePlan(plan.status)) {
+      throw new BadRequestException(`Plan is ${plan.status} and cannot be cancelled.`);
+    }
     plan.status = PlanStatus.Cancelled;
     const saved = await this.plans.save(plan);
     this.events.publish(plan.session.id, 'plan_updated', {
@@ -193,10 +210,13 @@ export class AgentService {
     steps: PlanStep[];
   }> {
     const plan = await this.findOwnedPlan(owner.id, planId);
-    if (this.normalizePlanStatus(plan.status) === PlanStatus.Approved) {
-      throw new BadRequestException('Approved plans cannot be customized.');
+    if (!this.isCustomizablePlan(plan.status)) {
+      throw new BadRequestException(`Plan is ${plan.status} and cannot be customized.`);
     }
-    plan.answers = this.sanitizePlanAnswers(dto.answers ?? []);
+    if ((plan.questions ?? []).length === 0) {
+      throw new BadRequestException('Plan has no clarification questions to answer.');
+    }
+    plan.answers = this.validatePlanAnswers(plan, dto.answers ?? []);
     plan.status = PlanStatus.PlanCustomizing;
     const saved = await this.plans.save(plan);
     this.events.publish(plan.session.id, 'plan_updated', {
@@ -212,6 +232,13 @@ export class AgentService {
     steps: PlanStep[];
   }> {
     const plan = await this.findOwnedPlan(owner.id, planId);
+    if (this.normalizePlanStatus(plan.status) !== PlanStatus.PlanCustomizing) {
+      throw new BadRequestException(`Plan is ${plan.status} and cannot be finalized.`);
+    }
+    if ((plan.questions ?? []).length === 0) {
+      throw new BadRequestException('Plan has no clarification questions to finalize.');
+    }
+    plan.answers = this.validatePlanAnswers(plan, plan.answers ?? [], { requireRequiredAnswers: true });
     const steps = await this.planSteps.find({
       where: { plan: { id: plan.id } },
       order: { order: 'ASC' },
@@ -442,15 +469,25 @@ export class AgentService {
     ];
     const availableToolNames = codingToolSpecs.map((tool) => tool.function.name);
     const knownToolNames = new Set(availableToolNames);
-    for (let toolTurn = 0; toolTurn <= MAX_TOOL_TURNS; toolTurn += 1) {
+    let completedToolTurns = 0;
+    for (let modelTurn = 0; modelTurn <= MAX_AUTO_TOOL_TURNS; modelTurn += 1) {
+      const autoContinuing =
+        completedToolTurns > 0 && completedToolTurns % TOOL_TURN_SEGMENT_LIMIT === 0;
       this.events.publish(session.id, 'agent_status', {
-        status: toolTurn === 0 ? initialStatus : 'using_tools',
+        status: modelTurn === 0 ? initialStatus : 'using_tools',
+        ...(autoContinuing
+          ? {
+              activity: 'auto_continue',
+              completedToolTurns,
+              maxToolTurns: MAX_AUTO_TOOL_TURNS,
+            }
+          : {}),
       });
       const response = await this.withModelDiagnostics(
         session.id,
         config,
         'chat',
-        toolTurn,
+        modelTurn,
         () =>
           this.llm.streamChat(
             {
@@ -494,14 +531,28 @@ export class AgentService {
         return { assistant, toolCalls: createdToolCalls };
       }
 
-      if (this.hasAssistantContent(response.content)) {
-        await this.saveAssistantResponse(
-          session,
-          response.content,
-          this.createAssistantToolTurnMetadata(response.reasoning_content, toolCalls),
-          agentTurn,
-        );
+      if (completedToolTurns >= MAX_AUTO_TOOL_TURNS) {
+        const message =
+          `Tool workflow reached the safety limit after ${MAX_AUTO_TOOL_TURNS} tool rounds. ` +
+          'Ask me to continue to resume from the latest tool results.';
+        const assistant = await this.saveAssistantResponse(session, message, {}, agentTurn);
+        this.events.publish(session.id, 'agent_status', {
+          status: 'needs_continuation',
+          message,
+          completedToolTurns,
+          maxToolTurns: MAX_AUTO_TOOL_TURNS,
+        });
+        this.events.complete(session.id);
+        return { assistant, toolCalls: createdToolCalls };
       }
+
+      await this.saveAssistantToolTurnResponse(
+        session,
+        response.content,
+        response.reasoning_content,
+        toolCalls,
+        agentTurn,
+      );
 
       messages.push({
         role: 'assistant',
@@ -606,15 +657,21 @@ export class AgentService {
           content: toolMessageContent,
         });
       }
+      completedToolTurns += 1;
     }
 
     const assistant = await this.saveAssistantResponse(
       session,
-      'I inspected the project, but the tool workflow did not finish within the configured turn limit. Please narrow the request or ask me to continue from the latest tool results.',
+      `Tool workflow reached the safety limit after ${MAX_AUTO_TOOL_TURNS} tool rounds. Ask me to continue to resume from the latest tool results.`,
       {},
       agentTurn,
     );
-    this.events.publish(session.id, 'agent_status', { status: 'completed' });
+    this.events.publish(session.id, 'agent_status', {
+      status: 'needs_continuation',
+      message: assistant.content,
+      completedToolTurns,
+      maxToolTurns: MAX_AUTO_TOOL_TURNS,
+    });
     this.events.complete(session.id);
     return { assistant, toolCalls: createdToolCalls };
   }
@@ -1127,6 +1184,22 @@ export class AgentService {
     return assistant;
   }
 
+  private async saveAssistantToolTurnResponse(
+    session: Message['session'],
+    content: string | null | undefined,
+    reasoningContent: string | null | undefined,
+    toolCalls: LlmToolCall[],
+    turn?: AgentTurn | null,
+  ): Promise<Message> {
+    const metadata = this.createAssistantToolTurnMetadata(reasoningContent, toolCalls, {
+      hidden: !this.hasAssistantContent(content),
+    });
+    if (this.hasAssistantContent(content)) {
+      return this.saveAssistantResponse(session, content, metadata, turn);
+    }
+    return this.sessions.addMessage(session, MessageRole.Assistant, '', metadata, turn);
+  }
+
   async recordToolResultMessage(
     session: Message['session'],
     toolCallId: string,
@@ -1198,11 +1271,13 @@ export class AgentService {
   private createAssistantToolTurnMetadata(
     reasoningContent: string | null | undefined,
     toolCalls: LlmToolCall[],
+    options: { hidden?: boolean } = {},
   ): AssistantToolTurnMetadata {
     return {
       kind: 'assistant_tool_turn',
       reasoningContent: reasoningContent ?? undefined,
       toolCalls,
+      ...(options.hidden ? { hidden: true } : {}),
     };
   }
 
@@ -1225,6 +1300,7 @@ export class AgentService {
       reasoningContent:
         typeof metadata.reasoningContent === 'string' ? metadata.reasoningContent : undefined,
       toolCalls,
+      hidden: metadata.hidden === true,
     };
   }
 
@@ -1517,7 +1593,7 @@ export class AgentService {
   }
 
   private sanitizePlanQuestion(input: Record<string, unknown>, index: number): PlanQuestion | null {
-    const choices = Array.isArray(input.choices)
+    const explicitChoices = Array.isArray(input.choices)
       ? input.choices
           .map((choice, choiceIndex) =>
             choice && typeof choice === 'object'
@@ -1527,20 +1603,28 @@ export class AgentService {
           .filter((choice): choice is NonNullable<PlanQuestion['choices'][number]> => Boolean(choice))
       : [];
     const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : '';
+    const notes = typeof input.notes === 'string' && input.notes.trim() ? input.notes.trim() : undefined;
+    const choices =
+      explicitChoices.length > 0 ? explicitChoices : this.extractPlanQuestionChoices(prompt, notes);
     if (!prompt && choices.length === 0) return null;
     const id = typeof input.id === 'string' && input.id.trim() ? input.id.trim() : `question-${index + 1}`;
+    const recommendedChoiceId =
+      typeof input.recommendedChoiceId === 'string' && input.recommendedChoiceId.trim()
+        ? input.recommendedChoiceId.trim()
+        : undefined;
+    const validRecommendedChoiceId =
+      recommendedChoiceId && choices.some((choice) => choice.id === recommendedChoiceId)
+        ? recommendedChoiceId
+        : choices[0]?.id;
     return {
       id,
       title: typeof input.title === 'string' && input.title.trim() ? input.title.trim() : `Question ${index + 1}`,
       prompt,
       choices,
-      recommendedChoiceId:
-        typeof input.recommendedChoiceId === 'string' && input.recommendedChoiceId.trim()
-          ? input.recommendedChoiceId.trim()
-          : undefined,
-      allowCustomAnswer: input.allowCustomAnswer === true,
-      notes: typeof input.notes === 'string' && input.notes.trim() ? input.notes.trim() : undefined,
-      required: typeof input.required === 'boolean' ? input.required : undefined,
+      recommendedChoiceId: validRecommendedChoiceId,
+      allowCustomAnswer: input.allowCustomAnswer === true || choices.length === 0,
+      notes,
+      required: typeof input.required === 'boolean' ? input.required : true,
       multiSelect: typeof input.multiSelect === 'boolean' ? input.multiSelect : undefined,
     };
   }
@@ -1556,21 +1640,139 @@ export class AgentService {
     };
   }
 
+  private extractPlanQuestionChoices(prompt: string, notes?: string): PlanQuestion['choices'] {
+    const text = [prompt, notes].filter(Boolean).join(' ');
+    const segments = text
+      .split(/[?？,，、;；。.\n]/)
+      .map((segment) => segment.trim())
+      .filter(Boolean);
+    const seen = new Set<string>();
+    const choices: PlanQuestion['choices'] = [];
+
+    for (const segment of segments) {
+      const match = /^([A-Za-z][A-Za-z0-9+#.-]{1,30})(?=$|\s|[:：-]|[\u4e00-\u9fff])/u.exec(segment);
+      if (!match) continue;
+      const label = match[1].trim();
+      const key = label.toLowerCase();
+      if (PLAN_QUESTION_CHOICE_STOPWORDS.has(key)) continue;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const description = segment
+        .slice(label.length)
+        .replace(/^\s*[:：-]\s*/, '')
+        .trim();
+      choices.push({
+        id: this.choiceIdFromLabel(label, choices.length),
+        label,
+        ...(description ? { description } : {}),
+      });
+    }
+
+    return choices.length >= 2 ? choices : [];
+  }
+
+  private choiceIdFromLabel(label: string, index: number): string {
+    const id = label
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    return id || `choice-${index + 1}`;
+  }
+
   private sanitizePlanAnswers(value: unknown): PlanQuestionAnswer[] {
     if (!Array.isArray(value)) return [];
     return value
       .map((item) => (item && typeof item === 'object' ? (item as Record<string, unknown>) : null))
-      .filter((item): item is Record<string, unknown> => item !== null && typeof item.questionId === 'string')
+      .filter(
+        (item): item is Record<string, unknown> =>
+          item !== null && typeof item.questionId === 'string' && item.questionId.trim().length > 0,
+      )
       .map((item) => ({
-        questionId: String(item.questionId),
+        questionId: String(item.questionId).trim(),
         choiceId: typeof item.choiceId === 'string' && item.choiceId.trim() ? item.choiceId.trim() : undefined,
         choiceIds: Array.isArray(item.choiceIds)
-          ? item.choiceIds.filter((choiceId): choiceId is string => typeof choiceId === 'string' && choiceId.trim().length > 0)
+          ? item.choiceIds
+              .filter((choiceId): choiceId is string => typeof choiceId === 'string' && choiceId.trim().length > 0)
+              .map((choiceId) => choiceId.trim())
           : undefined,
         customAnswer:
           typeof item.customAnswer === 'string' && item.customAnswer.trim() ? item.customAnswer.trim() : undefined,
         notes: typeof item.notes === 'string' && item.notes.trim() ? item.notes.trim() : undefined,
       }));
+  }
+
+  private validatePlanAnswers(
+    plan: Plan,
+    value: unknown,
+    options: { requireRequiredAnswers?: boolean } = {},
+  ): PlanQuestionAnswer[] {
+    const questions = this.sanitizePlanQuestions(plan.questions ?? []);
+    const questionMap = new Map(questions.map((question) => [question.id, question]));
+    const answers = this.sanitizePlanAnswers(value);
+    const seenQuestionIds = new Set<string>();
+    const validated: PlanQuestionAnswer[] = [];
+
+    for (const answer of answers) {
+      const question = questionMap.get(answer.questionId);
+      if (!question) {
+        throw new BadRequestException(`Unknown plan question: ${answer.questionId}.`);
+      }
+      if (seenQuestionIds.has(answer.questionId)) {
+        throw new BadRequestException(`Duplicate answer for plan question: ${answer.questionId}.`);
+      }
+      seenQuestionIds.add(answer.questionId);
+      const validatedAnswer = this.validatePlanAnswer(question, answer);
+      if (question.required === true && !this.hasPlanAnswerValue(question, validatedAnswer)) {
+        throw new BadRequestException(`Required plan question is unanswered: ${question.title}.`);
+      }
+      validated.push(validatedAnswer);
+    }
+
+    if (options.requireRequiredAnswers) {
+      const answerMap = new Map(validated.map((answer) => [answer.questionId, answer]));
+      const missing = questions.find((question) => question.required === true && !this.hasPlanAnswerValue(question, answerMap.get(question.id)));
+      if (missing) {
+        throw new BadRequestException(`Required plan question is unanswered: ${missing.title}.`);
+      }
+    }
+
+    return validated;
+  }
+
+  private validatePlanAnswer(question: PlanQuestion, answer: PlanQuestionAnswer): PlanQuestionAnswer {
+    const choiceIdSet = new Set(question.choices.map((choice) => choice.id));
+    const customAnswer = answer.customAnswer?.trim();
+    const notes = answer.notes?.trim();
+    const rawChoiceIds = [...(answer.choiceIds ?? []), ...(answer.choiceId ? [answer.choiceId] : [])].filter(Boolean);
+    const choiceIds = [...new Set(rawChoiceIds)];
+
+    for (const choiceId of choiceIds) {
+      if (!choiceIdSet.has(choiceId)) {
+        throw new BadRequestException(`Invalid choice for plan question "${question.title}": ${choiceId}.`);
+      }
+    }
+    if (customAnswer && !question.allowCustomAnswer) {
+      throw new BadRequestException(`Plan question "${question.title}" does not accept a custom answer.`);
+    }
+    if (!question.multiSelect && choiceIds.length > 1) {
+      throw new BadRequestException(`Plan question "${question.title}" accepts only one choice.`);
+    }
+
+    const validated: PlanQuestionAnswer = { questionId: question.id };
+    if (question.multiSelect) {
+      if (choiceIds.length > 0) validated.choiceIds = choiceIds;
+    } else if (choiceIds[0]) {
+      validated.choiceId = choiceIds[0];
+    }
+    if (customAnswer) validated.customAnswer = customAnswer;
+    if (notes) validated.notes = notes;
+    return validated;
+  }
+
+  private hasPlanAnswerValue(question: PlanQuestion, answer: PlanQuestionAnswer | undefined): boolean {
+    if (!answer) return false;
+    if (question.multiSelect) return Boolean(answer.choiceIds?.length || answer.customAnswer?.trim());
+    return Boolean(answer.choiceId || answer.customAnswer?.trim());
   }
 
   private normalizePlanForResponse(plan: Plan): Plan {
@@ -1593,6 +1795,21 @@ export class AgentService {
   private isApprovablePlan(status: PlanStatus | string): boolean {
     const normalized = this.normalizePlanStatus(status);
     return normalized === PlanStatus.PlanReadyPendingApproval || normalized === PlanStatus.PlanReview;
+  }
+
+  private isCancellablePlan(status: PlanStatus | string): boolean {
+    const normalized = this.normalizePlanStatus(status);
+    return (
+      normalized === PlanStatus.PlanningGenerating ||
+      normalized === PlanStatus.PlanCustomizing ||
+      normalized === PlanStatus.PlanReadyPendingApproval ||
+      normalized === PlanStatus.PlanReview
+    );
+  }
+
+  private isCustomizablePlan(status: PlanStatus | string): boolean {
+    const normalized = this.normalizePlanStatus(status);
+    return normalized === PlanStatus.PlanCustomizing || normalized === PlanStatus.PlanReview;
   }
 
   private parseToolArguments(payload: string): Record<string, unknown> {

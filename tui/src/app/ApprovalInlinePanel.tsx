@@ -1,16 +1,17 @@
 /** @jsxImportSource @opentui/solid */
-import { For, Show, createMemo } from 'solid-js';
+import { Show, createMemo } from 'solid-js';
 import type { Approval } from '../types';
+import { ActionRow, type TuiAction } from './ActionRow';
 import type { TuiTheme } from './theme';
 
 export type ApprovalChoice = 'allow_once' | 'allow_always' | 'reject';
 
-export const APPROVAL_INLINE_PANEL_HEIGHT = 8;
+export const APPROVAL_INLINE_PANEL_HEIGHT = 7;
 
-const APPROVAL_CHOICES: Array<{ id: ApprovalChoice; label: string; width: number }> = [
+const APPROVAL_CHOICES: Array<TuiAction<ApprovalChoice>> = [
   { id: 'allow_once', label: 'Allow once', width: 16 },
-  { id: 'allow_always', label: 'Allow always', width: 18 },
-  { id: 'reject', label: 'Reject', width: 12 },
+  { id: 'allow_always', label: 'Allow session', width: 18 },
+  { id: 'reject', label: 'Reject', width: 12, tone: 'danger' },
 ];
 
 interface ApprovalDetails {
@@ -31,9 +32,8 @@ export function ApprovalInlinePanel(props: {
 }) {
   const details = createMemo(() => buildApprovalDetails(props.approval));
 
-  function choose(choice: ApprovalChoice) {
+  function confirm(choice: ApprovalChoice) {
     if (props.busy) return;
-    props.onSelectChoice(choice);
     if (choice === 'allow_once') {
       props.onAllowOnce();
       return;
@@ -65,43 +65,25 @@ export function ApprovalInlinePanel(props: {
       <box style={{ width: 1, flexShrink: 0, alignSelf: 'stretch', backgroundColor: props.theme.yellow }} />
       <box style={{ width: '100%', flexGrow: 1, minWidth: 0, paddingX: 1, flexDirection: 'column' }}>
         <box style={{ width: '100%', height: 1, minHeight: 1, flexDirection: 'row' }}>
-          <text fg={props.theme.yellow}>△ Permission required</text>
+          <text fg={props.theme.yellow}>Permission required</text>
           <Show when={props.busy}>
             <text fg={props.theme.muted}> - working...</text>
           </Show>
         </box>
         <text fg={props.theme.text} truncate style={{ width: '100%', height: 1, minHeight: 1 }}>
-          ↳ {details().title}
+          {details().title}
         </text>
         <DetailLine detail={details().primary} theme={props.theme} />
         <DetailLine detail={details().secondary} theme={props.theme} />
-        <box style={{ width: '100%', height: 1, minHeight: 1, flexDirection: 'row', marginTop: 1 }}>
-          <For each={APPROVAL_CHOICES}>
-            {(choice) => {
-              const selected = createMemo(() => props.selectedChoice === choice.id);
-              return (
-                <box
-                  style={{
-                    width: choice.width,
-                    height: 1,
-                    minHeight: 1,
-                    flexShrink: 0,
-                    paddingX: 1,
-                    backgroundColor: selected() ? props.theme.selection : props.theme.input,
-                  }}
-                  onMouseDown={() => choose(choice.id)}
-                >
-                  <text fg={selected() ? props.theme.text : props.theme.muted} truncate>
-                    {selected() ? `[ ${choice.label} ]` : choice.label}
-                  </text>
-                </box>
-              );
-            }}
-          </For>
-        </box>
-        <text fg={props.theme.muted} style={{ width: '100%', height: 1, minHeight: 1 }}>
-          ←/→ select   enter confirm
-        </text>
+        <ActionRow
+          actions={APPROVAL_CHOICES}
+          selectedId={props.selectedChoice}
+          busy={props.busy}
+          theme={props.theme}
+          accentColor={props.theme.yellow}
+          onSelect={props.onSelectChoice}
+          onConfirm={confirm}
+        />
       </box>
     </box>
   );
@@ -172,7 +154,7 @@ function buildApprovalDetails(approval: Approval): ApprovalDetails {
   }
   if (name === 'read_file' || name === 'read' || name === 'list_files') {
     return {
-      title: name === 'list_files' ? 'Read' : 'Read',
+      title: 'Read',
       primary: { label: 'Path', value: stringArg(args, 'path') ?? '.' },
     };
   }
@@ -211,9 +193,11 @@ function stringArg(args: Record<string, unknown>, key: string): string | undefin
 }
 
 function humanizeToolName(name: string): string {
-  return name
-    .split('_')
-    .filter(Boolean)
-    .map((part) => part[0]?.toUpperCase() + part.slice(1))
-    .join(' ') || 'Tool call';
+  return (
+    name
+      .split('_')
+      .filter(Boolean)
+      .map((part) => part[0]?.toUpperCase() + part.slice(1))
+      .join(' ') || 'Tool call'
+  );
 }

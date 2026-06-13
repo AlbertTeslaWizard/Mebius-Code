@@ -403,7 +403,7 @@ const agentActivityIcon = computed(() => {
   const activity = workspace.agentActivity;
   if (!activity) return RefreshCw;
   if (activity.status === 'failed') return AlertCircle;
-  if (activity.status === 'waiting_for_approval') return Clock3;
+  if (activity.status === 'waiting_for_approval' || activity.status === 'needs_continuation') return Clock3;
   if (activity.toolName === 'create_patch') return FileText;
   if (activity.toolName === 'run_command') return Terminal;
   if (activity.status === 'using_tools') return Wrench;
@@ -421,7 +421,10 @@ const agentActivitySpins = computed(
 );
 const agentActivityToneClass = computed(() => {
   if (workspace.agentActivity?.status === 'failed') return 'border-red-200 bg-red-50 text-red-700';
-  if (workspace.agentActivity?.status === 'waiting_for_approval') {
+  if (
+    workspace.agentActivity?.status === 'waiting_for_approval' ||
+    workspace.agentActivity?.status === 'needs_continuation'
+  ) {
     return 'border-amber-200 bg-amber-50 text-amber-700';
   }
   return 'border-mebius-border bg-white text-mebius-muted';

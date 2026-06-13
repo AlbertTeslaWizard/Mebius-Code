@@ -1,21 +1,31 @@
 /** @jsxImportSource @opentui/solid */
 import { For, Show, createMemo } from 'solid-js';
 import type { PlanBundle, PlanQuestion, PlanQuestionAnswer } from '../types';
+import { ActionRow, type TuiAction } from './ActionRow';
 import type { TuiTheme } from './theme';
 
 export type PlanDecisionChoice = 'start' | 'modify' | 'discuss' | 'cancel';
+export type PlanQuestionFocusTarget = 'choices' | 'custom' | 'notes';
+type PlanReviewChoice = 'confirm' | 'modify' | 'cancel';
 
-export const PLAN_APPROVAL_PANEL_HEIGHT = 8;
-export const PLAN_QUESTION_PANEL_HEIGHT = 12;
+export const PLAN_APPROVAL_PANEL_HEIGHT = 7;
+export const PLAN_QUESTION_PANEL_HEIGHT = 16;
 export const PLAN_REVIEW_PANEL_HEIGHT = 12;
+const PLAN_VISIBLE_CHOICE_COUNT = 5;
 
 const PLAN_READY_PROMPT = 'Plan ready. Confirm before implementation starts.';
 
-const PLAN_DECISION_CHOICES: Array<{ id: PlanDecisionChoice; label: string; width: number }> = [
+const PLAN_DECISION_CHOICES: Array<TuiAction<PlanDecisionChoice>> = [
   { id: 'start', label: '\u53ef\u4ee5\uff0c\u5f00\u59cb\u5199', width: 18 },
   { id: 'modify', label: '\u4fee\u6539\u8ba1\u5212', width: 14 },
   { id: 'discuss', label: '\u7ee7\u7eed\u8ba8\u8bba', width: 14 },
-  { id: 'cancel', label: '\u53d6\u6d88', width: 10 },
+  { id: 'cancel', label: '\u53d6\u6d88', width: 10, tone: 'danger' },
+];
+
+const PLAN_REVIEW_CHOICES: Array<TuiAction<PlanReviewChoice>> = [
+  { id: 'confirm', label: 'Confirm start', width: 17 },
+  { id: 'modify', label: 'Modify', width: 12 },
+  { id: 'cancel', label: 'Cancel', width: 11, tone: 'danger' },
 ];
 
 export function PlanReadyPanel(props: {
@@ -32,9 +42,8 @@ export function PlanReadyPanel(props: {
     return `${count} step${count === 1 ? '' : 's'}`;
   });
 
-  function choose(choice: PlanDecisionChoice) {
+  function confirm(choice: PlanDecisionChoice) {
     if (props.busy) return;
-    props.onSelectChoice(choice);
     props.onConfirmChoice(choice);
   }
 
@@ -72,33 +81,15 @@ export function PlanReadyPanel(props: {
         <text fg={props.theme.muted} truncate style={{ width: '100%', height: 1, minHeight: 1 }}>
           {stepsLabel()} - pending_approval
         </text>
-        <box style={{ width: '100%', height: 1, minHeight: 1, flexDirection: 'row', marginTop: 1 }}>
-          <For each={PLAN_DECISION_CHOICES}>
-            {(choice) => {
-              const selected = createMemo(() => props.selectedChoice === choice.id);
-              return (
-                <box
-                  style={{
-                    width: choice.width,
-                    height: 1,
-                    minHeight: 1,
-                    flexShrink: 0,
-                    paddingX: 1,
-                    backgroundColor: selected() ? props.theme.selection : props.theme.input,
-                  }}
-                  onMouseDown={() => choose(choice.id)}
-                >
-                  <text fg={selected() ? props.theme.text : props.theme.muted} truncate>
-                    {selected() ? `[ ${choice.label} ]` : choice.label}
-                  </text>
-                </box>
-              );
-            }}
-          </For>
-        </box>
-        <text fg={props.theme.muted} style={{ width: '100%', height: 1, minHeight: 1 }}>
-          left/right select   enter confirm   esc cancel
-        </text>
+        <ActionRow
+          actions={PLAN_DECISION_CHOICES}
+          selectedId={props.selectedChoice}
+          busy={props.busy}
+          theme={props.theme}
+          accentColor={props.theme.yellow}
+          onSelect={props.onSelectChoice}
+          onConfirm={confirm}
+        />
       </box>
     </box>
   );
@@ -109,22 +100,43 @@ export function PlanQuestionPanel(props: {
   questionIndex: number;
   questionCount: number;
   selectedIndex: number;
+  focusTarget: PlanQuestionFocusTarget;
   selectedChoiceIds: string[];
   customAnswer: string;
+  notes: string;
+  error: string;
   busy: boolean;
   theme: TuiTheme;
   onSelectIndex: (index: number) => void;
+  onFocusTarget: (target: PlanQuestionFocusTarget) => void;
   onToggleChoice: (choiceId: string) => void;
   onCustomAnswer: (value: string) => void;
+  onNotes: (value: string) => void;
   onSubmit: () => void;
   onCancel: () => void;
 }) {
-  const optionCount = createMemo(() => props.question.choices.length + (props.question.allowCustomAnswer ? 1 : 0));
-  const customSelected = createMemo(() => props.question.allowCustomAnswer && props.selectedIndex === optionCount() - 1);
+  const customEnabled = createMemo(() => props.question.allowCustomAnswer || props.question.choices.length === 0);
+  const customSelected = createMemo(() => props.focusTarget === 'custom');
+  const notesSelected = createMemo(() => props.focusTarget === 'notes');
+  const customLabel = createMemo(() => (props.question.choices.length > 0 ? 'Custom' : 'Answer'));
+  const customPlaceholder = createMemo(() =>
+    props.question.choices.length > 0 ? 'Type an alternative answer' : 'Type an answer',
+  );
+  const choiceListHeight = createMemo(() => (props.question.choices.length > 0 ? 6 : 1));
+  const choiceStart = createMemo(() => {
+    const count = props.question.choices.length;
+    if (count <= PLAN_VISIBLE_CHOICE_COUNT) return 0;
+    const selected = Math.max(0, Math.min(props.selectedIndex, count - 1));
+    return Math.min(Math.max(0, selected - Math.floor(PLAN_VISIBLE_CHOICE_COUNT / 2)), count - PLAN_VISIBLE_CHOICE_COUNT);
+  });
+  const visibleChoices = createMemo(() =>
+    props.question.choices.slice(choiceStart(), choiceStart() + PLAN_VISIBLE_CHOICE_COUNT),
+  );
+  const hiddenChoiceCount = createMemo(() => Math.max(0, props.question.choices.length - visibleChoices().length));
 
   function choiceMark(choiceId: string) {
     if (props.question.multiSelect) return props.selectedChoiceIds.includes(choiceId) ? '[x]' : '[ ]';
-    return props.selectedChoiceIds[0] === choiceId ? '>' : ' ';
+    return props.selectedChoiceIds[0] === choiceId ? '(x)' : '( )';
   }
 
   return (
@@ -166,10 +178,16 @@ export function PlanQuestionPanel(props: {
             </text>
           )}
         </Show>
-        <box style={{ width: '100%', height: 3, minHeight: 3, flexDirection: 'column' }}>
-          <For each={props.question.choices.slice(0, props.question.allowCustomAnswer ? 2 : 3)}>
+        <box style={{ width: '100%', height: choiceListHeight(), minHeight: choiceListHeight(), flexDirection: 'column' }}>
+          <Show when={props.question.choices.length > 0}>
+            <text fg={props.focusTarget === 'choices' ? props.theme.yellow : props.theme.muted} style={{ width: '100%', height: 1, minHeight: 1 }}>
+              choices{hiddenChoiceCount() > 0 ? ` - showing ${choiceStart() + 1}-${choiceStart() + visibleChoices().length} of ${props.question.choices.length}` : ''}
+            </text>
+          </Show>
+          <For each={visibleChoices()}>
             {(choice, index) => {
-              const selected = createMemo(() => props.selectedIndex === index());
+              const absoluteIndex = createMemo(() => choiceStart() + index());
+              const selected = createMemo(() => props.focusTarget === 'choices' && props.selectedIndex === absoluteIndex());
               const recommended = createMemo(() => props.question.recommendedChoiceId === choice.id);
               return (
                 <box
@@ -182,25 +200,26 @@ export function PlanQuestionPanel(props: {
                     backgroundColor: selected() ? props.theme.selection : props.theme.input,
                   }}
                   onMouseDown={() => {
-                    props.onSelectIndex(index());
+                    props.onFocusTarget('choices');
+                    props.onSelectIndex(absoluteIndex());
                     props.onToggleChoice(choice.id);
                   }}
                 >
-                  <text fg={selected() ? props.theme.text : props.theme.muted} style={{ width: 4, flexShrink: 0 }}>
+                  <text fg={selected() ? props.theme.yellow : props.theme.muted} style={{ width: 5, flexShrink: 0 }}>
                     {choiceMark(choice.id)}
                   </text>
                   <text fg={props.theme.text} truncate style={{ flexGrow: 1, minWidth: 0 }}>
                     {choice.label}
                   </text>
                   <Show when={recommended()}>
-                    <text fg={props.theme.green}> recommended</text>
+                    <text fg={props.theme.green}> [recommended]</text>
                   </Show>
                 </box>
               );
             }}
           </For>
         </box>
-        <Show when={props.question.allowCustomAnswer}>
+        <Show when={customEnabled()}>
           <box
             style={{
               width: '100%',
@@ -210,15 +229,18 @@ export function PlanQuestionPanel(props: {
               flexDirection: 'row',
               backgroundColor: customSelected() ? props.theme.selection : props.theme.input,
             }}
-            onMouseDown={() => props.onSelectIndex(optionCount() - 1)}
+            onMouseDown={() => {
+              props.onFocusTarget('custom');
+              props.onSelectIndex(Math.max(0, props.question.choices.length));
+            }}
           >
-            <text fg={customSelected() ? props.theme.text : props.theme.muted} style={{ width: 8, flexShrink: 0 }}>
-              Custom
+            <text fg={customSelected() ? props.theme.yellow : props.theme.muted} style={{ width: 12, flexShrink: 0 }}>
+              {customLabel()}
             </text>
             <input
               focused={customSelected()}
               value={props.customAnswer}
-              placeholder=""
+              placeholder={customPlaceholder()}
               backgroundColor={customSelected() ? props.theme.selection : props.theme.input}
               focusedBackgroundColor={props.theme.selection}
               textColor={props.theme.text}
@@ -229,9 +251,47 @@ export function PlanQuestionPanel(props: {
             />
           </box>
         </Show>
-        <text fg={props.theme.muted} style={{ width: '100%', height: 1, minHeight: 1 }}>
-          up/down select   space toggle   enter next/review   esc cancel
-        </text>
+        <box
+          style={{
+            width: '100%',
+            height: 1,
+            minHeight: 1,
+            paddingX: 1,
+            flexDirection: 'row',
+            backgroundColor: notesSelected() ? props.theme.selection : props.theme.input,
+          }}
+          onMouseDown={() => props.onFocusTarget('notes')}
+        >
+          <text fg={notesSelected() ? props.theme.yellow : props.theme.muted} style={{ width: 12, flexShrink: 0 }}>
+            Notes
+          </text>
+          <input
+            focused={notesSelected()}
+            value={props.notes}
+            placeholder="Add detail for the plan"
+            backgroundColor={notesSelected() ? props.theme.selection : props.theme.input}
+            focusedBackgroundColor={props.theme.selection}
+            textColor={props.theme.text}
+            focusedTextColor={props.theme.text}
+            cursorColor={props.theme.yellow}
+            style={{ flexGrow: 1, minWidth: 0 }}
+            onInput={props.onNotes}
+          />
+        </box>
+        <Show
+          when={props.error}
+          fallback={
+            <text fg={props.theme.muted} style={{ width: '100%', height: 1, minHeight: 1 }}>
+              up/down move   space choose   tab notes   enter next/review   esc cancel
+            </text>
+          }
+        >
+          {(error) => (
+            <text fg={props.theme.softRed} truncate style={{ width: '100%', height: 1, minHeight: 1 }}>
+              {error()}
+            </text>
+          )}
+        </Show>
       </box>
     </box>
   );
@@ -255,6 +315,19 @@ export function PlanReviewPanel(props: {
     const ids = answer.choiceIds?.length ? answer.choiceIds : answer.choiceId ? [answer.choiceId] : [];
     const labels = ids.map((id) => question.choices.find((choice) => choice.id === id)?.label ?? id);
     return [labels.join(', '), answer.customAnswer, answer.notes].filter(Boolean).join(' | ') || 'answered';
+  }
+
+  function confirm(choice: PlanReviewChoice) {
+    if (props.busy) return;
+    if (choice === 'confirm') {
+      props.onConfirm();
+      return;
+    }
+    if (choice === 'modify') {
+      props.onModify();
+      return;
+    }
+    props.onCancel();
   }
 
   return (
@@ -300,9 +373,15 @@ export function PlanReviewPanel(props: {
             <text fg={props.theme.muted}>No clarification questions.</text>
           </Show>
         </box>
-        <text fg={props.theme.muted} style={{ width: '100%', height: 1, minHeight: 1 }}>
-          Enter confirm and start   Tab modify   Esc cancel
-        </text>
+        <ActionRow
+          actions={PLAN_REVIEW_CHOICES}
+          selectedId="confirm"
+          busy={props.busy}
+          theme={props.theme}
+          accentColor={props.theme.green}
+          onSelect={() => undefined}
+          onConfirm={confirm}
+        />
       </box>
     </box>
   );

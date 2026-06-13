@@ -26,7 +26,13 @@ import type {
 } from '../api/types';
 import { useLocaleStore } from './locale';
 
-type AgentActivityStatus = 'thinking' | 'responding' | 'using_tools' | 'waiting_for_approval' | 'failed';
+type AgentActivityStatus =
+  | 'thinking'
+  | 'responding'
+  | 'using_tools'
+  | 'waiting_for_approval'
+  | 'needs_continuation'
+  | 'failed';
 type GitImportStatus = 'idle' | 'running' | 'success' | 'error';
 type GitPublishStatus = 'idle' | 'running' | 'success' | 'error';
 
@@ -453,7 +459,8 @@ export const useWorkspaceStore = defineStore('workspace', {
     },
     async loadMessages() {
       if (!this.currentSession) return;
-      this.messages = await request<Message[]>(`/sessions/${this.currentSession.id}/messages`);
+      const messages = await request<Message[]>(`/sessions/${this.currentSession.id}/messages`);
+      this.messages = messages.filter(isVisibleTranscriptMessage);
     },
     async refreshCurrentSession() {
       if (!this.currentSession) return null;
@@ -868,7 +875,7 @@ export const useWorkspaceStore = defineStore('workspace', {
                   });
                 }
                 this.streamingAssistantId = null;
-                if (this.agentActivity?.status !== 'failed') {
+                if (shouldClearAgentActivityOnDone(this.agentActivity)) {
                   this.agentActivity = null;
                 }
               })
@@ -881,7 +888,7 @@ export const useWorkspaceStore = defineStore('workspace', {
                   this.messages.push(streamingMessage);
                 }
                 this.streamingAssistantId = null;
-                if (this.agentActivity?.status !== 'failed') {
+                if (shouldClearAgentActivityOnDone(this.agentActivity)) {
                   this.agentActivity = null;
                 }
               });
@@ -921,6 +928,10 @@ export const useWorkspaceStore = defineStore('workspace', {
         return;
       }
       if (status === 'waiting_for_approval') {
+        this.agentActivity = normalizeAgentActivity(data, this.agentActivity);
+        return;
+      }
+      if (status === 'needs_continuation') {
         this.agentActivity = normalizeAgentActivity(data, this.agentActivity);
         return;
       }
@@ -1127,8 +1138,13 @@ function isAgentActivityStatus(value: string): value is AgentActivityStatus {
     value === 'responding' ||
     value === 'using_tools' ||
     value === 'waiting_for_approval' ||
+    value === 'needs_continuation' ||
     value === 'failed'
   );
+}
+
+function shouldClearAgentActivityOnDone(activity: AgentActivity | null): boolean {
+  return !activity || (activity.status !== 'failed' && activity.status !== 'needs_continuation');
 }
 
 function inferEventToolName(type: string, data: SsePayload, previous: AgentActivity | null): string | undefined {
@@ -1170,6 +1186,11 @@ function extractPatchTargetPaths(args: unknown): string[] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object';
+}
+
+function isVisibleTranscriptMessage(message: Message): boolean {
+  const metadata = message.metadata;
+  return !(message.role === 'assistant' && metadata?.kind === 'assistant_tool_turn' && metadata.hidden === true);
 }
 
 function toMessageRole(value: unknown): Message['role'] | null {
