@@ -1,0 +1,3 @@
+## Copy to local.properties when building outside Android Studio.
+## Do not commit local.properties.
+# sdk.dir=C:\\Users\\you\\AppData\\Local\\Android\\Sdk

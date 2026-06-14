@@ -14,6 +14,8 @@
 | 认证 | JWT + Passport | 支持 Web 客户端无状态访问受保护接口 |
 | 实时事件 | Server-Sent Events | 将模型 token、工具状态、审批、命令输出等事件推送到 Web 和 TUI 客户端 |
 | 模型接入 | OpenAI-compatible Chat Completions API | 兼容多个模型 Provider 和工具调用协议 |
+| 外部工具接入 | MCP Streamable HTTP、Exa/Tavily Web Search | 动态接入远程文档和公共 Web 检索工具，并将外部内容作为不可信上下文注入 Agent |
+| 邮件服务 | Nodemailer + SMTP | 发送注册邮箱验证码，支持课程演示环境按需开启邮件投递 |
 | 部署 | Docker Compose | 本地和服务器演示环境都能快速启动 PostgreSQL 与 API 服务 |
 
 ## 2. 总体架构
@@ -39,6 +41,7 @@ NestJS API
   ├── Sessions
   ├── Agent
   ├── Tools
+  ├── MCP
   ├── Events
   └── Audit
 
@@ -47,6 +50,7 @@ External / Runtime Resources
   ├── Managed Workspace Storage
   ├── Attached Local Workspace Root
   ├── Git / Node / Python Commands
+  ├── Remote MCP Servers / Exa Web Search
   └── OpenAI-compatible Providers
 ```
 
@@ -54,14 +58,15 @@ External / Runtime Resources
 
 | 模块 | 职责 |
 | --- | --- |
-| `auth` | 注册、登录、JWT 签发、当前用户查询、布局和主题偏好更新 |
+| `auth` | 注册邮箱验证码发送与校验、注册、登录、JWT 签发、当前用户查询、布局和主题偏好更新 |
 | `users` | 用户实体、邮箱唯一性、密码哈希、角色、布局偏好和主题偏好合并 |
 | `system` | 对外声明后端版本、serverMode、workspace modes、source types 和功能开关 |
 | `model-configs` | 模型配置 CRUD、Provider 预设搜索、连接校验、API Key 加密 |
-| `projects` | 项目 CRUD、managed/local 工作区路径维护、Git/ZIP 导入、local workspace create-or-get、文件 API、Git 发布操作 |
-| `sessions` | 会话、消息、上下文摘要、Slash Command 和当前 Agent 活动 |
-| `agent` | Plan Mode 生命周期、澄清问答、模型调用、工具循环、工具审批后的恢复执行、活动技能注入、未知工具名校验 |
-| `tools` | 工具调用、审批、补丁、命令运行和补丁回滚 |
+| `projects` | 项目 CRUD、managed/local 工作区路径维护、Git/ZIP 导入、local workspace create-or-get、文件 API、Git 发布操作、`AGENTS.md` 项目指令读取与生成 |
+| `sessions` | 会话、消息、上下文摘要、Slash Command、会话权限模式和当前 Agent 活动 |
+| `agent` | Plan Mode 生命周期、澄清问答、计划讨论与修订、模型调用、工具循环、工具审批后的恢复执行、活动技能注入、项目指令注入、MCP 工具注入、未知工具名校验 |
+| `tools` | 工具调用、审批、Web 检索、MCP 工具执行、补丁、命令运行、补丁回滚和回合撤销/重做 |
+| `mcp` | 用户级远程 MCP Server 配置、Context7 预设、工具发现、诊断、启停管理和工具调用转发 |
 | `events` | SSE 事件发布与流结束通知 |
 | `audit` | 关键操作记录和分页查询 |
 | `common/security` | API Key 加密、路径沙箱、命令策略 |
@@ -88,7 +93,7 @@ External / Runtime Resources
 | Store | 状态与行为 |
 | --- | --- |
 | `auth` | 保存用户、Token、登录注册、退出、布局偏好、主题偏好和本地主题缓存 |
-| `workspace` | 保存项目、会话、消息、文件树、当前文件、计划、补丁、命令运行、可用命令、命令授权状态、Git 状态和 SSE 状态 |
+| `workspace` | 保存项目、会话、消息、文件树、当前文件、计划、补丁、命令运行、可用命令、命令授权状态、回合撤销/重做结果、Git 状态和 SSE 状态 |
 | `approvals` | 查询待审批工具调用，执行批准或拒绝 |
 | `locale` | 中英文界面文本 |
 
@@ -102,6 +107,8 @@ External / Runtime Resources
 - `ThemeToggle`：在工作区顶部切换明暗主题，并通过用户偏好接口持久化选择。
 
 `WorkspaceView` 右侧工作台分为文件、审查、运行和事件四个页签。文件页签保留文件树和文件预览的独立滚动区域，审查页签和运行页签采用面板级滚动，保证长计划、长审批列表、命令申请表单和命令输出可以整体上下翻动。
+
+Web 聊天输入区使用 Build / Plan 分段模式：Build 模式将普通文本提交给 Agent，Plan 模式创建计划；`/undo`、`/redo`、`/clear`、`/compact` 等 Slash Command 始终按命令处理，不受当前模式影响。批准后的计划通过 `approvedPlanId` 触发执行，前端在 `turn_undone`、`turn_redone` 和 `plan_updated` 事件后刷新消息、补丁、命令运行记录和计划。
 
 ### 3.4 主题与可读性
 
@@ -131,7 +138,9 @@ MVP 阶段 `mebius` 不自动启动 NestJS 后端，而是连接已经运行的 
 
 TUI 工作台采用三栏结构：左侧展示项目、Session、文件树和 Git 状态；中间展示聊天记录、流式输出、Agent 活动指示器和输入框；右侧默认展示 Status / Session 状态面板，并在审批时切换为审批预览。终端宽度不足时，右侧和左侧面板可以折叠或切换。
 
-TUI 的命令入口包括聊天输入中的 Slash Command 和 `Ctrl+P` 命令面板。`/new` 创建并切换到新会话，`/sessions` 打开全屏历史会话选择器，`/models` 打开模型选择器，`/skills` 打开技能浏览与选择界面，`/themes` 切换 TUI 主题，`/clear` 和 `/compact` 调用后端会话命令。输入 `/` 时触发 Slash 命令自动补全，展示内置命令和已发现技能列表建议，选择建议后执行对应命令或插入技能前缀。`/sessions` 复用 `GET /projects/:projectId/sessions`、`GET /sessions/:id` 和 `GET /sessions/:id/messages` 等既有 API，不新增后端数据结构。
+TUI 的命令入口包括聊天输入中的 Slash Command 和 `Ctrl+P` 命令面板。输入区有 Build 与 Plan 两种模式，`Tab` 切换模式；Build 模式运行 Agent，Plan 模式创建计划，Slash Command 始终优先按命令处理。`/new` 创建并切换到新会话，`/sessions` 打开全屏历史会话选择器，`/models` 打开模型选择器，`/skills` 打开技能浏览与选择界面，`/mcp` 打开 MCP 浏览与管理界面，`/themes` 切换 TUI 主题，`/permissions` 查询或切换当前会话权限模式，`/init` 生成项目 `AGENTS.md`，`/undo` 和 `/redo` 调用后端回合撤销/重做，`/clear` 和 `/compact` 调用后端会话命令。输入 `/` 时触发 Slash 命令自动补全，展示内置命令和已发现技能列表建议，选择建议后执行对应命令或插入技能前缀。`/sessions` 复用 `GET /projects/:projectId/sessions`、`GET /sessions/:id` 和 `GET /sessions/:id/messages` 等既有 API，不新增后端数据结构。
+
+MCP 浏览器通过 `/mcp`、`/mcp refresh` 或 `/mcp verbose` 打开，展示用户已配置的 MCP Server、启用状态、诊断状态、工具数量和工具详情。`/mcp context7` 创建或更新 Context7 预设；`/mcp add <slug> <url>`、`/mcp tools <slug>`、`/mcp enable <slug>`、`/mcp disable <slug>`、`/mcp remove <slug>` 通过后端 Slash Command 管理远程 MCP Server。TUI 中的 MCP 面板支持 Up/Down 导航、Enter/Tab 打开详情、Space 启停服务器、Ctrl+R 刷新诊断和 Escape 返回或关闭。
 
 空会话应展示品牌欢迎界面，包含 Mebius Code 标识、输入框、Slash 命令建议和键盘快捷键提示，引导用户开始首次交互。
 
@@ -140,6 +149,8 @@ TUI 的命令入口包括聊天输入中的 Slash Command 和 `Ctrl+P` 命令面
 右侧 Status 面板按 Session、Model、Context、Workspace 和 Logs 分组展示摘要信息：Session 展示会话名、会话 ID、当前模式和任务状态；Model 展示当前模型和 Provider；Context 展示当前消息上下文的 token 估算、使用比例占位和成本占位；Workspace 展示工作区路径、local/remote API mode、后端可达状态和 local workspace 开关。Logs 分组只渲染最近少量高层 SSE 事件，例如 `agent_status`、`message_created`、`model_call_started`、`model_call_completed`、`model_call_failed`、`error` 和 `done`，不渲染逐 token 流事件，避免默认界面呈现为调试控制台。
 
 聊天区域顶部展示 Agent 活动指示器（`AgentActivityIndicator`），根据 `turnActive`、`streamStatus` 和 `session.agentActivity` 计算当前阶段（thinking、responding、editing files、running tool、waiting model），以动画进度条形式展示，空闲时隐藏。ChatPanel 内联渲染工具审批面板和 Plan 问答/审查/批准面板，用户可以在聊天区域直接操作审批，无需切换右侧面板。
+
+Plan 就绪面板支持开始实施、修改计划、继续讨论和取消。修改计划调用 `POST /plans/:id/revise`，把用户修订指令、项目指令和活动技能一起交给后端重新生成计划；继续讨论调用 `POST /plans/:id/discuss`，在当前计划上下文中生成一条讨论回复，不改变计划状态。计划批准后 TUI 自动切回 Build 模式，后续空输入执行已批准计划时携带 `approvedPlanId`。
 
 本阶段 TUI 不实现 LSP 相关能力，也不显示 LSP 状态。语言服务器、自动补全、跳转定义等 IDE 能力留作后续扩展，不进入当前后端协议和 TUI 默认界面。
 
@@ -164,21 +175,25 @@ TUI 技能发现按优先级扫描以下目录：`.mebius/skills/`、`.opencode/
 
 | 实体 | 关键字段 | 关系 |
 | --- | --- | --- |
-| `User` | email、name、passwordHash、role、preferences | 拥有模型配置、项目、会话和审计记录；preferences 包含布局宽度/折叠状态和明暗主题 |
+| `User` | email、name、passwordHash、role、preferences | 拥有模型配置、项目、会话、MCP Server 配置和审计记录；preferences 包含布局宽度/折叠状态、明暗主题和自定义技能目录 |
+| `EmailVerificationCode` | email、purpose、codeHash、expiresAt、consumedAt、attempts | 保存注册验证码哈希、过期时间、消费状态和尝试次数 |
 | `ModelConfig` | displayName、baseUrl、modelName、providerId、encryptedApiKey、supportsTools、isDefault | 属于一个用户，可作为会话活动模型 |
 | `Project` | name、description、sourceType、workspaceMode、workspacePath、deletePolicy、gitUrl | 属于一个用户，包含多个会话；manual/git/archive 为 managed workspace，local 为 attached workspace |
 | `Session` | title、status、activeModelConfig | 属于用户和项目，包含消息、计划、工具调用 |
-| `Message` | role、content、metadata | 属于会话，用于还原模型上下文 |
+| `Message` | role、content、metadata、deletedAt | 属于会话和可选 Agent 回合，用于还原模型上下文；撤销回合时软删除 |
 | `ConversationSummary` | content、tokenEstimate | 属于会话，用于 `/compact` |
-| `Plan` | goal、summary、status、clientRequestId、draftMarkdown、finalMarkdown、questions、answers | 属于会话，包含多个步骤；`clientRequestId` 用于客户端重试幂等 |
+| `AgentTurn` | kind、status、metadata、undoneAt | 属于会话，关联一次聊天、计划、计划修订、计划讨论、计划执行或手动命令回合 |
+| `Plan` | goal、summary、status、clientRequestId、draftMarkdown、finalMarkdown、questions、answers | 属于会话和可选 Agent 回合，包含多个步骤；`clientRequestId` 用于客户端重试幂等 |
 | `PlanStep` | order、title、detail、status | 属于计划 |
-| `ToolCall` | name、arguments、status、requiresApproval、resultText | 属于会话，可关联审批、补丁和命令运行 |
+| `ToolCall` | name、arguments、status、requiresApproval、resultText | 属于会话和可选 Agent 回合，可关联审批、补丁和命令运行 |
 | `ToolApproval` | status、reason、requester、approver | 关联一个工具调用 |
 | `FilePatch` | relativePath、originalContent、patchedContent、diffText、status | 记录补丁提议、应用、冲突、拒绝和回滚 |
 | `CommandRun` | command、cwd、exitCode、stdout、stderr、status | 记录命令执行过程和结果 |
 | `CommandPolicyConfig` | enabledPresets、customCommands | 保存全局命令策略 |
 | `ProjectCommandPermission` | command | 保存管理员授权的项目级命令 |
 | `SessionCommandGrant` | grantType、createdBy | 保存当前会话的命令自动执行授权 |
+| `SessionApprovalRule` | toolKind、pattern、scope、createdBy | 保存当前会话内由审批产生的可复用工具规则 |
+| `McpServerConfig` | name、slug、url、transport、enabled、encryptedHeaders、isPreset | 属于一个用户，保存远程 MCP Server 配置和加密 Header |
 | `AuditLog` | action、resourceType、resourceId、metadata | 记录关键业务操作 |
 | `ActiveSkillContext` | name、source、skillFile、content | 运行时传递的活动技能上下文，随 Agent 运行或 Plan 创建请求注入模型上下文 |
 
@@ -188,6 +203,10 @@ local 项目的唯一性以 ownerId + 标准化 realpath 为准。Windows 下需
 
 `ActiveSkillContext` 的 `source` 枚举为 `workspace`、`user`、`opencode`、`claude`、`mebius` 和 `custom`。每次 Agent 运行或 Plan 创建请求最多注入 3 个活动技能。技能发现按目录优先级去重，工作区级技能优先于同名的全局技能。
 
+`AgentTurn.kind` 支持 `chat`、`plan`、`plan_revision`、`plan_discussion`、`plan_approval`、`plan_execution`、`manual_command` 和 `legacy`；`AgentTurn.status` 支持 `active` 和 `undone`。撤销时将消息 `deletedAt` 置为当前时间并回滚该回合补丁，重做时清空 `deletedAt` 并恢复补丁。
+
+`McpServerConfig.transport` 当前支持 `streamable_http`。MCP 工具对模型暴露时统一使用 `mcp__<serverSlug>__<toolName>` 命名，后端根据工具注解和 Context7 预设判断是否只读。
+
 ## 6. API 设计
 
 后端全局前缀为 `/api`，接口分组如下：
@@ -195,15 +214,15 @@ local 项目的唯一性以 ownerId + 标准化 realpath 为准。Windows 下需
 | 分组 | 主要接口 |
 | --- | --- |
 | 健康检查与系统能力 | `GET /health`、`GET /system/capabilities` |
-| 认证 | `POST /auth/register`、`POST /auth/login`、`GET /auth/me`、`PATCH /auth/me/preferences` |
+| 认证 | `POST /auth/register/verification-code`、`POST /auth/register`、`POST /auth/login`、`GET /auth/me`、`PATCH /auth/me/preferences` |
 | 模型配置 | `GET/POST /model-configs`、`PATCH/DELETE /model-configs/:id`、`POST /model-configs/:id/test` |
 | 项目 | `GET/POST /projects`、`POST /projects/local`、`DELETE /projects/:id`、`POST /projects/:id/import/git`、`POST /projects/:id/import/archive` |
 | 文件 | `GET /projects/:id/tree`、`GET/POST/PUT/PATCH/DELETE /projects/:id/file` |
 | Git | `GET /projects/:id/git/status`、`POST /projects/:id/git/stage`、`POST /projects/:id/git/unstage`、`POST /projects/:id/git/stage-all`、`POST /projects/:id/git/unstage-all`、`POST /projects/:id/git/commit`、`POST /projects/:id/git/push` |
-| 会话 | `POST /projects/:projectId/sessions`、`GET /projects/:projectId/sessions`、`GET/DELETE /sessions/:id`、`GET/POST /sessions/:id/messages`、`POST /sessions/:id/commands` |
+| 会话 | `POST /projects/:projectId/sessions`、`GET /projects/:projectId/sessions`、`GET/PATCH/DELETE /sessions/:id`、`GET/POST /sessions/:id/messages`、`POST /sessions/:id/commands` |
 | 事件 | `GET /sessions/:id/events?access_token=<jwt>` |
-| Agent | `POST /sessions/:id/plan`、`GET /sessions/:id/plans/latest`、`PATCH /plans/:id/answers`、`POST /plans/:id/finalize`、`POST /plans/:id/approve`、`POST /plans/:id/cancel`、`POST /sessions/:id/run` |
-| 审批与工具 | `GET /approvals/pending`、`POST /approvals/:id/approve`、`POST /approvals/:id/reject`、`GET /sessions/:id/patches`、`POST /patches/:id/revert`、`GET/POST /sessions/:id/command-runs`、`GET/DELETE /sessions/:id/command-authorization` |
+| Agent | `POST /sessions/:id/plan`、`GET /sessions/:id/plans/latest`、`PATCH /plans/:id/answers`、`POST /plans/:id/finalize`、`POST /plans/:id/approve`、`POST /plans/:id/revise`、`POST /plans/:id/discuss`、`POST /plans/:id/cancel`、`POST /sessions/:id/run` |
+| 审批与工具 | `GET /approvals/pending`、`POST /approvals/:id/approve`、`POST /approvals/:id/reject`、`GET /sessions/:id/patches`、`POST /patches/:id/revert`、`POST /sessions/:id/undo`、`POST /sessions/:id/redo`、`GET/POST /sessions/:id/command-runs`、`GET/DELETE /sessions/:id/command-authorization` |
 | 命令策略 | `GET /command-policy`、`PATCH /command-policy`、`GET /sessions/:id/allowed-commands` |
 | 审计 | `GET /audit-logs` |
 
@@ -211,18 +230,24 @@ local 项目的唯一性以 ownerId + 标准化 realpath 为准。Windows 下需
 
 `POST /api/projects/local` 是 create-or-get 接口。后端校验调用者权限和 serverMode，对 path 执行 realpath；如果同一 ownerId 和 normalized realpath 已存在 local 项目，则返回已有项目，否则创建 sourceType=local、workspaceMode=attached、deletePolicy=db_record_only 的项目记录。
 
-`POST /sessions/:id/run` 和 `POST /sessions/:id/plan` 均接受可选 `activeSkills` 数组参数，每项包含 `name`、`source`、`skillFile` 和 `content`，最多 3 项。后端将活动技能作为系统消息注入模型上下文，并附带工具能力声明。`POST /sessions/:id/plan` 的 `clientRequestId` 用于幂等创建，避免客户端重试导致同一会话生成重复计划。
+`POST /sessions/:id/run` 和 `POST /sessions/:id/plan` 均接受可选 `activeSkills` 数组参数，每项包含 `name`、`source`、`skillFile` 和 `content`，最多 3 项。后端将活动技能作为系统消息注入模型上下文，并附带工具能力声明。`POST /sessions/:id/plan` 的 `clientRequestId` 用于幂等创建，避免客户端重试导致同一会话生成重复计划。`POST /sessions/:id/run` 可携带 `approvedPlanId`，用于执行已批准计划。
+
+`POST /plans/:id/revise` 接收修订指令和可选活动技能，重新生成当前计划草案、步骤和澄清问题。`POST /plans/:id/discuss` 接收讨论消息，在当前计划上下文中生成回复，不直接改变计划状态。
+
+`POST /sessions/:id/commands` 统一承载 Slash Command。除 `/clear`、`/compact`、`/models`、`/connect` 外，还支持 `/init`、`/permissions`、`/stream-test` 和 `/mcp` 系列命令。`/init` 代理到项目指令生成能力；`/mcp` 代理到 MCP Server 管理与诊断能力。
 
 ## 7. 关键流程设计
 
 ### 7.1 注册与登录
 
-1. 前端提交邮箱、姓名和密码。
-2. `AuthService` 使用 bcrypt 哈希密码。
-3. `UsersService` 校验邮箱唯一性并创建用户。
-4. 若邀请码匹配 `ADMIN_INVITE_CODE`，用户角色为管理员。
-5. `JwtService` 签发 JWT，前端保存 Token 并进入工作区。
-6. 用户通过 `PATCH /auth/me/preferences` 更新布局和主题偏好，后端归一化宽度范围和主题枚举，前端同时更新本地主题缓存。
+1. 前端先调用 `POST /auth/register/verification-code` 请求注册邮箱验证码。
+2. `EmailVerificationService` 校验邮箱未注册、发送频率和全局上限，生成 6 位验证码，bcrypt 哈希后保存到 `EmailVerificationCode`，并通过 `MailService` 使用 SMTP 发送邮件。
+3. 前端提交邮箱、姓名、密码、验证码和可选管理员邀请码。
+4. `AuthService` 校验并消费验证码，再使用 bcrypt 哈希密码。
+5. `UsersService` 校验邮箱唯一性并创建用户。
+6. 若邀请码匹配 `ADMIN_INVITE_CODE`，用户角色为管理员。
+7. `JwtService` 签发 JWT，前端保存 Token 并进入工作区。
+8. 用户通过 `PATCH /auth/me/preferences` 更新布局和主题偏好，后端归一化宽度范围和主题枚举，前端同时更新本地主题缓存。
 
 ### 7.2 模型连接
 
@@ -257,21 +282,25 @@ local 项目的唯一性以 ownerId + 标准化 realpath 为准。Windows 下需
 3. 客户端通过 `PATCH /plans/:id/answers` 保存澄清答案，答案结构支持单选、多选、自定义回答和备注。
 4. 用户确认答案后调用 `POST /plans/:id/finalize`，后端结合草案、步骤和答案生成最终计划，保存 `finalMarkdown` 并进入 `plan_review`。
 5. 用户通过 `POST /plans/:id/approve` 批准待批准或审查中的计划；后端把最终计划快照写入会话消息，并将计划置为 `approved`。
-6. 用户可以通过 `POST /plans/:id/cancel` 取消未批准计划；旧数据库状态 `pending_approval`、`rejected`、`running` 和 `completed` 在读取时归一化为当前状态。
-7. TUI 通过跟踪已处理的计划决定 ID（`dismissedPlanDecisionId`）防止重新进入会话时恢复过期审批界面；已批准、已取消或已失败的计划不再弹出审批面板。
+6. 用户可以通过 `POST /plans/:id/revise` 提交修订指令，后端创建 `plan_revision` 回合，结合当前计划、项目指令和活动技能重新生成草案、步骤和澄清问题。
+7. 用户可以通过 `POST /plans/:id/discuss` 在当前计划上下文中继续讨论，后端创建 `plan_discussion` 回合并生成讨论回复，但不直接改变计划状态。
+8. 已批准计划通过 `POST /sessions/:id/run` 携带 `approvedPlanId` 执行，后端校验计划属于当前会话且状态为 `approved`。
+9. 用户可以通过 `POST /plans/:id/cancel` 取消未批准计划；旧数据库状态 `pending_approval`、`rejected`、`running` 和 `completed` 在读取时归一化为当前状态。
+10. TUI 通过跟踪已处理的计划决定 ID（`dismissedPlanDecisionId`）防止重新进入会话时恢复过期审批界面；已批准、已取消或已失败的计划不再弹出审批面板，并在批准后切回 Build 模式。
 
 ### 7.6 Agent 执行与工具循环
 
 1. 用户发送消息或执行已批准计划后，`AgentService` 读取会话摘要和最近消息，构造模型上下文。
-2. 若请求携带 `activeSkills`，`AgentService` 将每个活动技能构造为系统消息注入模型上下文，格式为 `# Active Skill: <name>\nSource: <source>\n\n<content>`，并附带声明模型只可使用已注册工具。
-3. 系统将当前项目允许的命令前缀、后端运行平台和 shell 类型注入 system prompt 与 `run_command` 工具描述。
-4. `OpenAiCompatibleService` 流式调用模型，并通过 SSE 推送 token。
-5. 模型返回工具调用时，Agent 解析 JSON 参数并交给 `ToolsService`。
-6. Agent 在分发工具调用前校验工具名是否在已知集合 `KNOWN_TOOL_NAMES`（来自 `BASE_CODING_TOOL_SPECS`）中。若工具名未知，Agent 记录友好错误消息作为工具结果，发布 `agent_status` 事件（`activity: 'unknown_tool'`），将工具调用标记为 Failed 并继续回合，而非中断会话。
-7. 只读工具直接执行，结果作为 tool message 写入会话并继续模型回合。
-8. 写入补丁或未授权命令执行会生成待审批记录，Agent 暂停并等待用户批准。
-9. 用户批准后，系统执行工具、记录结果，再由 Agent 恢复模型回合。
-10. 达到最大工具轮数仍未完成时，系统保存提示消息并标记最新运行中的计划失败。
+2. `AgentService` 读取项目根目录 `AGENTS.md`，最多取 32KB，作为项目指令系统消息注入模型上下文。
+3. 若请求携带 `activeSkills`，`AgentService` 将每个活动技能构造为系统消息注入模型上下文，格式为 `# Active Skill: <name>\nSource: <source>\n\n<content>`，并附带声明模型只可使用已注册工具。
+4. 系统将当前项目允许的命令前缀、后端运行平台、shell 类型、`web_search` 可用性和已启用 MCP 工具列表注入 system prompt 与工具描述。
+5. `OpenAiCompatibleService` 流式调用模型，并通过 SSE 推送 token。
+6. 模型返回工具调用时，Agent 解析 JSON 参数并交给 `ToolsService`。
+7. Agent 在分发工具调用前校验工具名是否在已知集合中，包括基础编码工具、`web_search` 和当前用户启用的 MCP 工具。若工具名未知，Agent 记录友好错误消息作为工具结果，发布 `agent_status` 事件（`activity: 'unknown_tool'`），将工具调用标记为 Failed 并继续回合，而非中断会话。
+8. 只读工具、`web_search` 和只读 MCP 工具直接执行，结果作为 tool message 写入会话并继续模型回合。
+9. 写入补丁、未授权命令执行或非只读 MCP 工具会生成待审批记录，Agent 暂停并等待用户批准。
+10. 用户批准后，系统执行工具、记录结果，再由 Agent 根据保存的 pending tool resume context 恢复模型回合，保留审批前的 assistant tool call 和已完成 tool messages。
+11. 达到最大工具轮数仍未完成时，系统保存提示消息并标记最新运行中的计划失败。
 
 ### 7.7 补丁应用与回滚
 
@@ -303,17 +332,47 @@ local 项目的唯一性以 ownerId + 标准化 realpath 为准。Windows 下需
 4. commit 前要求存在已暂存改动，push 前要求存在远端和可推送提交。
 5. Git 操作均写入审计日志。
 
+### 7.10 项目指令初始化
+
+1. 用户在 TUI 输入 `/init`、`/init --preview` 或 `/init --replace`。
+2. `SessionsService` 校验参数并调用 `ProjectsService.initAgentInstructions()`。
+3. `ProjectsService` 检查项目根目录，识别 package、tsconfig、Docker、README 等清单文件、顶层目录和常见命令，生成 `AGENTS.md` 初稿。
+4. 预览模式只返回生成内容；已有文件且未指定替换时返回现有内容和建议内容；替换模式或首次创建时写入项目根目录。
+5. 创建或替换 `AGENTS.md` 写入审计日志，后续 Agent 运行时读取该文件并注入模型上下文。
+
+### 7.11 MCP 工具接入
+
+1. 用户通过 `/mcp context7`、`/mcp add <slug> <url>` 等命令创建远程 MCP Server 配置。
+2. `McpService` 标准化 slug 和 URL，加密保存 Header，按 owner + slug 保证唯一。
+3. TUI 通过 `/mcp refresh`、`/mcp verbose` 或 MCP 浏览器请求工具列表和诊断状态。
+4. 后端使用 MCP Streamable HTTP 调用 `initialize`、`tools/list` 和 `tools/call`，缓存工具列表和诊断结果，并隐藏 URL 或错误信息中的敏感参数。
+5. Agent 运行前读取当前用户启用的 MCP 工具，把工具以 `mcp__<serverSlug>__<toolName>` 名称加入模型工具列表。
+6. 只读 MCP 工具直接执行，非只读工具进入通用工具审批流程。
+
+### 7.12 回合撤销与重做
+
+1. 每次聊天、计划创建、计划修订、计划讨论、计划批准、计划执行和手动命令都会创建 `AgentTurn`。
+2. `/undo` 调用 `POST /sessions/:id/undo`，查找最近 active 回合；如存在待审批工具调用，则拒绝撤销。
+3. 系统检查该回合已应用补丁的快照，若文件在应用后被外部修改则返回冲突，不写入文件。
+4. 无冲突时，系统按反向顺序回滚补丁、软删除该回合消息、标记回合为 `undone`，并发布 `turn_undone`。
+5. `/redo` 调用 `POST /sessions/:id/redo`，查找最近 undone 回合；若补丁快照无冲突，则恢复消息、重放补丁并发布 `turn_redone`。
+6. 计划相关回合撤销或重做时同步发布 `plan_updated`，客户端据此刷新计划状态。
+
 ## 8. 安全设计
 
 - 认证安全：所有业务接口使用 JWT Guard；SSE 使用 `access_token` 查询参数配合专用 Guard。
 - 密码安全：密码使用 bcrypt 哈希，不保存明文。
+- 注册验证安全：注册验证码使用 bcrypt 哈希保存，设置 10 分钟过期、重发冷却、每邮箱/全局发送频率限制和最大校验次数限制。
 - 密钥安全：模型 API Key 使用主密钥派生的 AES-256-GCM 加密；响应中永不返回明文。
+- MCP 安全：MCP Header 使用同一加密服务保存；MCP URL 展示和诊断错误会脱敏 api key、token、secret、password、authorization 等敏感内容；MCP 返回内容作为不可信外部上下文处理。
+- Web 检索安全：`web_search` 默认禁止包含密钥、token、私钥等敏感模式的查询；Exa/Tavily 返回内容只作为资料，不得覆盖系统、开发者或项目指令。
+- 项目指令安全：`AGENTS.md` 只从项目根目录读取，读取上限为 32KB，且其优先级低于系统和开发者指令。
 - 路径安全：managed 项目和 local 项目统一通过 `PathSandboxService` 校验。已存在路径使用 realpath 检查仍在 workspaceRoot 内；新建文件检查父目录 realpath；禁止符号链接逃逸 workspaceRoot。
 - local workspace 安全：local workspace 默认关闭，只在非 production 且 `MEBIUS_CODE_LOCAL_WORKSPACES_ENABLED=true` 时可用；production 模式强制拒绝；创建 local 项目需要管理员权限；删除 local 项目只删除数据库记录。
 - 目录屏蔽：`.git`、`.env`、`node_modules`、`dist`、`coverage` 默认不可访问；真实本地仓库文件树还默认忽略 `build`、`.next`、`.nuxt`、`.cache`、`.venv`、`venv`、`__pycache__`、`.pytest_cache`、`datasets`、`models`、`outputs`、`checkpoints`。
 - 命令安全：常规命令必须匹配策略前缀；策略外命令和 shell 命令需要审批或会话授权；命令替换、反引号和换行被硬性拒绝；所有命令都在工作区内执行。
 - 人工审批：补丁写入和未授权命令执行需要用户审批，会话级命令自动执行授权可撤销并写入审计。
-- 工具安全：模型调用未知工具时，后端返回友好提示消息并标记为 Failed，不中断会话；系统消息明确声明可用工具集合，防止模型幻觉调用不存在的工具。
+- 工具安全：模型调用未知工具时，后端返回友好提示消息并标记为 Failed，不中断会话；系统消息明确声明基础工具、Web 检索工具和当前启用的 MCP 工具集合，防止模型幻觉调用不存在的工具。
 - 审计追踪：高风险和关键状态变更写入审计日志。
 
 ## 9. 部署设计
@@ -323,7 +382,9 @@ local 项目的唯一性以 ownerId + 标准化 realpath 为准。Windows 下需
 - `postgres`：PostgreSQL 数据库，端口 `5432`。
 - `api`：NestJS 后端，端口 `3000`。
 
-后端通过环境变量配置数据库连接、JWT 密钥、API Key 加密主密钥、工作区根目录、命令白名单和管理员邀请码。前端开发环境由 Vite 启动在 `http://127.0.0.1:5173`，并将 `/api` 代理到后端。
+后端通过环境变量配置数据库连接、JWT 密钥、API Key/MCP Header 加密主密钥、工作区根目录、命令白名单、管理员邀请码、SMTP 邮件服务和 Web 检索 Provider。前端开发环境由 Vite 启动在 `http://127.0.0.1:5173`，并将 `/api` 代理到后端。
+
+注册验证码邮件需要设置 `MAIL_ENABLED=true`、`MAIL_FROM`、`SMTP_HOST`、`SMTP_USER`、`SMTP_PASS` 等变量。Web 检索默认使用 Exa hosted MCP；可通过 `WEB_SEARCH_ENABLED=false` 关闭，通过 `EXA_API_KEY` 或 Tavily 相关变量切换到自有额度。
 
 TUI 本机测试时，MVP 要求手动启动 PostgreSQL 和 NestJS API，不由 `mebius` 自动拉起后端。local workspace 需要设置 `MEBIUS_CODE_SERVER_MODE=local_runtime` 和 `MEBIUS_CODE_LOCAL_WORKSPACES_ENABLED=true`，且不能使用 production API 容器绑定 Windows 或用户本机路径。远程 API 模式下，TUI 只操作远程后端已有 workspace。
 

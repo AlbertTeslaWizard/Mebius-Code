@@ -6,6 +6,7 @@ import { AuditModule } from './modules/audit/audit.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { EventsModule } from './modules/events/events.module';
 import { McpModule } from './modules/mcp/mcp.module';
+import { MobileModule } from './modules/mobile/mobile.module';
 import { ModelConfigsModule } from './modules/model-configs/model-configs.module';
 import { ProjectsModule } from './modules/projects/projects.module';
 import { SessionsModule } from './modules/sessions/sessions.module';
@@ -38,6 +39,7 @@ import { HealthController } from './health.controller';
     EventsModule,
     SystemModule,
     McpModule,
+    MobileModule,
     ModelConfigsModule,
     ProjectsModule,
     SessionsModule,

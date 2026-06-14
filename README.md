@@ -10,6 +10,7 @@ The visible product name is **Mebius Code**. Engineering identifiers use lowerca
 backend/                 NestJS backend service
 frontend/                Vue 3 + TypeScript web workspace
 tui/                     Bun + OpenTUI terminal workspace
+android/                 Native Kotlin + Jetpack Compose Android companion app
 docs/                    Markdown source documents for final DOCX deliverables
 面向对象技术与方法结课设计.docx  Original course requirement document
 ```
@@ -71,3 +72,19 @@ bun run start
 The installed CLI command is `mebius`. Use `mebius login --api http://localhost:3000/api`
 to persist credentials and API configuration.
 See [tui/README.md](tui/README.md) for TUI commands and shortcuts.
+
+## Android Quick Start
+
+The Android app is a lightweight companion client for existing Mebius API
+instances. It supports project/session browsing, Build and Plan messages, SSE
+status updates, and one-time approval/reject actions.
+
+Open `android/` in Android Studio, or run from that directory with a local
+Android Gradle setup:
+
+```bash
+gradle :app:assembleDebug
+```
+
+The default emulator API URL is `http://10.0.2.2:3000/api`. Physical devices
+need a LAN or HTTPS API address that can reach the backend.
