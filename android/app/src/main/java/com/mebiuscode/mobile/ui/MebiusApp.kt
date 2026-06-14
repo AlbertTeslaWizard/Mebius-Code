@@ -1,6 +1,7 @@
 package com.mebiuscode.mobile.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,11 +29,14 @@ import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Send
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Terminal
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -322,6 +326,47 @@ private fun DashboardScreen(state: UiState, viewModel: MebiusViewModel) {
 
 @Composable
 private fun DashboardContent(overview: MobileOverview, viewModel: MebiusViewModel) {
+    var sessionPendingDelete by remember { mutableStateOf<RecentSession?>(null) }
+    var sessionPendingRename by remember { mutableStateOf<RecentSession?>(null) }
+    var projectPendingSession by remember { mutableStateOf<Project?>(null) }
+
+    sessionPendingDelete?.let { session ->
+        DeleteSessionDialog(
+            title = session.title,
+            onDismiss = { sessionPendingDelete = null },
+            onConfirm = {
+                sessionPendingDelete = null
+                viewModel.deleteSession(session.id)
+            },
+        )
+    }
+
+    sessionPendingRename?.let { session ->
+        SessionTitleDialog(
+            title = "Rename session",
+            initialValue = session.title,
+            confirmLabel = "Save",
+            onDismiss = { sessionPendingRename = null },
+            onConfirm = { title ->
+                sessionPendingRename = null
+                viewModel.renameSession(session.id, title)
+            },
+        )
+    }
+
+    projectPendingSession?.let { project ->
+        SessionTitleDialog(
+            title = "New session",
+            initialValue = "Session for ${project.name}",
+            confirmLabel = "Create",
+            onDismiss = { projectPendingSession = null },
+            onConfirm = { title ->
+                projectPendingSession = null
+                viewModel.createSession(project, title)
+            },
+        )
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -359,11 +404,20 @@ private fun DashboardContent(overview: MobileOverview, viewModel: MebiusViewMode
         }
         item { SectionTitle("Recent Sessions") }
         items(overview.recentSessions, key = { it.id }) { session ->
-            RecentSessionCard(session, onClick = { viewModel.openSession(session.id) })
+            RecentSessionCard(
+                session = session,
+                onClick = { viewModel.openSession(session.id) },
+                onRename = { sessionPendingRename = session },
+                onDelete = { sessionPendingDelete = session },
+            )
         }
         item { SectionTitle("Projects") }
         items(overview.projects, key = { it.id }) { project ->
-            ProjectCard(project, onOpen = { viewModel.openProject(project) }, onNewSession = { viewModel.createSession(project) })
+            ProjectCard(
+                project = project,
+                onOpen = { viewModel.openProject(project) },
+                onNewSession = { projectPendingSession = project },
+            )
         }
         item { Spacer(Modifier.height(8.dp)) }
     }
@@ -374,6 +428,47 @@ private fun ProjectSessionsScreen(state: UiState, viewModel: MebiusViewModel, pr
     val overview = (state.overview as? LoadState.Ready)?.value
     val project = state.selectedProject ?: overview?.projects?.firstOrNull { it.id == projectId }
     val sessions = overview?.recentSessions?.filter { it.projectId == projectId }.orEmpty()
+    var sessionPendingDelete by remember { mutableStateOf<RecentSession?>(null) }
+    var sessionPendingRename by remember { mutableStateOf<RecentSession?>(null) }
+    var showNewSessionDialog by remember { mutableStateOf(false) }
+
+    sessionPendingDelete?.let { session ->
+        DeleteSessionDialog(
+            title = session.title,
+            onDismiss = { sessionPendingDelete = null },
+            onConfirm = {
+                sessionPendingDelete = null
+                viewModel.deleteSession(session.id)
+            },
+        )
+    }
+
+    sessionPendingRename?.let { session ->
+        SessionTitleDialog(
+            title = "Rename session",
+            initialValue = session.title,
+            confirmLabel = "Save",
+            onDismiss = { sessionPendingRename = null },
+            onConfirm = { title ->
+                sessionPendingRename = null
+                viewModel.renameSession(session.id, title)
+            },
+        )
+    }
+
+    if (showNewSessionDialog && project != null) {
+        SessionTitleDialog(
+            title = "New session",
+            initialValue = "Session for ${project.name}",
+            confirmLabel = "Create",
+            onDismiss = { showNewSessionDialog = false },
+            onConfirm = { title ->
+                showNewSessionDialog = false
+                viewModel.createSession(project, title)
+            },
+        )
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -405,7 +500,7 @@ private fun ProjectSessionsScreen(state: UiState, viewModel: MebiusViewModel, pr
                 }
                 Spacer(Modifier.height(14.dp))
                 Button(
-                    onClick = { project?.let(viewModel::createSession) },
+                    onClick = { showNewSessionDialog = true },
                     enabled = project != null,
                     shape = RoundedCornerShape(14.dp),
                     modifier = Modifier
@@ -418,7 +513,12 @@ private fun ProjectSessionsScreen(state: UiState, viewModel: MebiusViewModel, pr
         }
         item { SectionTitle("Sessions") }
         items(sessions, key = { it.id }) { session ->
-            RecentSessionCard(session, onClick = { viewModel.openSession(session.id) })
+            RecentSessionCard(
+                session = session,
+                onClick = { viewModel.openSession(session.id) },
+                onRename = { sessionPendingRename = session },
+                onDelete = { sessionPendingDelete = session },
+            )
         }
         item { Spacer(Modifier.height(8.dp)) }
     }
@@ -439,6 +539,8 @@ private fun SessionContent(state: UiState, details: SessionDetails, viewModel: M
     val totalItemCount = sessionListItemCount(state, details)
     val lastIndex = (totalItemCount - 1).coerceAtLeast(0)
     var shouldFollowBottom by remember(details.session.id) { mutableStateOf(true) }
+    var showDeleteDialog by remember(details.session.id) { mutableStateOf(false) }
+    var showRenameDialog by remember(details.session.id) { mutableStateOf(false) }
     val isAtBottom by remember {
         derivedStateOf {
             val visibleItems = listState.layoutInfo.visibleItemsInfo
@@ -468,6 +570,30 @@ private fun SessionContent(state: UiState, details: SessionDetails, viewModel: M
         }
     }
 
+    if (showDeleteDialog) {
+        DeleteSessionDialog(
+            title = details.session.title,
+            onDismiss = { showDeleteDialog = false },
+            onConfirm = {
+                showDeleteDialog = false
+                viewModel.deleteSession(details.session.id)
+            },
+        )
+    }
+
+    if (showRenameDialog) {
+        SessionTitleDialog(
+            title = "Rename session",
+            initialValue = details.session.title,
+            confirmLabel = "Save",
+            onDismiss = { showRenameDialog = false },
+            onConfirm = { title ->
+                showRenameDialog = false
+                viewModel.renameSession(details.session.id, title)
+            },
+        )
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         Box(
             modifier = Modifier
@@ -483,7 +609,12 @@ private fun SessionContent(state: UiState, details: SessionDetails, viewModel: M
             ) {
                 item { Spacer(Modifier.height(2.dp)) }
                 item {
-                    SessionHeader(details, state.streamStatus)
+                    SessionHeader(
+                        details = details,
+                        streamStatus = state.streamStatus,
+                        onRename = { showRenameDialog = true },
+                        onDelete = { showDeleteDialog = true },
+                    )
                 }
                 details.plan?.let { plan ->
                     item { PlanCard(plan, viewModel) }
@@ -555,7 +686,7 @@ private fun sessionListItemCount(state: UiState, details: SessionDetails): Int {
 }
 
 @Composable
-private fun SessionHeader(details: SessionDetails, streamStatus: String) {
+private fun SessionHeader(details: SessionDetails, streamStatus: String, onRename: () -> Unit, onDelete: () -> Unit) {
     Panel {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
@@ -570,6 +701,14 @@ private fun SessionHeader(details: SessionDetails, streamStatus: String) {
             }
             Spacer(Modifier.width(8.dp))
             StatusPill(streamStatus)
+            Spacer(Modifier.width(6.dp))
+            IconButton(onClick = onRename) {
+                Icon(Icons.Rounded.Edit, contentDescription = "Rename session")
+            }
+            Spacer(Modifier.width(2.dp))
+            IconButton(onClick = onDelete) {
+                Icon(Icons.Rounded.Delete, contentDescription = "Delete session")
+            }
         }
     }
 }
@@ -823,11 +962,10 @@ private fun CommandRunCard(run: CommandRunView) {
     }
 }
 @Composable
-private fun RecentSessionCard(session: RecentSession, onClick: () -> Unit) {
+private fun RecentSessionCard(session: RecentSession, onClick: () -> Unit, onRename: () -> Unit, onDelete: () -> Unit) {
     val label = if (session.pendingApprovalCount > 0) "${session.pendingApprovalCount} waiting" else (session.latestPlanStatus ?: session.status)
     val sc = statusColorsFor(label)
     Card(
-        onClick = onClick,
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
@@ -843,6 +981,7 @@ private fun RecentSessionCard(session: RecentSession, onClick: () -> Unit) {
             Row(
                 modifier = Modifier
                     .weight(1f)
+                    .clickable(onClick = onClick)
                     .padding(start = 12.dp, top = 14.dp, bottom = 14.dp, end = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -858,6 +997,14 @@ private fun RecentSessionCard(session: RecentSession, onClick: () -> Unit) {
                 }
                 Spacer(Modifier.width(8.dp))
                 StatusPill(label)
+                Spacer(Modifier.width(4.dp))
+                IconButton(onClick = onRename) {
+                    Icon(Icons.Rounded.Edit, contentDescription = "Rename session")
+                }
+                Spacer(Modifier.width(2.dp))
+                IconButton(onClick = onDelete) {
+                    Icon(Icons.Rounded.Delete, contentDescription = "Delete session")
+                }
             }
         }
     }
@@ -896,6 +1043,80 @@ private fun ProjectCard(project: Project, onOpen: () -> Unit, onNewSession: () -
             Text("Start session")
         }
     }
+}
+
+@Composable
+private fun SessionTitleDialog(
+    title: String,
+    initialValue: String,
+    confirmLabel: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var value by remember(initialValue) { mutableStateOf(initialValue) }
+    val trimmed = value.trim()
+    val canSubmit = trimmed.length in 2..120
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = { if (it.length <= 120) value = it },
+                    label = { Text("Session title") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "2-120 characters",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(trimmed) },
+                enabled = canSubmit,
+            ) {
+                Text(confirmLabel)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+    )
+}
+
+@Composable
+private fun DeleteSessionDialog(
+    title: String,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Delete session?") },
+        text = {
+            Text("Delete session \"$title\"? This cannot be undone.")
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text("Delete")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+    )
 }
 
 @Composable

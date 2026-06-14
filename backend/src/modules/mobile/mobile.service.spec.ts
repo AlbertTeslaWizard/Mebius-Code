@@ -72,6 +72,7 @@ describe('MobileService', () => {
         layout: {
           leftSidebarCollapsed: false,
           rightSidebarCollapsed: false,
+          sessionPaneCollapsed: false,
           leftSidebarWidth: 280,
           rightSidebarWidth: 360,
         },

@@ -410,6 +410,17 @@ export const useWorkspaceStore = defineStore('workspace', {
       await this.loadSessions();
       await this.selectSession(session);
     },
+    async updateSessionTitle(sessionId: string, title: string) {
+      const session = await request<Session>(`/sessions/${sessionId}`, {
+        method: 'PATCH',
+        body: jsonBody({ title }),
+      });
+      if (this.currentSession?.id === session.id) {
+        this.currentSession = session;
+      }
+      this.sessions = this.sessions.map((item) => (item.id === session.id ? session : item));
+      return session;
+    },
     async deleteSession(sessionId: string) {
       const wasCurrent = this.currentSession?.id === sessionId;
       await request<{ deleted: true }>(`/sessions/${sessionId}`, { method: 'DELETE' });

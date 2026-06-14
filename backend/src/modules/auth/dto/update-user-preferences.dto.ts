@@ -11,6 +11,10 @@ export class UpdateLayoutPreferencesDto {
   rightSidebarCollapsed?: boolean;
 
   @IsOptional()
+  @IsBoolean()
+  sessionPaneCollapsed?: boolean;
+
+  @IsOptional()
   @IsInt()
   @Min(220)
   @Max(420)

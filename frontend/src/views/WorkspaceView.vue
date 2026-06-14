@@ -91,6 +91,7 @@ const archiveFile = ref<File | null>(null);
 const archiveFileInput = ref<HTMLInputElement | null>(null);
 const gitCommitMessage = ref('');
 const sessionTitle = ref('');
+const sessionRenameTitle = ref('');
 const composer = ref('');
 const composerMode = ref<ComposerMode>('build');
 const activeWorkbenchTab = ref<WorkbenchTab>('files');
@@ -121,11 +122,15 @@ const connectSelected = ref<ConnectProvider | null>(null);
 const connectFields = ref<ConnectField[]>([]);
 const connectForm = reactive<Record<string, string>>({});
 const lastConnectCommandQuery = ref<string | null>(null);
+const leftSidebarBody = ref<HTMLElement | null>(null);
 const chatScrollContainer = ref<HTMLElement | null>(null);
 const shouldFollowChat = ref(true);
 const isCompactViewport = ref(false);
 const leftOverlayOpen = ref(false);
 const rightOverlayOpen = ref(false);
+const sessionRenameModal = ref(false);
+const sessionRenameTargetId = ref('');
+const sessionRenameTargetName = ref('');
 const busy = ref(false);
 const error = ref('');
 const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth);
@@ -196,6 +201,13 @@ const canSubmitManualCommand = computed(
     !workspace.allowedCommandsLoading &&
     !workspace.commandAuthorizationLoading,
 );
+const normalizedSessionRenameTitle = computed(() => sessionRenameTitle.value.trim());
+const canSubmitSessionRename = computed(
+  () =>
+    normalizedSessionRenameTitle.value.length >= 2 &&
+    normalizedSessionRenameTitle.value.length <= 120 &&
+    normalizedSessionRenameTitle.value !== sessionRenameTargetName.value,
+);
 const showNoAllowedCommands = computed(
   () =>
     Boolean(workspace.currentSession) &&
@@ -233,6 +245,7 @@ const connectReady = computed(() =>
 const layoutPreferences = computed(() => auth.user?.preferences ?? defaultUserPreferences);
 const leftSidebarCollapsed = computed(() => layoutPreferences.value.layout.leftSidebarCollapsed);
 const rightSidebarCollapsed = computed(() => layoutPreferences.value.layout.rightSidebarCollapsed);
+const sessionPaneCollapsed = computed(() => layoutPreferences.value.layout.sessionPaneCollapsed);
 const resolvedSidebarWidths = computed(() =>
   resolveSidebarWidths(
     leftSidebarCollapsed.value ? 0 : liveLeftSidebarWidth.value,
@@ -254,7 +267,7 @@ const workspaceGridStyle = computed<Record<string, string>>(() => ({
   '--right-sidebar-width': `${effectiveRightSidebarWidth.value}px`,
 }));
 const workspaceContentStyle = computed<Record<string, string>>(() => ({
-  '--session-pane-width': `${liveSessionPaneWidth.value}px`,
+  '--session-pane-width': `${sessionPaneCollapsed.value ? 0 : liveSessionPaneWidth.value}px`,
 }));
 const fileWorkbenchStyle = computed<Record<string, string>>(() => ({
   '--file-tree-pane-height': `${liveFileTreeHeight.value}px`,
@@ -271,6 +284,9 @@ const rightSidebarToggleLabel = computed(() => {
   }
   return rightSidebarCollapsed.value ? locale.t('expandRightSidebar') : locale.t('collapseRightSidebar');
 });
+const sessionPaneToggleLabel = computed(() =>
+  sessionPaneCollapsed.value ? locale.t('expandSessionPane') : locale.t('collapseSessionPane'),
+);
 const leftSidebarToggleIcon = computed(() =>
   isCompactViewport.value
     ? leftOverlayOpen.value
@@ -289,6 +305,7 @@ const rightSidebarToggleIcon = computed(() =>
       ? PanelRightOpen
       : PanelRightClose,
 );
+const sessionPaneToggleIcon = computed(() => (sessionPaneCollapsed.value ? PanelLeftOpen : PanelLeftClose));
 const isImportingProject = computed(() => workspace.gitImportStatus === 'running');
 const isLoadingGitStatus = computed(() => workspace.gitStatusLoading);
 const isPublishingGit = computed(() => workspace.gitPublishStatus === 'running');
@@ -649,6 +666,26 @@ function toggleRightSidebar() {
   });
 }
 
+function toggleSessionPane() {
+  if (isCompactViewport.value) return;
+
+  cancelSessionResize();
+  void updateLayoutPreferences({
+    sessionPaneCollapsed: !sessionPaneCollapsed.value,
+  });
+}
+
+function handleLeftSidebarResizeWheel(event: WheelEvent) {
+  const container = leftSidebarBody.value;
+  if (!container || leftSidebarCollapsed.value || isCompactViewport.value) return;
+
+  const previousScrollTop = container.scrollTop;
+  container.scrollTop += event.deltaY;
+  if (container.scrollTop !== previousScrollTop) {
+    event.preventDefault();
+  }
+}
+
 function startSidebarResize(side: SidebarSide, event: PointerEvent) {
   if (isCompactViewport.value || isSidebarCollapsed(side)) return;
 
@@ -697,7 +734,7 @@ function cancelSidebarResize() {
 }
 
 function startSessionResize(event: PointerEvent) {
-  if (isCompactViewport.value) return;
+  if (isCompactViewport.value || sessionPaneCollapsed.value) return;
 
   const target = event.currentTarget;
   if (target instanceof HTMLElement) {
@@ -737,6 +774,8 @@ function cancelSessionResize() {
 }
 
 function handleSessionResizeKeydown(event: KeyboardEvent) {
+  if (isCompactViewport.value || sessionPaneCollapsed.value) return;
+
   let nextWidth = liveSessionPaneWidth.value;
   if (event.key === 'ArrowRight') {
     nextWidth += sidebarResizeStep;
@@ -1104,6 +1143,29 @@ async function createSession() {
   await runTask(async () => {
     await workspace.createSession(sessionTitle.value || undefined);
     sessionTitle.value = '';
+  });
+}
+
+function openSessionRename(session: { id: string; title: string }) {
+  sessionRenameTargetId.value = session.id;
+  sessionRenameTargetName.value = session.title;
+  sessionRenameTitle.value = session.title;
+  sessionRenameModal.value = true;
+}
+
+function closeSessionRename() {
+  sessionRenameModal.value = false;
+  sessionRenameTargetId.value = '';
+  sessionRenameTargetName.value = '';
+  sessionRenameTitle.value = '';
+}
+
+async function submitSessionRename() {
+  if (!sessionRenameTargetId.value || !canSubmitSessionRename.value) return;
+  const title = normalizedSessionRenameTitle.value;
+  await runTask(async () => {
+    await workspace.updateSessionTitle(sessionRenameTargetId.value, title);
+    closeSessionRename();
   });
 }
 
@@ -1840,7 +1902,7 @@ function projectDescription(project: { description?: string; sourceType: string;
           </n-alert>
         </header>
 
-        <div class="left-sidebar-body scrollbar-thin">
+        <div ref="leftSidebarBody" class="left-sidebar-body scrollbar-thin">
         <section class="left-sidebar-card left-sidebar-card--fixed border-b border-mebius-border p-3">
           <div class="mb-2 flex items-center gap-2 text-sm font-medium">
             <n-icon><Folder /></n-icon>
@@ -2134,6 +2196,7 @@ function projectDescription(project: { description?: string; sourceType: string;
           :aria-valuenow="effectiveLeftSidebarWidth"
           tabindex="0"
           @pointerdown="startSidebarResize('left', $event)"
+          @wheel="handleLeftSidebarResizeWheel"
           @keydown="handleSidebarResizeKeydown('left', $event)"
         />
       </aside>
@@ -2151,10 +2214,27 @@ function projectDescription(project: { description?: string; sourceType: string;
             >
               <template #icon><n-icon><component :is="leftSidebarToggleIcon" /></n-icon></template>
             </n-button>
+            <n-button
+              v-if="!isCompactViewport"
+              circle
+              quaternary
+              size="small"
+              :title="sessionPaneToggleLabel"
+              :aria-label="sessionPaneToggleLabel"
+              @click="toggleSessionPane"
+            >
+              <template #icon><n-icon><component :is="sessionPaneToggleIcon" /></n-icon></template>
+            </n-button>
             <div class="min-w-0">
-              <h2 class="m-0 truncate text-base font-semibold">
+              <button
+                class="session-title-button"
+                type="button"
+                :disabled="!workspace.currentSession"
+                :title="workspace.currentSession ? locale.t('renameSession') : undefined"
+                @click="workspace.currentSession && openSessionRename(workspace.currentSession)"
+              >
                 {{ workspace.currentSession?.title ?? locale.t('noSessionSelected') }}
-              </h2>
+              </button>
               <p class="m-0 truncate text-xs text-mebius-muted">
                 {{ workspace.currentProject?.name ?? locale.t('createOrSelectProject') }}
                 · SSE {{ workspace.eventStatus }}
@@ -2187,8 +2267,12 @@ function projectDescription(project: { description?: string; sourceType: string;
           </n-space>
         </header>
 
-        <div class="workspace-content-grid" :style="workspaceContentStyle">
-          <aside class="session-pane min-h-0 border-r border-mebius-border bg-white p-3">
+        <div
+          class="workspace-content-grid"
+          :class="{ 'is-session-pane-collapsed': sessionPaneCollapsed }"
+          :style="workspaceContentStyle"
+        >
+          <aside v-if="!sessionPaneCollapsed" class="session-pane min-h-0 border-r border-mebius-border bg-white p-3">
             <div class="mb-3 flex items-center justify-between">
               <span class="text-sm font-medium">{{ locale.t('sessions') }}</span>
               <n-button circle quaternary size="small" :title="locale.t('newSession')" @click="createSession">
@@ -2210,6 +2294,16 @@ function projectDescription(project: { description?: string; sourceType: string;
                       :title="session.title"
                       :description="session.activeModelConfig?.modelName || session.status"
                     />
+                    <n-button
+                      circle
+                      quaternary
+                      size="small"
+                      :disabled="busy"
+                      :title="locale.t('renameSession')"
+                      @click.stop="openSessionRename(session)"
+                    >
+                      <template #icon><n-icon><Pencil /></n-icon></template>
+                    </n-button>
                     <n-popconfirm @positive-click="deleteSession(session.id)">
                       <template #trigger>
                         <n-button
@@ -2231,12 +2325,12 @@ function projectDescription(project: { description?: string; sourceType: string;
             </div>
           </aside>
           <div
-            v-if="!isCompactViewport"
+            v-if="!isCompactViewport && !sessionPaneCollapsed"
             class="workspace-content-resize-handle"
             :class="{ 'is-active': activeWorkspaceResizeTarget === 'sessions' }"
             role="separator"
             aria-orientation="vertical"
-            aria-label="Resize sessions"
+            :aria-label="locale.t('resizeSessionPane')"
             :aria-valuemin="sessionPaneWidthLimits.min"
             :aria-valuemax="sessionPaneWidthLimits.max"
             :aria-valuenow="liveSessionPaneWidth"
@@ -2251,38 +2345,39 @@ function projectDescription(project: { description?: string; sourceType: string;
               class="chat-scroll min-h-0 flex-1 overflow-y-auto p-4 scrollbar-thin"
               @scroll="handleChatScroll"
             >
-              <div v-if="workspace.messages.length === 0" class="chat-empty-state">
-                <MebiusBrand class="chat-empty-state__brand" size="hero" :text="false" />
-                <p>{{ locale.t('createSessionHint') }}</p>
-              </div>
-              <div
-                v-for="message in workspace.messages"
-                :key="message.id"
-                class="chat-message mb-3 rounded border border-mebius-border bg-white p-3"
-                :class="`chat-message--${message.role}`"
-              >
-                <div class="mb-2 text-xs font-semibold uppercase tracking-wide text-mebius-muted">
-                  {{ message.role }}
+              <div class="chat-thread">
+                <div v-if="workspace.messages.length === 0" class="chat-empty-state">
+                  <MebiusBrand class="chat-empty-state__brand" size="hero" :text="false" />
+                  <p>{{ locale.t('createSessionHint') }}</p>
                 </div>
-                <MessageContent :role="message.role" :content="message.content" :metadata="message.metadata" />
-              </div>
-
-              <div
-                v-if="agentActivityText"
-                class="mb-3 rounded border p-3"
-                :class="agentActivityToneClass"
-                role="status"
-                aria-live="polite"
-              >
-                <div class="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide">
-                  <n-icon class="shrink-0" :class="{ 'animate-spin': agentActivitySpins }">
-                    <component :is="agentActivityIcon" />
-                  </n-icon>
-                  <span>{{ locale.t('agentStatusLabel') }}</span>
+                <div
+                  v-for="message in workspace.messages"
+                  :key="message.id"
+                  class="chat-message rounded border border-mebius-border bg-white p-3"
+                  :class="`chat-message--${message.role}`"
+                >
+                  <div class="mb-2 text-xs font-semibold uppercase tracking-wide text-mebius-muted">
+                    {{ message.role }}
+                  </div>
+                  <MessageContent :role="message.role" :content="message.content" :metadata="message.metadata" />
                 </div>
-                <p class="m-0 text-sm leading-6">{{ agentActivityText }}</p>
-              </div>
 
+                <div
+                  v-if="agentActivityText"
+                  class="chat-activity rounded border p-3"
+                  :class="agentActivityToneClass"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <div class="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide">
+                    <n-icon class="shrink-0" :class="{ 'animate-spin': agentActivitySpins }">
+                      <component :is="agentActivityIcon" />
+                    </n-icon>
+                    <span>{{ locale.t('agentStatusLabel') }}</span>
+                  </div>
+                  <p class="m-0 text-sm leading-6">{{ agentActivityText }}</p>
+                </div>
+              </div>
             </div>
 
             <footer class="composer-footer border-t border-mebius-border bg-white p-3">
@@ -2955,6 +3050,28 @@ function projectDescription(project: { description?: string; sourceType: string;
       </aside>
     </div>
 
+    <n-modal v-model:show="sessionRenameModal" preset="card" :title="locale.t('renameSession')" class="max-w-[520px]">
+      <n-form label-placement="top" @submit.prevent="submitSessionRename">
+        <n-form-item :label="locale.t('sessionTitle')">
+          <n-input
+            v-model:value="sessionRenameTitle"
+            maxlength="120"
+            show-count
+            :placeholder="locale.t('sessionTitle')"
+            @keyup.enter="submitSessionRename"
+          />
+        </n-form-item>
+        <div class="flex justify-end gap-2">
+          <n-button secondary :disabled="busy" @click="closeSessionRename">
+            {{ locale.t('cancel') }}
+          </n-button>
+          <n-button type="primary" :loading="busy" :disabled="!canSubmitSessionRename" @click="submitSessionRename">
+            {{ locale.t('save') }}
+          </n-button>
+        </div>
+      </n-form>
+    </n-modal>
+
     <n-modal v-model:show="newFileModal" preset="card" :title="locale.t('newFile')" class="max-w-[520px]">
       <n-form label-placement="top" @submit.prevent="submitNewFile">
         <n-form-item :label="locale.t('newFilePath')">
@@ -3095,6 +3212,36 @@ function projectDescription(project: { description?: string; sourceType: string;
   overflow: hidden;
 }
 
+.session-title-button {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  display: block;
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1.5rem;
+  margin: 0;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 0;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-title-button:hover,
+.session-title-button:focus-visible {
+  color: var(--mebius-accent);
+  outline: none;
+}
+
+.session-title-button:disabled {
+  color: inherit;
+  cursor: default;
+}
+
 .workspace-side-panel--right {
   background: #f8fafc;
 }
@@ -3106,6 +3253,7 @@ function projectDescription(project: { description?: string; sourceType: string;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .left-sidebar-card {
@@ -3162,6 +3310,10 @@ function projectDescription(project: { description?: string; sourceType: string;
   overflow: hidden;
 }
 
+.workspace-content-grid.is-session-pane-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .session-pane {
   display: flex;
   flex-direction: column;
@@ -3173,6 +3325,17 @@ function projectDescription(project: { description?: string; sourceType: string;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+}
+
+.chat-thread {
+  align-items: flex-start;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin: 0 auto;
+  max-width: 1120px;
+  min-width: 0;
+  width: 100%;
 }
 
 .chat-empty-state {
@@ -3263,8 +3426,8 @@ function projectDescription(project: { description?: string; sourceType: string;
   outline: none;
   position: absolute;
   top: 0;
-  touch-action: none;
-  width: 12px;
+  touch-action: pan-y;
+  width: 8px;
   z-index: 20;
 }
 
@@ -4237,6 +4400,10 @@ function projectDescription(project: { description?: string; sourceType: string;
     display: block;
   }
 
+  .workspace-side-panel--left .left-sidebar-body {
+    margin-right: 8px;
+  }
+
   .workspace-shell.is-resizing-sidebar,
   .workspace-shell.is-resizing-sidebar * {
     cursor: col-resize !important;
@@ -4411,8 +4578,8 @@ function projectDescription(project: { description?: string; sourceType: string;
     rgb(13 20 32 / 78%) !important;
   border-color: var(--mebius-border) !important;
   box-shadow: 0 14px 36px rgb(0 0 0 / 16%);
-  margin-left: 0;
   max-width: min(880px, 100%);
+  width: fit-content;
 }
 
 .chat-message--user {
@@ -4804,6 +4971,7 @@ function projectDescription(project: { description?: string; sourceType: string;
   max-width: min(900px, 100%);
   overflow: hidden;
   position: relative;
+  width: fit-content;
 }
 
 :global(:root[data-theme="dark"]) .chat-message {
@@ -4821,6 +4989,32 @@ function projectDescription(project: { description?: string; sourceType: string;
   margin-left: auto;
 }
 
+.chat-activity {
+  max-width: min(900px, 100%);
+}
+
+.chat-thread .chat-empty-state {
+  align-self: center;
+  max-width: min(900px, 100%);
+  width: 100%;
+}
+
+.chat-thread .chat-message {
+  align-self: flex-start;
+  margin: 0;
+}
+
+.chat-thread .chat-message--user {
+  align-self: flex-end;
+  margin-left: 0;
+}
+
+.chat-thread .chat-activity {
+  align-self: flex-start;
+  margin: 0;
+  width: min(900px, 100%);
+}
+
 .chat-message--assistant {
   background: var(--workspace-message-assistant-bg) !important;
   border-left-color: color-mix(in srgb, var(--mebius-accent) 58%, var(--workspace-card-border)) !important;
@@ -4835,6 +5029,9 @@ function projectDescription(project: { description?: string; sourceType: string;
 .composer-shell {
   background: var(--workspace-input-bg) !important;
   border-color: var(--workspace-card-border) !important;
+  margin: 0 auto;
+  max-width: 1120px;
+  width: 100%;
   box-shadow: 0 8px 22px rgb(15 23 42 / 6%);
 }
 

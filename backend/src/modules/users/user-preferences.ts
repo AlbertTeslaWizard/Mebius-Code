@@ -1,6 +1,7 @@
 export interface LayoutPreferences {
   leftSidebarCollapsed: boolean;
   rightSidebarCollapsed: boolean;
+  sessionPaneCollapsed: boolean;
   leftSidebarWidth: number;
   rightSidebarWidth: number;
 }
@@ -25,6 +26,7 @@ export const defaultUserPreferences: UserPreferences = {
   layout: {
     leftSidebarCollapsed: false,
     rightSidebarCollapsed: false,
+    sessionPaneCollapsed: false,
     leftSidebarWidth: 280,
     rightSidebarWidth: 420,
   },
@@ -47,6 +49,7 @@ export function normalizeUserPreferences(value: unknown): UserPreferences {
     layout: {
       leftSidebarCollapsed: layout.leftSidebarCollapsed === true,
       rightSidebarCollapsed: layout.rightSidebarCollapsed === true,
+      sessionPaneCollapsed: layout.sessionPaneCollapsed === true,
       leftSidebarWidth: normalizeLayoutWidth(layout.leftSidebarWidth, layoutWidthLimits.leftSidebarWidth),
       rightSidebarWidth: normalizeLayoutWidth(layout.rightSidebarWidth, layoutWidthLimits.rightSidebarWidth),
     },
@@ -67,6 +70,9 @@ export function mergeUserPreferences(
   }
   if (typeof patch.layout?.rightSidebarCollapsed === 'boolean') {
     next.layout.rightSidebarCollapsed = patch.layout.rightSidebarCollapsed;
+  }
+  if (typeof patch.layout?.sessionPaneCollapsed === 'boolean') {
+    next.layout.sessionPaneCollapsed = patch.layout.sessionPaneCollapsed;
   }
   if (typeof patch.layout?.leftSidebarWidth === 'number') {
     next.layout.leftSidebarWidth = normalizeLayoutWidth(

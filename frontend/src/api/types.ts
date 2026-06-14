@@ -1,6 +1,7 @@
 export interface LayoutPreferences {
   leftSidebarCollapsed: boolean;
   rightSidebarCollapsed: boolean;
+  sessionPaneCollapsed: boolean;
   leftSidebarWidth: number;
   rightSidebarWidth: number;
 }

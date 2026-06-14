@@ -46,6 +46,10 @@ class MebiusRepository(
         client.createSession(bearer(token), projectId, CreateSessionRequest(title = title?.ifBlank { null }))
     }
 
+    suspend fun updateSessionTitle(sessionId: String, title: String): Session = withApi { client, token ->
+        client.updateSession(bearer(token), sessionId, UpdateSessionRequest(title.trim()))
+    }
+
     suspend fun loadSession(sessionId: String): SessionDetails = withApi { client, token ->
         val auth = bearer(token)
         val session = client.session(auth, sessionId)
@@ -55,6 +59,10 @@ class MebiusRepository(
         val patches = runCatching { client.patches(auth, sessionId) }.getOrDefault(emptyList())
         val runs = runCatching { client.commandRuns(auth, sessionId) }.getOrDefault(emptyList())
         SessionDetails(session, messages, plan, approvals, patches, runs)
+    }
+
+    suspend fun deleteSession(sessionId: String) = withApi { client, token ->
+        client.deleteSession(bearer(token), sessionId)
     }
 
     suspend fun runAgent(sessionId: String, message: String) = withApi { client, token ->

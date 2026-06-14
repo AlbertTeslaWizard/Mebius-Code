@@ -19,6 +19,7 @@ describe('UsersService', () => {
       layout: {
         leftSidebarCollapsed: true,
         rightSidebarCollapsed: false,
+        sessionPaneCollapsed: true,
         leftSidebarWidth: 310,
         rightSidebarWidth: 480,
       },
@@ -35,6 +36,7 @@ describe('UsersService', () => {
           layout: {
             leftSidebarCollapsed: true,
             rightSidebarCollapsed: true,
+            sessionPaneCollapsed: true,
             leftSidebarWidth: 310,
             rightSidebarWidth: 640,
           },
@@ -46,6 +48,7 @@ describe('UsersService', () => {
     );
     expect(result.preferences.layout.leftSidebarCollapsed).toBe(true);
     expect(result.preferences.layout.rightSidebarCollapsed).toBe(true);
+    expect(result.preferences.layout.sessionPaneCollapsed).toBe(true);
     expect(result.preferences.layout.leftSidebarWidth).toBe(310);
     expect(result.preferences.layout.rightSidebarWidth).toBe(640);
   });
@@ -60,6 +63,7 @@ describe('UsersService', () => {
       layout: {
         leftSidebarCollapsed: false,
         rightSidebarCollapsed: false,
+        sessionPaneCollapsed: false,
         leftSidebarWidth: 280,
         rightSidebarWidth: 420,
       },
@@ -74,6 +78,7 @@ describe('UsersService', () => {
       layout: {
         leftSidebarCollapsed: false,
         rightSidebarCollapsed: true,
+        sessionPaneCollapsed: 'closed',
         leftSidebarWidth: 'wide',
         rightSidebarWidth: 9999,
       },
@@ -86,6 +91,7 @@ describe('UsersService', () => {
       layout: {
         leftSidebarCollapsed: false,
         rightSidebarCollapsed: true,
+        sessionPaneCollapsed: false,
         leftSidebarWidth: 280,
         rightSidebarWidth: 820,
       },
@@ -100,6 +106,7 @@ describe('UsersService', () => {
       layout: {
         leftSidebarCollapsed: true,
         rightSidebarCollapsed: false,
+        sessionPaneCollapsed: true,
         leftSidebarWidth: 300,
         rightSidebarWidth: 620,
       },
@@ -117,6 +124,7 @@ describe('UsersService', () => {
       layout: {
         leftSidebarCollapsed: true,
         rightSidebarCollapsed: false,
+        sessionPaneCollapsed: true,
         leftSidebarWidth: 300,
         rightSidebarWidth: 620,
       },

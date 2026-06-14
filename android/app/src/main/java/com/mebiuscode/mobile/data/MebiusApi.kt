@@ -46,6 +46,19 @@ interface MebiusApi {
         @Path("sessionId") sessionId: String,
     ): Session
 
+    @PATCH("sessions/{sessionId}")
+    suspend fun updateSession(
+        @Header("Authorization") authorization: String,
+        @Path("sessionId") sessionId: String,
+        @Body body: UpdateSessionRequest,
+    ): Session
+
+    @DELETE("sessions/{sessionId}")
+    suspend fun deleteSession(
+        @Header("Authorization") authorization: String,
+        @Path("sessionId") sessionId: String,
+    ): Response<ResponseBody>
+
     @GET("sessions/{sessionId}/messages")
     suspend fun messages(
         @Header("Authorization") authorization: String,

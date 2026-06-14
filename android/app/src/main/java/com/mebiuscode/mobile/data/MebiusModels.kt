@@ -134,6 +134,11 @@ data class CreateSessionRequest(
 )
 
 @Serializable
+data class UpdateSessionRequest(
+    val title: String,
+)
+
+@Serializable
 data class Message(
     val id: String,
     val role: String,

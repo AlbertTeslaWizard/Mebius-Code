@@ -170,15 +170,70 @@ class MebiusViewModel(
         refreshOverview()
     }
 
-    fun createSession(project: Project) {
+    fun createSession(project: Project, title: String) {
+        val normalizedTitle = title.trim()
+        if (normalizedTitle.length !in 2..120) {
+            _state.update { it.copy(error = "Session title must be 2-120 characters.") }
+            return
+        }
         _state.update { it.copy(error = null) }
         viewModelScope.launch {
-            runCatching { repository.createSession(project.id, "Mobile session") }
+            runCatching { repository.createSession(project.id, normalizedTitle) }
                 .onSuccess { session ->
                     refreshOverview()
                     openSession(session.id)
                 }
                 .onFailure { error -> _state.update { it.copy(error = error.userMessage()) } }
+        }
+    }
+
+    fun renameSession(sessionId: String, title: String) {
+        val normalizedTitle = title.trim()
+        if (normalizedTitle.length !in 2..120) {
+            _state.update { it.copy(error = "Session title must be 2-120 characters.") }
+            return
+        }
+        _state.update { it.copy(error = null) }
+        viewModelScope.launch {
+            runCatching { repository.updateSessionTitle(sessionId, normalizedTitle) }
+                .onSuccess {
+                    refreshOverview()
+                    if (isCurrentSession(sessionId)) {
+                        refreshSessionDetails(sessionId)
+                    }
+                }
+                .onFailure { error -> _state.update { it.copy(error = error.userMessage()) } }
+        }
+    }
+
+    fun deleteSession(sessionId: String) {
+        val wasCurrent = _state.value.selectedSessionId == sessionId
+        if (wasCurrent) {
+            streamJob?.cancel()
+            _state.update { it.copy(error = null, streamStatus = "deleting") }
+        } else {
+            _state.update { it.copy(error = null) }
+        }
+        viewModelScope.launch {
+            runCatching { repository.deleteSession(sessionId) }
+                .onSuccess {
+                    val snapshot = _state.value
+                    if (snapshot.selectedSessionId == sessionId) {
+                        clearCurrentSession()
+                    }
+                    refreshOverview()
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(
+                            error = error.userMessage(),
+                            streamStatus = if (wasCurrent) "error" else it.streamStatus,
+                        )
+                    }
+                    if (wasCurrent && isCurrentSession(sessionId)) {
+                        subscribeSession(sessionId)
+                    }
+                }
         }
     }
 
@@ -299,7 +354,12 @@ class MebiusViewModel(
                                 _state.update { it.copy(streamStatus = event.type, streamingText = "") }
                             }
                             "agent_status" -> {
-                                _state.update { it.copy(streamStatus = event.statusText() ?: "active") }
+                                val status = event.statusText() ?: "active"
+                                if (status == "session_deleted") {
+                                    handleMissingSession("Session was deleted.")
+                                    throw CancellationException("Session was deleted.")
+                                }
+                                _state.update { it.copy(streamStatus = status) }
                             }
                             "session_deleted" -> {
                                 handleMissingSession("Session was deleted.")
@@ -376,6 +436,7 @@ class MebiusViewModel(
     }
 
     private fun handleMissingSession(message: String) {
+        streamJob?.cancel()
         _state.update {
             it.copy(
                 route = Route.Dashboard,
@@ -388,6 +449,21 @@ class MebiusViewModel(
             )
         }
         refreshOverview()
+    }
+
+    private fun clearCurrentSession() {
+        streamJob?.cancel()
+        _state.update {
+            it.copy(
+                route = Route.Dashboard,
+                selectedProject = null,
+                selectedSessionId = null,
+                sessionDetails = LoadState.Idle,
+                composerText = "",
+                streamStatus = "idle",
+                streamingText = "",
+            )
+        }
     }
 
     private fun streamRetryDelay(failureCount: Int): Long {

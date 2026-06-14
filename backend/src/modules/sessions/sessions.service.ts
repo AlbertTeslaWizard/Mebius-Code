@@ -71,7 +71,7 @@ export class SessionsService {
     private readonly events: EventsService,
   ) {}
 
-  async create(projectId: string, owner: User, dto: CreateSessionDto): Promise<Session> {
+  async create(projectId: string, owner: User, dto: CreateSessionDto): Promise<SessionView> {
     const project = await this.projects.findOwned(owner.id, projectId);
     const activeModelConfig = dto.modelConfigId
       ? ({ id: dto.modelConfigId } as unknown as Session['activeModelConfig'])
@@ -87,7 +87,7 @@ export class SessionsService {
       }),
     );
     this.events.publish(session.id, 'agent_status', { status: 'session_created' });
-    return session;
+    return this.toView(await this.findOwned(owner.id, session.id));
   }
 
   async findOwned(ownerId: string, sessionId: string): Promise<Session> {
