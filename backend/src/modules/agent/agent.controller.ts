@@ -4,6 +4,8 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { UsersService } from '../users/users.service';
 import { AgentService } from './agent.service';
 import { CreatePlanDto } from './dto/create-plan.dto';
+import { DiscussPlanDto } from './dto/discuss-plan.dto';
+import { RevisePlanDto } from './dto/revise-plan.dto';
 import { RunAgentDto } from './dto/run-agent.dto';
 import { UpdatePlanAnswersDto } from './dto/update-plan-answers.dto';
 
@@ -34,6 +36,26 @@ export class AgentController {
   async approvePlan(@Req() request: RequestWithUser, @Param('id') id: string) {
     const owner = await this.users.findById(request.user.sub);
     return this.agent.approvePlan(owner, id);
+  }
+
+  @Post('plans/:id/revise')
+  async revisePlan(
+    @Req() request: RequestWithUser,
+    @Param('id') id: string,
+    @Body() dto: RevisePlanDto,
+  ) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.agent.revisePlan(owner, id, dto);
+  }
+
+  @Post('plans/:id/discuss')
+  async discussPlan(
+    @Req() request: RequestWithUser,
+    @Param('id') id: string,
+    @Body() dto: DiscussPlanDto,
+  ) {
+    const owner = await this.users.findById(request.user.sub);
+    return this.agent.discussPlan(owner, id, dto);
   }
 
   @Patch('plans/:id/answers')

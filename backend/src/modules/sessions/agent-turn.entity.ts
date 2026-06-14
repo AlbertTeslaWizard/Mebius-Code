@@ -14,6 +14,8 @@ import { Session } from './session.entity';
 export enum AgentTurnKind {
   Chat = 'chat',
   Plan = 'plan',
+  PlanRevision = 'plan_revision',
+  PlanDiscussion = 'plan_discussion',
   PlanApproval = 'plan_approval',
   PlanExecution = 'plan_execution',
   Legacy = 'legacy',

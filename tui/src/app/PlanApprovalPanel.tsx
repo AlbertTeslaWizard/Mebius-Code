@@ -135,8 +135,8 @@ export function PlanQuestionPanel(props: {
   const hiddenChoiceCount = createMemo(() => Math.max(0, props.question.choices.length - visibleChoices().length));
 
   function choiceMark(choiceId: string) {
-    if (props.question.multiSelect) return props.selectedChoiceIds.includes(choiceId) ? '[x]' : '[ ]';
-    return props.selectedChoiceIds[0] === choiceId ? '(x)' : '( )';
+    if (props.question.multiSelect) return props.selectedChoiceIds.includes(choiceId) ? '[✓]' : '[ ]';
+    return props.selectedChoiceIds[0] === choiceId ? '(●)' : '( )';
   }
 
   return (

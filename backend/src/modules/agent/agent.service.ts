@@ -19,6 +19,8 @@ import { resolveCommandRuntime } from '../tools/command-runtime';
 import { buildCodingToolSpecs, codingToolNames, type CodingToolSpec } from '../tools/tool-specs';
 import { PendingToolMessage, PendingToolResumeContext } from './agent-resume.types';
 import { CreatePlanDto } from './dto/create-plan.dto';
+import { DiscussPlanDto } from './dto/discuss-plan.dto';
+import { RevisePlanDto } from './dto/revise-plan.dto';
 import { ActiveSkillDto, RunAgentDto } from './dto/run-agent.dto';
 import { UpdatePlanAnswersDto } from './dto/update-plan-answers.dto';
 import { LlmMessage, LlmToolCall, OpenAiCompatibleService } from './openai-compatible.service';
@@ -58,6 +60,24 @@ const MAX_AUTO_TOOL_TURNS = 16;
 const PLAN_IDEMPOTENCY_WINDOW_MS = 15_000;
 const LEGACY_PENDING_APPROVAL_STATUS = 'pending_approval';
 const LEGACY_REJECTED_STATUS = 'rejected';
+const PLAN_DRAFT_SYSTEM_PROMPT =
+  'You are Mebius Code Plan Mode. Stream a complete Markdown plan. Do not execute tools. ' +
+  'Use exactly these top-level sections: # Plan, ## Summary, ## Requirements Understanding, ## Technical Choices, ## Target Outcome, ## Modules, ## File Structure, ## Implementation Steps, ## Clarification Questions, ## Risks / Tradeoffs. ' +
+  'In ## Implementation Steps, write a numbered list where each item is "Title: Detail". ' +
+  'In ## Clarification Questions, write "- None" if no clarification is needed. If clarification is needed, use one "### question-id: Question title" block per question with lines: Prompt: ..., Required: yes/no, Multi-select: yes/no, Allow custom answer: yes/no, Recommended: choice-id or none, then Choices: with "- choice-id: Label - Description" items, and optional Notes: ... . ' +
+  'Questions must be answerable: either provide 2-4 meaningful choices or set Allow custom answer to yes for open-ended input.';
+const PLAN_FINALIZE_SYSTEM_PROMPT =
+  'You are finalizing a Mebius Code Plan Mode draft after user clarification answers. Stream a complete Markdown plan. Do not execute tools. ' +
+  'Use exactly these top-level sections: # Plan, ## Summary, ## Requirements Understanding, ## Technical Choices, ## Target Outcome, ## Modules, ## File Structure, ## Implementation Steps, ## User Selections, ## Risks / Tradeoffs. ' +
+  'In ## Implementation Steps, write a numbered list where each item is "Title: Detail". Include the user selections in the plan.';
+const PLAN_REVISE_SYSTEM_PROMPT =
+  'You are revising an existing Mebius Code Plan Mode draft. Stream a complete replacement Markdown plan. Do not execute tools. ' +
+  'Use exactly these top-level sections: # Plan, ## Summary, ## Requirements Understanding, ## Technical Choices, ## Target Outcome, ## Modules, ## File Structure, ## Implementation Steps, ## Clarification Questions, ## Risks / Tradeoffs. ' +
+  'In ## Implementation Steps, write a numbered list where each item is "Title: Detail". ' +
+  'Apply the user revision instruction to the current plan, preserve still-valid decisions, and ask clarification questions only when the revised plan cannot be decision-complete.';
+const PLAN_DISCUSS_SYSTEM_PROMPT =
+  'You are discussing an unapproved Mebius Code Plan Mode draft with the user. Do not execute tools, do not claim implementation work, and do not produce a full replacement plan. ' +
+  'Answer questions about the current plan, explain tradeoffs, and suggest concrete next decisions. If the user asks to change the plan, tell them what change would be made and keep the response conversational.';
 const PLAN_QUESTION_CHOICE_STOPWORDS = new Set([
   'which',
   'what',
@@ -118,30 +138,27 @@ export class AgentService {
     const projectInstructions = await this.readProjectInstructionsForSession(owner.id, session);
     let parsed: ParsedPlan;
     try {
-      const response = await this.withModelDiagnostics(session.id, config, 'plan', 0, () =>
-        this.llm.chat({
-          config,
-          temperature: 0.1,
-          messages: [
-            {
-              role: 'system',
-              content:
-                'You are Mebius Code Plan Mode. Return strict JSON with keys summary, markdown, steps, and questions. ' +
-                'markdown must be a complete Markdown plan with sections: requirements understanding, technical choices, target outcome, modules, file structure, implementation steps, risks/tradeoffs. ' +
-                'steps must be an array of {title, detail}. questions must be an array and may be empty. Each question must be answerable: either provide 2-4 meaningful choices, or set allowCustomAnswer true for open-ended input. Each question must be data-driven with id, title, prompt, choices, recommendedChoiceId, allowCustomAnswer, notes, required, and multiSelect when useful. Do not execute tools.',
-            },
-            ...this.buildProjectInstructionMessages(projectInstructions),
-            ...this.buildActiveSkillMessages(dto.activeSkills ?? [], []),
-            {
-              role: 'user',
-              content: dto.goal,
-            },
-          ],
-        }),
+      const content = await this.streamPlanModelResponse(
+        session.id,
+        config,
+        [
+          {
+            role: 'system',
+            content: PLAN_DRAFT_SYSTEM_PROMPT,
+          },
+          ...this.buildProjectInstructionMessages(projectInstructions),
+          ...this.buildActiveSkillMessages(dto.activeSkills ?? [], []),
+          {
+            role: 'user',
+            content: dto.goal,
+          },
+        ],
+        0,
       );
-      parsed = this.parsePlan(response.content ?? '', dto.goal);
+      parsed = this.parsePlan(content, dto.goal);
     } catch (error) {
       parsed = this.fallbackDraftPlan(dto.goal, error instanceof Error ? error.message : undefined);
+      this.events.publish(session.id, 'token', { delta: parsed.markdown, content: parsed.markdown });
     }
 
     const { plan, steps, assistantMessage } = await this.saveDraftPlan(session, initialPlan, parsed, turn);
@@ -158,6 +175,8 @@ export class AgentService {
       questions: plan.questions,
       answers: plan.answers,
     });
+    this.events.publish(session.id, 'agent_status', { status: 'completed' });
+    this.events.complete(session.id);
     return { plan, steps };
   }
 
@@ -189,6 +208,161 @@ export class AgentService {
       status: saved.status,
     });
     return saved;
+  }
+
+  async revisePlan(owner: User, planId: string, dto: RevisePlanDto): Promise<{
+    plan: Plan;
+    steps: PlanStep[];
+  }> {
+    const plan = await this.findOwnedPlan(owner.id, planId);
+    if (!this.isPlanRevisionAllowed(plan.status)) {
+      throw new BadRequestException(`Plan is ${plan.status} and cannot be revised.`);
+    }
+    const session = await this.sessions.findOwned(owner.id, plan.session.id);
+    const steps = await this.planSteps.find({
+      where: { plan: { id: plan.id } },
+      order: { order: 'ASC' },
+    });
+    const turn = await this.sessions.createTurn(session, AgentTurnKind.PlanRevision, {
+      planId: plan.id,
+      previousStatus: plan.status,
+      instruction: dto.instruction,
+    });
+    const userMessage = await this.sessions.addMessage(
+      session,
+      MessageRole.User,
+      dto.instruction,
+      { type: 'plan_revision', planId: plan.id },
+      turn,
+    );
+    this.events.publish(session.id, 'message_created', {
+      id: userMessage.id,
+      role: userMessage.role,
+      content: userMessage.content,
+    });
+
+    const modelConfigId = session.activeModelConfig?.id;
+    const config = await this.modelConfigs.findRuntime(owner.id, modelConfigId);
+    const projectInstructions = await this.readProjectInstructionsForSession(owner.id, session);
+    let parsed: ParsedPlan;
+    try {
+      const content = await this.streamPlanModelResponse(
+        session.id,
+        config,
+        [
+          {
+            role: 'system',
+            content: PLAN_REVISE_SYSTEM_PROMPT,
+          },
+          ...this.buildProjectInstructionMessages(projectInstructions),
+          ...this.buildActiveSkillMessages(dto.activeSkills ?? [], []),
+          {
+            role: 'user',
+            content: this.buildPlanRevisionPrompt(plan, steps, dto.instruction),
+          },
+        ],
+        0,
+        'revising_plan',
+      );
+      parsed = this.parsePlan(content, plan.goal);
+    } catch (error) {
+      parsed = this.fallbackDraftPlan(plan.goal, error instanceof Error ? error.message : undefined);
+      this.events.publish(session.id, 'token', { delta: parsed.markdown, content: parsed.markdown });
+    }
+
+    const saved = await this.saveDraftPlan(session, plan, parsed, turn);
+    this.events.publish(session.id, 'message_created', {
+      id: saved.assistantMessage.id,
+      role: saved.assistantMessage.role,
+      content: saved.assistantMessage.content,
+    });
+    this.events.publish(session.id, 'plan_updated', {
+      planId: saved.plan.id,
+      status: saved.plan.status,
+      summary: saved.plan.summary,
+      steps: saved.steps,
+      questions: saved.plan.questions,
+      answers: saved.plan.answers,
+    });
+    this.events.publish(session.id, 'agent_status', { status: 'completed' });
+    this.events.complete(session.id);
+    return { plan: saved.plan, steps: saved.steps };
+  }
+
+  async discussPlan(owner: User, planId: string, dto: DiscussPlanDto): Promise<Message> {
+    const plan = await this.findOwnedPlan(owner.id, planId);
+    if (!this.isPlanRevisionAllowed(plan.status)) {
+      throw new BadRequestException(`Plan is ${plan.status} and cannot be discussed.`);
+    }
+    const session = await this.sessions.findOwned(owner.id, plan.session.id);
+    const steps = await this.planSteps.find({
+      where: { plan: { id: plan.id } },
+      order: { order: 'ASC' },
+    });
+    const turn = await this.sessions.createTurn(session, AgentTurnKind.PlanDiscussion, {
+      planId: plan.id,
+      message: dto.message,
+    });
+    const userMessage = await this.sessions.addMessage(
+      session,
+      MessageRole.User,
+      dto.message,
+      { type: 'plan_discussion', planId: plan.id },
+      turn,
+    );
+    this.events.publish(session.id, 'message_created', {
+      id: userMessage.id,
+      role: userMessage.role,
+      content: userMessage.content,
+    });
+
+    try {
+      const modelConfigId = session.activeModelConfig?.id;
+      const config = await this.modelConfigs.findRuntime(owner.id, modelConfigId);
+      const [history, projectInstructions] = await Promise.all([
+        this.sessions.listMessages(owner.id, session.id),
+        this.readProjectInstructionsForSession(owner.id, session),
+      ]);
+      const content = await this.streamPlanModelResponse(
+        session.id,
+        config,
+        [
+          {
+            role: 'system',
+            content: PLAN_DISCUSS_SYSTEM_PROMPT,
+          },
+          ...this.buildProjectInstructionMessages(projectInstructions),
+          ...this.buildActiveSkillMessages(dto.activeSkills ?? [], []),
+          {
+            role: 'system',
+            content: this.buildPlanDiscussionContext(plan, steps),
+          },
+          ...this.planDiscussionHistory(history, plan.id, userMessage.id),
+          {
+            role: 'user',
+            content: dto.message,
+          },
+        ],
+        0,
+        'plan_discussion',
+      );
+      const assistant = await this.saveAssistantResponse(
+        session,
+        content.trim() || 'No plan discussion response was generated.',
+        { type: 'plan_discussion', planId: plan.id },
+        turn,
+      );
+      this.events.publish(session.id, 'agent_status', { status: 'completed' });
+      this.events.complete(session.id);
+      return assistant;
+    } catch (error) {
+      this.events.publish(session.id, 'agent_status', {
+        status: 'failed',
+        message: error instanceof Error ? error.message : 'Plan discussion failed.',
+      });
+      this.events.complete(session.id);
+      throw error;
+    }
   }
 
   async cancelPlan(owner: User, planId: string): Promise<Plan> {
@@ -250,28 +424,26 @@ export class AgentService {
     let finalized: FinalizedPlan;
 
     try {
-      const response = await this.withModelDiagnostics(session.id, config, 'plan', 1, () =>
-        this.llm.chat({
-          config,
-          temperature: 0.1,
-          messages: [
-            {
-              role: 'system',
-              content:
-                'You are finalizing a Mebius Code Plan Mode draft after user clarification answers. ' +
-                'Return strict JSON with keys summary, markdown, and steps. markdown must be a complete Markdown plan and include the user selections. Do not execute tools.',
-            },
-            ...this.buildProjectInstructionMessages(projectInstructions),
-            {
-              role: 'user',
-              content: this.buildFinalizePrompt(plan, steps),
-            },
-          ],
-        }),
+      const content = await this.streamPlanModelResponse(
+        session.id,
+        config,
+        [
+          {
+            role: 'system',
+            content: PLAN_FINALIZE_SYSTEM_PROMPT,
+          },
+          ...this.buildProjectInstructionMessages(projectInstructions),
+          {
+            role: 'user',
+            content: this.buildFinalizePrompt(plan, steps),
+          },
+        ],
+        1,
       );
-      finalized = this.parseFinalPlan(response.content ?? '', plan, steps);
+      finalized = this.parseFinalPlan(content, plan, steps);
     } catch (error) {
       finalized = this.fallbackFinalPlan(plan, steps, error instanceof Error ? error.message : undefined);
+      this.events.publish(session.id, 'token', { delta: finalized.markdown, content: finalized.markdown });
     }
 
     const saved = await this.saveFinalPlan(plan, finalized);
@@ -283,6 +455,8 @@ export class AgentService {
       questions: saved.plan.questions,
       answers: saved.plan.answers,
     });
+    this.events.publish(session.id, 'agent_status', { status: 'completed' });
+    this.events.complete(session.id);
     return saved;
   }
 
@@ -1031,6 +1205,56 @@ export class AgentService {
     }
   }
 
+  private async streamPlanModelResponse(
+    sessionId: string,
+    config: Awaited<ReturnType<ModelConfigsService['findRuntime']>>,
+    messages: LlmMessage[],
+    turn: number,
+    activity?: string,
+  ): Promise<string> {
+    this.events.publish(sessionId, 'agent_status', {
+      status: 'thinking',
+      activity: activity ?? (turn === 0 ? 'planning' : 'finalizing_plan'),
+    });
+
+    const response = await this.withModelDiagnostics(sessionId, config, 'plan', turn, () =>
+      this.llm.streamChat(
+        {
+          config,
+          temperature: 0.1,
+          messages,
+        },
+        ({ delta, content }) => {
+          this.events.publish(sessionId, 'token', { delta, content });
+        },
+        {
+          onStreamFallback: ({ reason }) => {
+            this.events.publish(sessionId, 'stream_fallback', {
+              reason,
+              provider: config.providerId ?? config.displayName,
+              model: config.modelName,
+            });
+            this.events.publish(sessionId, 'agent_status', {
+              status: 'responding',
+              activity: 'plan_stream_fallback',
+              reason,
+            });
+          },
+          onStreamInterrupted: ({ reason, message }) => {
+            this.events.publish(sessionId, 'stream_interrupted', {
+              reason,
+              message,
+              provider: config.providerId ?? config.displayName,
+              model: config.modelName,
+            });
+          },
+        },
+      ),
+    );
+
+    return response.content ?? '';
+  }
+
   private modelDiagnosticMetadata(
     config: Awaited<ReturnType<ModelConfigsService['findRuntime']>>,
     mode: 'chat' | 'plan',
@@ -1264,6 +1488,28 @@ export class AgentService {
     return messages;
   }
 
+  private planDiscussionHistory(history: Message[], planId: string, currentUserMessageId: string): LlmMessage[] {
+    const messages: LlmMessage[] = [];
+    for (const message of history) {
+      if (message.id === currentUserMessageId || !this.isPlanDiscussionMessage(message, planId)) {
+        continue;
+      }
+      if (message.role !== MessageRole.User && message.role !== MessageRole.Assistant) {
+        continue;
+      }
+      messages.push({
+        role: this.mapRole(message.role) as 'user' | 'assistant',
+        content: message.content,
+      });
+    }
+    return messages.slice(-12);
+  }
+
+  private isPlanDiscussionMessage(message: Message, planId: string): boolean {
+    const metadata = message.metadata as Record<string, unknown> | null | undefined;
+    return metadata?.type === 'plan_discussion' && metadata.planId === planId;
+  }
+
   private hasAssistantContent(content: string | null | undefined): content is string {
     return typeof content === 'string' && content.trim().length > 0;
   }
@@ -1423,6 +1669,19 @@ export class AgentService {
       // Fall through to deterministic plan.
     }
 
+    const markdown = content.trim();
+    if (this.looksLikePlanMarkdown(markdown)) {
+      const sections = this.extractMarkdownSections(markdown);
+      const steps = this.sanitizePlanSteps(this.parseMarkdownPlanSteps(this.findMarkdownSection(sections, 'implementation steps')));
+      const questions = this.parseMarkdownPlanQuestions(this.findMarkdownSection(sections, 'clarification questions'));
+      return {
+        summary: this.parseMarkdownSummary(markdown, sections, goal),
+        markdown,
+        steps,
+        questions,
+      };
+    }
+
     return this.fallbackDraftPlan(goal, content || undefined);
   }
 
@@ -1439,7 +1698,239 @@ export class AgentService {
     } catch {
       // Fall through to deterministic final plan.
     }
+    const markdown = content.trim();
+    if (this.looksLikePlanMarkdown(markdown)) {
+      const sections = this.extractMarkdownSections(markdown);
+      const parsedSteps = this.parseMarkdownPlanSteps(this.findMarkdownSection(sections, 'implementation steps'));
+      return {
+        summary: this.parseMarkdownSummary(markdown, sections, plan.goal),
+        markdown,
+        steps: parsedSteps.length > 0 ? this.sanitizePlanSteps(parsedSteps) : steps.map((step) => ({ title: step.title, detail: step.detail })),
+      };
+    }
     return this.fallbackFinalPlan(plan, steps, content || undefined);
+  }
+
+  private looksLikePlanMarkdown(content: string): boolean {
+    return /^#\s+Plan\b/im.test(content) || /^##\s+Implementation Steps\b/im.test(content);
+  }
+
+  private extractMarkdownSections(content: string): Map<string, string> {
+    const sections = new Map<string, string>();
+    let currentKey: string | null = null;
+    let currentLines: string[] = [];
+    const flush = () => {
+      if (currentKey) {
+        sections.set(currentKey, currentLines.join('\n').trim());
+      }
+    };
+
+    for (const line of content.split(/\r?\n/)) {
+      const heading = line.match(/^##(?!#)\s+(.+?)\s*$/);
+      if (heading) {
+        flush();
+        currentKey = this.normalizeMarkdownHeading(heading[1]);
+        currentLines = [];
+        continue;
+      }
+      if (currentKey) {
+        currentLines.push(line);
+      }
+    }
+    flush();
+    return sections;
+  }
+
+  private findMarkdownSection(sections: Map<string, string>, ...names: string[]): string | undefined {
+    for (const name of names) {
+      const section = sections.get(this.normalizeMarkdownHeading(name));
+      if (section !== undefined) return section;
+    }
+    return undefined;
+  }
+
+  private normalizeMarkdownHeading(value: string): string {
+    return value
+      .toLowerCase()
+      .replace(/[`*_#]/g, '')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+  }
+
+  private parseMarkdownSummary(content: string, sections: Map<string, string>, goal: string): string {
+    const summary = this.firstMeaningfulMarkdownLine(this.findMarkdownSection(sections, 'summary'));
+    if (summary) return summary;
+
+    const requirements = this.findMarkdownSection(sections, 'requirements understanding');
+    const summaryLine = requirements?.match(/(?:^|\n)\s*[-*]?\s*Summary\s*:\s*(.+)/i)?.[1];
+    if (summaryLine?.trim()) return this.cleanMarkdownValue(summaryLine);
+
+    const title = content.match(/^#\s+(.+)$/m)?.[1];
+    const cleanedTitle = title ? this.cleanMarkdownValue(title) : '';
+    if (cleanedTitle && cleanedTitle.toLowerCase() !== 'plan') return cleanedTitle;
+    return `Plan for: ${goal}`;
+  }
+
+  private firstMeaningfulMarkdownLine(content: string | undefined): string | undefined {
+    if (!content) return undefined;
+    for (const line of content.split(/\r?\n/)) {
+      const cleaned = this.cleanMarkdownValue(line);
+      if (cleaned && cleaned.toLowerCase() !== 'none') {
+        return cleaned;
+      }
+    }
+    return undefined;
+  }
+
+  private parseMarkdownPlanSteps(content: string | undefined): Array<{ title: string; detail?: string }> {
+    if (!content) return [];
+    const steps: Array<{ title: string; detail?: string }> = [];
+    let inFence = false;
+    for (const line of content.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('```')) {
+        inFence = !inFence;
+        continue;
+      }
+      if (inFence || !trimmed || trimmed.startsWith('#')) continue;
+
+      const item = trimmed
+        .replace(/^[-*]\s+/, '')
+        .replace(/^\d+[.)]\s+/, '')
+        .trim();
+      if (!item || /^none$/i.test(item)) continue;
+
+      const cleaned = this.stripMarkdownInline(item);
+      const splitIndex = this.planStepSplitIndex(cleaned);
+      const title = splitIndex >= 0 ? cleaned.slice(0, splitIndex).trim() : cleaned;
+      const detail = splitIndex >= 0 ? cleaned.slice(splitIndex + (cleaned[splitIndex] === ':' ? 1 : 3)).trim() : undefined;
+      if (title) {
+        steps.push({ title, ...(detail ? { detail } : {}) });
+      }
+    }
+    return steps;
+  }
+
+  private planStepSplitIndex(value: string): number {
+    const colonIndex = value.indexOf(':');
+    if (colonIndex > 0 && colonIndex <= 100) return colonIndex;
+    const dashIndex = value.indexOf(' - ');
+    if (dashIndex > 0 && dashIndex <= 100) return dashIndex;
+    return -1;
+  }
+
+  private parseMarkdownPlanQuestions(content: string | undefined): PlanQuestion[] {
+    if (!content) return [];
+    if (/^\s*(?:[-*]\s*)?none\b/i.test(content.trim())) return [];
+
+    const rawQuestions: Record<string, unknown>[] = [];
+    let currentHeading: string | null = null;
+    let currentLines: string[] = [];
+    const flush = () => {
+      if (!currentHeading) return;
+      const question = this.parseMarkdownPlanQuestion(currentHeading, currentLines.join('\n'));
+      if (question) rawQuestions.push(question);
+    };
+
+    for (const line of content.split(/\r?\n/)) {
+      const heading = line.match(/^###\s+(.+?)\s*$/);
+      if (heading) {
+        flush();
+        currentHeading = heading[1];
+        currentLines = [];
+        continue;
+      }
+      if (currentHeading) currentLines.push(line);
+    }
+    flush();
+    return this.sanitizePlanQuestions(rawQuestions);
+  }
+
+  private parseMarkdownPlanQuestion(heading: string, body: string): Record<string, unknown> | null {
+    const cleanedHeading = this.cleanMarkdownValue(heading);
+    if (!cleanedHeading) return null;
+    const headingParts = cleanedHeading.split(/:\s*/);
+    const id = this.slugifyPlanId(headingParts[0], 'question');
+    const title = headingParts.slice(1).join(': ').trim() || headingParts[0].trim();
+    const fields = this.parseMarkdownPlanQuestionFields(body);
+    const choices = this.parseMarkdownPlanQuestionChoices(body);
+    const recommendedRaw = fields.get('recommended');
+    const recommended =
+      recommendedRaw && !['none', 'n/a', 'na'].includes(recommendedRaw.toLowerCase())
+        ? this.slugifyPlanId(recommendedRaw, '')
+        : '';
+    return {
+      id,
+      title,
+      prompt: fields.get('prompt') ?? title,
+      choices,
+      recommendedChoiceId: recommended || undefined,
+      allowCustomAnswer: this.parsePlanBoolean(fields.get('allow custom answer'), choices.length === 0),
+      required: this.parsePlanBoolean(fields.get('required'), true),
+      multiSelect: this.parsePlanBoolean(fields.get('multi select'), false),
+      notes: fields.get('notes'),
+    };
+  }
+
+  private parseMarkdownPlanQuestionFields(body: string): Map<string, string> {
+    const fields = new Map<string, string>();
+    for (const line of body.split(/\r?\n/)) {
+      const match = line.match(/^\s*(Prompt|Required|Multi[- ]select|Allow custom answer|Recommended|Notes)\s*:\s*(.+?)\s*$/i);
+      if (!match) continue;
+      const key = match[1].toLowerCase().replace(/[-\s]+/g, ' ').trim();
+      fields.set(key, this.cleanMarkdownValue(match[2]));
+    }
+    return fields;
+  }
+
+  private parseMarkdownPlanQuestionChoices(body: string): PlanQuestion['choices'] {
+    const choices: PlanQuestion['choices'] = [];
+    let inChoices = false;
+    for (const line of body.split(/\r?\n/)) {
+      if (/^\s*Choices\s*:\s*$/i.test(line)) {
+        inChoices = true;
+        continue;
+      }
+      if (!inChoices) continue;
+      if (/^\s*(Prompt|Required|Multi[- ]select|Allow custom answer|Recommended|Notes)\s*:/i.test(line)) break;
+      const match = line.match(/^\s*[-*]\s+([^:]+):\s*(.+?)\s*$/);
+      if (!match) continue;
+      const id = this.slugifyPlanId(match[1], `choice-${choices.length + 1}`);
+      const value = this.cleanMarkdownValue(match[2]);
+      const parts = value.split(/\s+-\s+/);
+      const label = parts[0]?.trim() || id;
+      const description = parts.slice(1).join(' - ').trim();
+      choices.push({ id, label, ...(description ? { description } : {}) });
+    }
+    return choices;
+  }
+
+  private parsePlanBoolean(value: string | undefined, fallback: boolean): boolean {
+    if (!value) return fallback;
+    const normalized = value.toLowerCase().trim();
+    if (['yes', 'true', 'required', '1'].includes(normalized)) return true;
+    if (['no', 'false', 'none', '0'].includes(normalized)) return false;
+    return fallback;
+  }
+
+  private slugifyPlanId(value: string, fallback: string): string {
+    const slug = value
+      .toLowerCase()
+      .replace(/`/g, '')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    return slug || fallback;
+  }
+
+  private cleanMarkdownValue(value: string): string {
+    return this.stripMarkdownInline(value)
+      .replace(/^[-*]\s+/, '')
+      .replace(/^\d+[.)]\s+/, '')
+      .trim();
+  }
+
+  private stripMarkdownInline(value: string): string {
+    return value.replace(/\*\*/g, '').replace(/`/g, '').trim();
   }
 
   private fallbackDraftPlan(goal: string, reason?: string): ParsedPlan {
@@ -1523,6 +2014,44 @@ export class AgentService {
       ...steps.map((step) => `${step.order}. ${step.title}${step.detail ? ` - ${step.detail}` : ''}`),
       '',
       'Clarification questions and answers:',
+      this.formatPlanAnswers(plan),
+    ].join('\n');
+  }
+
+  private buildPlanRevisionPrompt(plan: Plan, steps: PlanStep[], instruction: string): string {
+    return [
+      `Original prompt:\n${plan.goal}`,
+      '',
+      `Current plan:\n${plan.finalMarkdown || plan.draftMarkdown || plan.summary}`,
+      '',
+      'Current steps:',
+      ...(steps.length > 0
+        ? steps.map((step) => `${step.order}. ${step.title}${step.detail ? ` - ${step.detail}` : ''}`)
+        : ['- No saved steps.']),
+      '',
+      'Current clarification answers:',
+      this.formatPlanAnswers(plan),
+      '',
+      `Revision instruction:\n${instruction}`,
+    ].join('\n');
+  }
+
+  private buildPlanDiscussionContext(plan: Plan, steps: PlanStep[]): string {
+    return [
+      '# Current Plan Context',
+      '',
+      `Original prompt:\n${plan.goal}`,
+      '',
+      `Current plan status: ${plan.status}`,
+      '',
+      `Current plan:\n${plan.finalMarkdown || plan.draftMarkdown || plan.summary}`,
+      '',
+      'Current steps:',
+      ...(steps.length > 0
+        ? steps.map((step) => `${step.order}. ${step.title}${step.detail ? ` - ${step.detail}` : ''}`)
+        : ['- No saved steps.']),
+      '',
+      'Current clarification answers:',
       this.formatPlanAnswers(plan),
     ].join('\n');
   }
@@ -1810,6 +2339,15 @@ export class AgentService {
   private isCustomizablePlan(status: PlanStatus | string): boolean {
     const normalized = this.normalizePlanStatus(status);
     return normalized === PlanStatus.PlanCustomizing || normalized === PlanStatus.PlanReview;
+  }
+
+  private isPlanRevisionAllowed(status: PlanStatus | string): boolean {
+    const normalized = this.normalizePlanStatus(status);
+    return (
+      normalized === PlanStatus.PlanReadyPendingApproval ||
+      normalized === PlanStatus.PlanCustomizing ||
+      normalized === PlanStatus.PlanReview
+    );
   }
 
   private parseToolArguments(payload: string): Record<string, unknown> {

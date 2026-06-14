@@ -111,7 +111,7 @@ describe('AgentService', () => {
   });
 
   it('creates a plan with the original goal and publishes transcript plan events', async () => {
-    llm.chat.mockResolvedValueOnce({
+    llm.streamChat.mockResolvedValueOnce({
       content: JSON.stringify({
         summary: 'Fix the Plan Mode approval flow.',
         markdown: '# Plan\n\nFix the Plan Mode approval flow.',
@@ -190,14 +190,91 @@ describe('AgentService', () => {
         summary: 'Fix the Plan Mode approval flow.',
       }),
     );
+    expect(events.publish).toHaveBeenCalledWith(session.id, 'agent_status', {
+      status: 'thinking',
+      activity: 'planning',
+    });
+    expect(events.publish).toHaveBeenCalledWith(session.id, 'agent_status', { status: 'completed' });
+    expect(events.complete).toHaveBeenCalledWith(session.id);
     expect(result.plan).toEqual(
       expect.objectContaining({ id: 'plan-1', goal: 'Fix Plan Mode approval UX' }),
     );
     expect(result.steps).toHaveLength(2);
   });
 
+  it('parses a streamed Markdown plan into steps and clarification questions', async () => {
+    const markdown = [
+      '# Plan',
+      '',
+      '## Summary',
+      'Build a small TUI game.',
+      '',
+      '## Requirements Understanding',
+      '- Original prompt: Build a game',
+      '',
+      '## Technical Choices',
+      '- Use the existing TUI stack.',
+      '',
+      '## Target Outcome',
+      '- A playable prototype.',
+      '',
+      '## Modules',
+      '- TUI game screen.',
+      '',
+      '## File Structure',
+      '- Update existing app files.',
+      '',
+      '## Implementation Steps',
+      '1. Inspect current TUI: Find the render entrypoint.',
+      '2. Add game state: Model the board and input loop.',
+      '',
+      '## Clarification Questions',
+      '### interface: Interface style',
+      'Prompt: Which interface should the game use?',
+      'Required: yes',
+      'Multi-select: no',
+      'Allow custom answer: no',
+      'Recommended: tui',
+      'Choices:',
+      '- tui: TUI - Keep the game inside the terminal.',
+      '- web: Web UI - Build a browser-based version.',
+      'Notes: The interface changes implementation scope.',
+      '',
+      '## Risks / Tradeoffs',
+      '- Keep the first version small.',
+    ].join('\n');
+    llm.streamChat.mockImplementationOnce(async (_input, onToken) => {
+      onToken({ delta: '# Plan', content: '# Plan' });
+      return { content: markdown };
+    });
+
+    const result = await service.createPlan(owner, session.id, {
+      goal: 'Build a game',
+    });
+
+    expect(events.publish).toHaveBeenCalledWith(session.id, 'token', { delta: '# Plan', content: '# Plan' });
+    expect(result.plan.summary).toBe('Build a small TUI game.');
+    expect(result.steps).toEqual([
+      expect.objectContaining({ title: 'Inspect current TUI', detail: 'Find the render entrypoint.' }),
+      expect.objectContaining({ title: 'Add game state', detail: 'Model the board and input loop.' }),
+    ]);
+    expect(result.plan.status).toBe(PlanStatus.PlanCustomizing);
+    expect(result.plan.questions).toEqual([
+      expect.objectContaining({
+        id: 'interface',
+        title: 'Interface style',
+        prompt: 'Which interface should the game use?',
+        recommendedChoiceId: 'tui',
+        choices: [
+          expect.objectContaining({ id: 'tui', label: 'TUI', description: 'Keep the game inside the terminal.' }),
+          expect.objectContaining({ id: 'web', label: 'Web UI', description: 'Build a browser-based version.' }),
+        ],
+      }),
+    ]);
+  });
+
   it('injects active skills into the plan model context', async () => {
-    llm.chat.mockResolvedValueOnce({
+    llm.streamChat.mockResolvedValueOnce({
       content: JSON.stringify({
         summary: 'Explain recursion with Feynman style.',
         markdown: '# Plan\n\nExplain recursion clearly.',
@@ -218,7 +295,7 @@ describe('AgentService', () => {
       ],
     });
 
-    expect(llm.chat.mock.calls[0]?.[0].messages).toEqual(
+    expect(llm.streamChat.mock.calls[0]?.[0].messages).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           role: 'system',
@@ -226,7 +303,7 @@ describe('AgentService', () => {
         }),
       ]),
     );
-    expect(llm.chat.mock.calls[0]?.[0].messages).toEqual(
+    expect(llm.streamChat.mock.calls[0]?.[0].messages).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           role: 'system',
@@ -245,7 +322,7 @@ describe('AgentService', () => {
       size: 42,
       truncated: false,
     });
-    llm.chat.mockResolvedValueOnce({
+    llm.streamChat.mockResolvedValueOnce({
       content: JSON.stringify({
         summary: 'Explain the project.',
         markdown: '# Plan\n\nExplain the project.',
@@ -259,7 +336,7 @@ describe('AgentService', () => {
     });
 
     expect(projects.readAgentInstructions).toHaveBeenCalledWith(owner.id, 'project-1');
-    expect(llm.chat.mock.calls[0]?.[0].messages).toEqual(
+    expect(llm.streamChat.mock.calls[0]?.[0].messages).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           role: 'system',
@@ -345,7 +422,7 @@ describe('AgentService', () => {
   });
 
   it('turns prompt-only clarification questions into custom-answer questions', async () => {
-    llm.chat.mockResolvedValueOnce({
+    llm.streamChat.mockResolvedValueOnce({
       content: JSON.stringify({
         summary: 'Build an archery game.',
         markdown: '# Plan\n\nBuild an archery game.',
@@ -377,7 +454,7 @@ describe('AgentService', () => {
   });
 
   it('extracts inline clarification choices from prompt text', async () => {
-    llm.chat.mockResolvedValueOnce({
+    llm.streamChat.mockResolvedValueOnce({
       content: JSON.stringify({
         summary: 'Build an archery game.',
         markdown: '# Plan\n\nBuild an archery game.',
@@ -509,6 +586,214 @@ describe('AgentService', () => {
     await expect(service.finalizePlan(owner, plan.id)).rejects.toThrow('Required plan question is unanswered');
 
     expect(llm.chat).not.toHaveBeenCalled();
+    expect(llm.streamChat).not.toHaveBeenCalled();
+  });
+
+  it('streams and saves a finalized Markdown plan after clarification answers', async () => {
+    const plan = planFixture({
+      id: 'plan-1',
+      status: PlanStatus.PlanCustomizing,
+      questions: [
+        {
+          id: 'interface',
+          title: 'Interface style',
+          prompt: 'Which interface should the game use?',
+          choices: [{ id: 'tui', label: 'TUI' }],
+          recommendedChoiceId: 'tui',
+          allowCustomAnswer: false,
+          required: true,
+        },
+      ],
+      answers: [{ questionId: 'interface', choiceId: 'tui' }],
+    });
+    const priorStep = {
+      id: 'step-1',
+      order: 1,
+      title: 'Choose the interface',
+      detail: 'Clarify terminal or graphical UI.',
+      status: 'pending',
+    } as PlanStep;
+    const markdown = [
+      '# Plan',
+      '',
+      '## Summary',
+      'Build the TUI game.',
+      '',
+      '## Requirements Understanding',
+      '- Use the selected TUI interface.',
+      '',
+      '## Technical Choices',
+      '- Keep implementation in the terminal app.',
+      '',
+      '## Target Outcome',
+      '- A playable TUI game.',
+      '',
+      '## Modules',
+      '- Game state and input handling.',
+      '',
+      '## File Structure',
+      '- Update existing TUI files.',
+      '',
+      '## Implementation Steps',
+      '1. Add game state: Track board state and turns.',
+      '2. Render the game: Draw the board in the TUI.',
+      '',
+      '## User Selections',
+      '- Interface style: TUI',
+      '',
+      '## Risks / Tradeoffs',
+      '- Keep the prototype small.',
+    ].join('\n');
+    plans.findOne.mockResolvedValueOnce(plan);
+    planSteps.find.mockResolvedValueOnce([priorStep]);
+    llm.streamChat.mockImplementationOnce(async (_input, onToken) => {
+      onToken({ delta: '# Plan', content: '# Plan' });
+      return { content: markdown };
+    });
+
+    const result = await service.finalizePlan(owner, plan.id);
+
+    expect(events.publish).toHaveBeenCalledWith(session.id, 'token', { delta: '# Plan', content: '# Plan' });
+    expect(result.plan.status).toBe(PlanStatus.PlanReview);
+    expect(result.plan.finalMarkdown).toBe(markdown);
+    expect(result.plan.summary).toBe('Build the TUI game.');
+    expect(result.steps).toEqual([
+      expect.objectContaining({ title: 'Add game state', detail: 'Track board state and turns.' }),
+      expect.objectContaining({ title: 'Render the game', detail: 'Draw the board in the TUI.' }),
+    ]);
+    expect(events.publish).toHaveBeenCalledWith(
+      session.id,
+      'plan_updated',
+      expect.objectContaining({
+        planId: plan.id,
+        status: PlanStatus.PlanReview,
+        summary: 'Build the TUI game.',
+      }),
+    );
+    expect(events.publish).toHaveBeenCalledWith(session.id, 'agent_status', { status: 'completed' });
+    expect(events.complete).toHaveBeenCalledWith(session.id);
+  });
+
+  it('revises an existing unapproved plan without creating a new plan id', async () => {
+    const plan = planFixture({ id: 'plan-1', status: PlanStatus.PlanReadyPendingApproval });
+    const priorStep = {
+      id: 'step-1',
+      order: 1,
+      title: 'Inspect Plan Mode',
+      detail: 'Find the current TUI state machine.',
+      status: 'pending',
+    } as PlanStep;
+    const markdown = [
+      '# Plan',
+      '',
+      '## Summary',
+      'Revise the Plan Mode approval flow.',
+      '',
+      '## Requirements Understanding',
+      '- Keep revision scoped to Plan Mode.',
+      '',
+      '## Technical Choices',
+      '- Add a dedicated revision endpoint.',
+      '',
+      '## Target Outcome',
+      '- The current plan is updated in place.',
+      '',
+      '## Modules',
+      '- Backend agent service.',
+      '',
+      '## File Structure',
+      '- Update existing agent files.',
+      '',
+      '## Implementation Steps',
+      '1. Add revision endpoint: Accept user instructions for the active plan.',
+      '2. Save revised plan: Replace steps on the same plan id.',
+      '',
+      '## Clarification Questions',
+      '- None',
+      '',
+      '## Risks / Tradeoffs',
+      '- Keep approval semantics unchanged.',
+    ].join('\n');
+    plans.findOne.mockResolvedValueOnce(plan);
+    planSteps.find.mockResolvedValueOnce([priorStep]);
+    llm.streamChat.mockImplementationOnce(async (_input, onToken) => {
+      onToken({ delta: '# Plan', content: '# Plan' });
+      return { content: markdown };
+    });
+
+    const result = await service.revisePlan(owner, plan.id, {
+      instruction: 'Make the plan explicitly update the same plan.',
+    });
+
+    expect(result.plan.id).toBe(plan.id);
+    expect(result.plan.summary).toBe('Revise the Plan Mode approval flow.');
+    expect(result.plan.status).toBe(PlanStatus.PlanReadyPendingApproval);
+    expect(result.steps).toEqual([
+      expect.objectContaining({ title: 'Add revision endpoint', detail: 'Accept user instructions for the active plan.' }),
+      expect.objectContaining({ title: 'Save revised plan', detail: 'Replace steps on the same plan id.' }),
+    ]);
+    expect(llm.streamChat.mock.calls[0]?.[0].messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'user',
+          content: expect.stringContaining('Make the plan explicitly update the same plan.'),
+        }),
+      ]),
+    );
+    expect(events.publish).toHaveBeenCalledWith(
+      session.id,
+      'plan_updated',
+      expect.objectContaining({
+        planId: plan.id,
+        status: PlanStatus.PlanReadyPendingApproval,
+      }),
+    );
+  });
+
+  it('rejects revising an approved plan', async () => {
+    const plan = planFixture({ id: 'plan-1', status: PlanStatus.Approved });
+    plans.findOne.mockResolvedValueOnce(plan);
+
+    await expect(
+      service.revisePlan(owner, plan.id, {
+        instruction: 'Change the approved plan.',
+      }),
+    ).rejects.toThrow('cannot be revised');
+
+    expect(llm.streamChat).not.toHaveBeenCalled();
+    expect(plans.save).not.toHaveBeenCalled();
+  });
+
+  it('discusses an existing plan without updating plan state', async () => {
+    const plan = planFixture({ id: 'plan-1', status: PlanStatus.PlanReadyPendingApproval });
+    const priorDiscussion = messageFixture(
+      'message-prior-discussion',
+      MessageRole.Assistant,
+      'The current plan updates the approval flow.',
+      { type: 'plan_discussion', planId: plan.id },
+    );
+    plans.findOne.mockResolvedValueOnce(plan);
+    sessions.listMessages.mockResolvedValueOnce([userMessage, priorDiscussion]);
+    llm.streamChat.mockImplementationOnce(async (_input, onToken) => {
+      onToken({ delta: 'Use', content: 'Use' });
+      return { content: 'Use Modify Plan when you want the draft changed.' };
+    });
+
+    const result = await service.discussPlan(owner, plan.id, {
+      message: 'Should this create a new plan?',
+    });
+
+    expect(result.content).toBe('Use Modify Plan when you want the draft changed.');
+    expect(llm.streamChat.mock.calls[0]?.[0].messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: 'assistant', content: 'The current plan updates the approval flow.' }),
+        expect.objectContaining({ role: 'user', content: 'Should this create a new plan?' }),
+      ]),
+    );
+    expect(plans.save).not.toHaveBeenCalled();
+    expect(planSteps.save).not.toHaveBeenCalled();
+    expect(events.publish).not.toHaveBeenCalledWith(session.id, 'plan_updated', expect.anything());
+    expect(events.publish).toHaveBeenCalledWith(session.id, 'agent_status', { status: 'completed' });
   });
 
   it('runs an approved plan without mutating plan lifecycle status', async () => {

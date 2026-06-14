@@ -195,6 +195,34 @@ export class ApiClient {
     return this.request<PlanBundle['plan']>(`/plans/${planId}/approve`, { method: 'POST' });
   }
 
+  async revisePlan(
+    planId: string,
+    instruction: string,
+    activeSkills?: ActiveSkillContext[],
+  ): Promise<PlanBundle> {
+    return this.request<PlanBundle>(`/plans/${planId}/revise`, {
+      method: 'POST',
+      body: JSON.stringify({
+        instruction,
+        ...(activeSkills && activeSkills.length > 0 ? { activeSkills } : {}),
+      }),
+    });
+  }
+
+  async discussPlan(
+    planId: string,
+    message: string,
+    activeSkills?: ActiveSkillContext[],
+  ): Promise<Message> {
+    return this.request<Message>(`/plans/${planId}/discuss`, {
+      method: 'POST',
+      body: JSON.stringify({
+        message,
+        ...(activeSkills && activeSkills.length > 0 ? { activeSkills } : {}),
+      }),
+    });
+  }
+
   async updatePlanAnswers(planId: string, answers: PlanQuestionAnswer[]): Promise<PlanBundle> {
     return this.request<PlanBundle>(`/plans/${planId}/answers`, {
       method: 'PATCH',

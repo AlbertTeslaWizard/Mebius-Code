@@ -443,6 +443,7 @@ type TaskStatus = 'idle' | 'running' | 'completed' | 'error' | 'awaiting_plan_de
 type StatusEvent = WorkspaceState['events'][number];
 type PlanWorkflowMode = 'ready' | 'question' | 'review';
 type PlanWorkflow = { mode: PlanWorkflowMode; plan: PlanBundle };
+type PlanComposerScope = { kind: 'revise' | 'discuss'; planId: string };
 
 export function App(props: AppProps) {
   const [state, setState] = createSignal(props.initialState);
@@ -463,6 +464,7 @@ export function App(props: AppProps) {
   const [planDecisionChoice, setPlanDecisionChoice] = createSignal<PlanDecisionChoice>('start');
   const [lastPlanDecisionId, setLastPlanDecisionId] = createSignal<string | null>(null);
   const [dismissedPlanDecisionId, setDismissedPlanDecisionId] = createSignal<string | null>(null);
+  const [planComposerScope, setPlanComposerScope] = createSignal<PlanComposerScope | null>(null);
   const [planQuestionIndex, setPlanQuestionIndex] = createSignal(0);
   const [planQuestionSelectedIndex, setPlanQuestionSelectedIndex] = createSignal(0);
   const [planQuestionFocusTarget, setPlanQuestionFocusTarget] = createSignal<PlanQuestionFocusTarget>('choices');
@@ -549,6 +551,9 @@ export function App(props: AppProps) {
     if (workflow?.mode === 'question') return 'Plan Clarification';
     if (workflow?.mode === 'review') return 'Plan Review';
     if (workflow?.mode === 'ready') return 'Plan Approval';
+    const scope = planComposerScope();
+    if (scope?.kind === 'revise') return 'Plan Revision';
+    if (scope?.kind === 'discuss') return 'Plan Discussion';
     return 'Status';
   });
   const slashQuery = createMemo(() => {
@@ -584,13 +589,16 @@ export function App(props: AppProps) {
   });
 
   createEffect(() => {
-    const nextPlanId = activePlanWorkflow()?.plan.plan.id ?? null;
+    const nextPlanId = state().plan?.plan.id ?? null;
     if (nextPlanId === lastPlanDecisionId()) return;
     setLastPlanDecisionId(nextPlanId);
     setPlanDecisionChoice('start');
     setPlanQuestionIndex(0);
     if (nextPlanId !== dismissedPlanDecisionId()) {
       setDismissedPlanDecisionId(null);
+    }
+    if (nextPlanId !== planComposerScope()?.planId) {
+      setPlanComposerScope(null);
     }
   });
 
@@ -775,6 +783,12 @@ export function App(props: AppProps) {
         event.preventDefault();
         event.stopPropagation();
         setDismissedSlashQuery(slashQuery());
+        return;
+      }
+      if (planComposerScope()) {
+        event.preventDefault();
+        event.stopPropagation();
+        returnToPlanDecisionComposer();
         return;
       }
     }
@@ -1375,6 +1389,7 @@ export function App(props: AppProps) {
     const plan = planDecisionPlan();
     if (!plan) return;
     setDismissedPlanDecisionId(plan.plan.id);
+    setPlanComposerScope({ kind: 'revise', planId: plan.plan.id });
     setComposerMode('plan');
     setInput('');
     setComposerCursorOffset(0);
@@ -1385,10 +1400,22 @@ export function App(props: AppProps) {
     const plan = planDecisionPlan();
     if (!plan) return;
     setDismissedPlanDecisionId(plan.plan.id);
+    setPlanComposerScope({ kind: 'discuss', planId: plan.plan.id });
     setComposerMode('plan');
     setInput('');
     setComposerCursorOffset(0);
     setState((prev) => ({ ...prev, activity: 'Continue plan discussion', error: '' }));
+  }
+
+  function returnToPlanDecisionComposer() {
+    const scope = planComposerScope();
+    setPlanComposerScope(null);
+    if (scope && state().plan?.plan.id === scope.planId) {
+      setDismissedPlanDecisionId(null);
+    }
+    setInput('');
+    setComposerCursorOffset(0);
+    setState((prev) => ({ ...prev, activity: 'Plan approval', error: '' }));
   }
 
   async function startWritingFromPendingPlan() {
@@ -2279,7 +2306,12 @@ export function App(props: AppProps) {
       throw new Error(`Type a prompt after ${skillCommandToken(prepared.missingPromptSkill)}`);
     }
     if (composerMode() === 'plan') {
-      await createPlanFromGoal(prepared.prompt, prepared.activeSkills);
+      const scope = planComposerScope();
+      if (scope) {
+        await submitScopedPlanComposer(scope, prepared.prompt, prepared.activeSkills);
+      } else {
+        await createPlanFromGoal(prepared.prompt, prepared.activeSkills);
+      }
       return;
     }
     if (hasUnapprovedPlan(state().plan)) {
@@ -2540,6 +2572,8 @@ export function App(props: AppProps) {
       };
 
       setActiveSkillIds([]);
+      setPlanComposerScope(null);
+      setDismissedPlanDecisionId(null);
       setState((prev) => ({
         ...prev,
         config: nextConfig,
@@ -2573,9 +2607,73 @@ export function App(props: AppProps) {
     }
   }
 
+  async function submitScopedPlanComposer(
+    scope: PlanComposerScope,
+    value: string,
+    activeSkills?: ActiveSkillContext[],
+  ) {
+    const current = state();
+    if (!current.plan || current.plan.plan.id !== scope.planId) {
+      setPlanComposerScope(null);
+      throw new Error('The plan being edited is no longer active.');
+    }
+    setState((prev) => ({
+      ...prev,
+      messages: [
+        ...prev.messages,
+        {
+          id: `local-user-${Date.now()}`,
+          role: 'user',
+          content: value,
+          createdAt: new Date().toISOString(),
+          ...(activeSkills && activeSkills.length > 0
+            ? { metadata: { activeSkills: activeSkills.map((s) => s.name) } }
+            : {}),
+        },
+      ],
+      streamStatus: { mode: 'idle' },
+      activity: scope.kind === 'revise' ? 'Revising plan' : 'Discussing plan',
+      turnActive: true,
+      error: '',
+    }));
+
+    if (scope.kind === 'revise') {
+      const revised = await current.api.revisePlan(scope.planId, value, activeSkills);
+      setPlanComposerScope(null);
+      setDismissedPlanDecisionId(null);
+      setPlanQuestionIndex(0);
+      setState((prev) => ({ ...prev, plan: revised, activity: 'awaiting_plan_decision' }));
+      return;
+    }
+
+    await current.api.discussPlan(scope.planId, value, activeSkills);
+    setDismissedPlanDecisionId(scope.planId);
+    setState((prev) => ({ ...prev, activity: 'Continue plan discussion', error: '' }));
+  }
+
   async function createPlanFromGoal(goal: string, activeSkills?: ActiveSkillContext[]) {
     const current = state();
-    setState((prev) => ({ ...prev, activity: 'Planning' }));
+    setPlanComposerScope(null);
+    setDismissedPlanDecisionId(null);
+    setState((prev) => ({
+      ...prev,
+      messages: [
+        ...prev.messages,
+        {
+          id: `local-user-${Date.now()}`,
+          role: 'user',
+          content: goal,
+          createdAt: new Date().toISOString(),
+          ...(activeSkills && activeSkills.length > 0
+            ? { metadata: { activeSkills: activeSkills.map((s) => s.name) } }
+            : {}),
+        },
+      ],
+      streamStatus: { mode: 'idle' },
+      activity: 'Planning',
+      turnActive: true,
+      error: '',
+    }));
     const plan = await current.api.createPlan(current.session.id, goal, createClientRequestId(), activeSkills);
     setState((prev) => ({ ...prev, plan, activity: 'awaiting_plan_decision' }));
   }
@@ -2586,6 +2684,7 @@ export function App(props: AppProps) {
     }
     const approved = plan.plan.status === 'approved' ? plan.plan : await state().api.approvePlan(plan.plan.id);
     setDismissedPlanDecisionId(plan.plan.id);
+    setPlanComposerScope(null);
     setComposerMode('build'); // Switch to build mode after approving plan
     setState((prev) => ({
       ...prev,
@@ -2600,6 +2699,7 @@ export function App(props: AppProps) {
   async function cancelPlan(plan: PlanBundle) {
     const cancelled = await state().api.cancelPlan(plan.plan.id);
     setDismissedPlanDecisionId(plan.plan.id);
+    setPlanComposerScope(null);
     setState((prev) => ({
       ...prev,
       plan: { ...plan, plan: cancelled },
