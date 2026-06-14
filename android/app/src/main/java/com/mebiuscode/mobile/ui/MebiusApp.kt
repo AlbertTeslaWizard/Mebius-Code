@@ -7,28 +7,37 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.ArrowDownward
+import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Send
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Terminal
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -47,10 +56,19 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -65,6 +83,13 @@ import com.mebiuscode.mobile.data.PlanBundle
 import com.mebiuscode.mobile.data.Project
 import com.mebiuscode.mobile.data.RecentSession
 import com.mebiuscode.mobile.data.SessionDetails
+import com.mikepenz.markdown.m3.Markdown
+import com.mikepenz.markdown.m3.markdownColor
+import com.mikepenz.markdown.m3.markdownTypography
+import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 
 @Composable
 fun MebiusApp(viewModel: MebiusViewModel) {
@@ -104,6 +129,31 @@ fun MebiusApp(viewModel: MebiusViewModel) {
     }
 }
 
+@Composable
+private fun LogoBadge(size: Int = 36) {
+    Box(
+        modifier = Modifier
+            .size(size.dp)
+            .clip(RoundedCornerShape((size / 3).dp))
+            .background(
+                Brush.linearGradient(
+                    listOf(
+                        MaterialTheme.colorScheme.primary,
+                        MaterialTheme.colorScheme.secondary,
+                    ),
+                ),
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            Icons.Rounded.AutoAwesome,
+            contentDescription = null,
+            tint = Color.White,
+            modifier = Modifier.size((size * 0.55f).dp),
+        )
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MebiusTopBar(
@@ -114,20 +164,26 @@ private fun MebiusTopBar(
 ) {
     TopAppBar(
         title = {
-            Column {
-                Text("Mebius Code", fontWeight = FontWeight.SemiBold)
-                Text(
-                    when (state.route) {
-                        Route.Login -> "Android companion"
-                        Route.Dashboard -> "Tasks and approvals"
-                        is Route.ProjectSessions -> state.selectedProject?.name ?: "Project"
-                        is Route.Session -> state.streamStatus
-                    },
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (state.route !is Route.Session && state.route !is Route.ProjectSessions) {
+                    LogoBadge()
+                    Spacer(Modifier.width(10.dp))
+                }
+                Column {
+                    Text("Mebius Code", fontWeight = FontWeight.Bold)
+                    Text(
+                        when (state.route) {
+                            Route.Login -> "Android companion"
+                            Route.Dashboard -> "Tasks and approvals"
+                            is Route.ProjectSessions -> state.selectedProject?.name ?: "Project"
+                            is Route.Session -> state.streamStatus
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         },
         navigationIcon = {
@@ -152,59 +208,97 @@ private fun MebiusTopBar(
         ),
     )
 }
-
 @Composable
 private fun LoginScreen(state: UiState, viewModel: MebiusViewModel) {
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+            .padding(horizontal = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp),
     ) {
+        item { Spacer(Modifier.height(8.dp)) }
         item {
-            Text(
-                "Move active coding work forward from your phone.",
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold,
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "Use Android for task status, Plan decisions, and one-time approvals. Keep code editing on Web or TUI.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(
+                        Brush.linearGradient(
+                            listOf(
+                                MaterialTheme.colorScheme.primary,
+                                MaterialTheme.colorScheme.secondary,
+                            ),
+                        ),
+                    )
+                    .padding(22.dp),
+            ) {
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.Bolt, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "MEBIUS CODE",
+                            color = Color.White.copy(alpha = 0.85f),
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "Move active coding work forward from your phone.",
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "Track task status, make Plan decisions, and grant one-time approvals. Keep code editing on Web or TUI.",
+                        color = Color.White.copy(alpha = 0.88f),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            }
         }
         item {
             Panel {
+                Text("Sign in", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(14.dp))
                 OutlinedTextField(
                     value = state.loginApi,
                     onValueChange = viewModel::setLoginApi,
                     label = { Text("API base URL") },
                     singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
                     value = state.loginEmail,
                     onValueChange = viewModel::setLoginEmail,
                     label = { Text("Email") },
                     singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
                     value = state.loginPassword,
                     onValueChange = viewModel::setLoginPassword,
                     label = { Text("Password") },
                     singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(18.dp))
                 Button(
                     onClick = viewModel::login,
                     enabled = state.overview !is LoadState.Loading,
-                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp),
                 ) {
-                    Text("Sign in")
+                    Text("Sign in", fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -217,7 +311,6 @@ private fun LoginScreen(state: UiState, viewModel: MebiusViewModel) {
         }
     }
 }
-
 @Composable
 private fun DashboardScreen(state: UiState, viewModel: MebiusViewModel) {
     when (val overview = state.overview) {
@@ -232,14 +325,30 @@ private fun DashboardContent(overview: MobileOverview, viewModel: MebiusViewMode
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .padding(14.dp),
+            .padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        item { Spacer(Modifier.height(2.dp)) }
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MetricChip("${overview.recentSessions.count { it.pendingApprovalCount > 0 }}", "waiting")
-                MetricChip("${overview.recentSessions.count { it.agentActivity != null }}", "active")
-                MetricChip("${overview.projects.size}", "projects")
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                MetricCard(
+                    "${overview.recentSessions.count { it.pendingApprovalCount > 0 }}",
+                    "waiting",
+                    MaterialTheme.colorScheme.tertiary,
+                    Modifier.weight(1f),
+                )
+                MetricCard(
+                    "${overview.recentSessions.count { it.agentActivity != null }}",
+                    "active",
+                    MaterialTheme.colorScheme.primary,
+                    Modifier.weight(1f),
+                )
+                MetricCard(
+                    "${overview.projects.size}",
+                    "projects",
+                    MaterialTheme.colorScheme.secondary,
+                    Modifier.weight(1f),
+                )
             }
         }
         if (overview.pendingApprovals.isNotEmpty()) {
@@ -256,6 +365,7 @@ private fun DashboardContent(overview: MobileOverview, viewModel: MebiusViewMode
         items(overview.projects, key = { it.id }) { project ->
             ProjectCard(project, onOpen = { viewModel.openProject(project) }, onNewSession = { viewModel.createSession(project) })
         }
+        item { Spacer(Modifier.height(8.dp)) }
     }
 }
 
@@ -267,23 +377,42 @@ private fun ProjectSessionsScreen(state: UiState, viewModel: MebiusViewModel, pr
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .padding(14.dp),
+            .padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        item { Spacer(Modifier.height(2.dp)) }
         item {
             Panel {
-                Text(project?.name ?: "Project", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text(
-                    "${project?.sourceType ?: "workspace"} / ${project?.workspaceMode ?: "managed"}",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.secondaryContainer),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.Rounded.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.onSecondaryContainer, modifier = Modifier.size(22.dp))
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(project?.name ?: "Project", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        Text(
+                            "${project?.sourceType ?: "workspace"} / ${project?.workspaceMode ?: "managed"}",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(14.dp))
                 Button(
                     onClick = { project?.let(viewModel::createSession) },
                     enabled = project != null,
-                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp),
                 ) {
-                    Text("New mobile session")
+                    Text("New mobile session", fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -291,9 +420,9 @@ private fun ProjectSessionsScreen(state: UiState, viewModel: MebiusViewModel, pr
         items(sessions, key = { it.id }) { session ->
             RecentSessionCard(session, onClick = { viewModel.openSession(session.id) })
         }
+        item { Spacer(Modifier.height(8.dp)) }
     }
 }
-
 @Composable
 private fun SessionScreen(state: UiState, viewModel: MebiusViewModel) {
     when (val details = state.sessionDetails) {
@@ -305,44 +434,124 @@ private fun SessionScreen(state: UiState, viewModel: MebiusViewModel) {
 
 @Composable
 private fun SessionContent(state: UiState, details: SessionDetails, viewModel: MebiusViewModel) {
+    val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
+    val totalItemCount = sessionListItemCount(state, details)
+    val lastIndex = (totalItemCount - 1).coerceAtLeast(0)
+    var shouldFollowBottom by remember(details.session.id) { mutableStateOf(true) }
+    val isAtBottom by remember {
+        derivedStateOf {
+            val visibleItems = listState.layoutInfo.visibleItemsInfo
+            visibleItems.lastOrNull()?.index == listState.layoutInfo.totalItemsCount - 1
+        }
+    }
+    val showScrollToBottom by remember {
+        derivedStateOf {
+            listState.layoutInfo.totalItemsCount > 0 && !shouldFollowBottom && !isAtBottom
+        }
+    }
+
+    LaunchedEffect(details.session.id) {
+        if (lastIndex > 0) {
+            listState.scrollToItem(lastIndex)
+        }
+        shouldFollowBottom = true
+    }
+    LaunchedEffect(listState) {
+        snapshotFlow { isAtBottom }.collect { atBottom ->
+            shouldFollowBottom = atBottom || shouldFollowBottom && !listState.isScrollInProgress
+        }
+    }
+    LaunchedEffect(totalItemCount, state.streamingText.length) {
+        if (shouldFollowBottom && lastIndex > 0) {
+            listState.scrollToItem(lastIndex)
+        }
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
-        LazyColumn(
+        Box(
             modifier = Modifier
                 .weight(1f)
-                .padding(horizontal = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+                .fillMaxWidth(),
         ) {
-            item {
-                SessionHeader(details, state.streamStatus)
-            }
-            details.plan?.let { plan ->
-                item { PlanCard(plan, viewModel) }
-            }
-            if (details.approvals.isNotEmpty()) {
-                item { SectionTitle("Approvals") }
-                items(details.approvals, key = { it.id }) { approval ->
-                    ApprovalCard(approval, viewModel::approveTool, viewModel::rejectTool)
-                }
-            }
-            if (state.streamingText.isNotBlank()) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                item { Spacer(Modifier.height(2.dp)) }
                 item {
-                    MessageBubble(Message("streaming", "assistant", state.streamingText, createdAt = ""), streaming = true)
+                    SessionHeader(details, state.streamStatus)
                 }
+                details.plan?.let { plan ->
+                    item { PlanCard(plan, viewModel) }
+                }
+                if (details.approvals.isNotEmpty()) {
+                    item { SectionTitle("Approvals") }
+                    items(details.approvals, key = { it.id }) { approval ->
+                        ApprovalCard(approval, viewModel::approveTool, viewModel::rejectTool)
+                    }
+                }
+                if (state.streamingText.isNotBlank()) {
+                    item(key = "streaming-message") {
+                        MessageBubble(Message("streaming", "assistant", state.streamingText, createdAt = ""), streaming = true)
+                    }
+                }
+                itemsIndexed(
+                    items = details.messages,
+                    key = { index, message -> "message-${message.id.ifBlank { index.toString() }}-$index" },
+                ) { _, message ->
+                    MessageBubble(message)
+                }
+                if (details.patches.isNotEmpty()) {
+                    item { SectionTitle("Diffs") }
+                    itemsIndexed(
+                        items = details.patches,
+                        key = { index, patch -> "patch-${patch.id.ifBlank { index.toString() }}-$index" },
+                    ) { _, patch -> PatchCard(patch) }
+                }
+                if (details.commandRuns.isNotEmpty()) {
+                    item { SectionTitle("Runs") }
+                    itemsIndexed(
+                        items = details.commandRuns,
+                        key = { index, run -> "run-${run.id.ifBlank { index.toString() }}-$index" },
+                    ) { _, run -> CommandRunCard(run) }
+                }
+                item { Spacer(Modifier.height(4.dp)) }
             }
-            items(details.messages, key = { it.id }) { message ->
-                MessageBubble(message)
-            }
-            if (details.patches.isNotEmpty()) {
-                item { SectionTitle("Diffs") }
-                items(details.patches, key = { it.id }) { patch -> PatchCard(patch) }
-            }
-            if (details.commandRuns.isNotEmpty()) {
-                item { SectionTitle("Runs") }
-                items(details.commandRuns, key = { it.id }) { run -> CommandRunCard(run) }
+            if (showScrollToBottom) {
+                FilledIconButton(
+                    onClick = {
+                        shouldFollowBottom = true
+                        coroutineScope.launch {
+                            listState.animateScrollToItem(lastIndex)
+                        }
+                    },
+                    shape = CircleShape,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 18.dp, bottom = 14.dp)
+                        .offset(y = (-2).dp),
+                ) {
+                    Icon(Icons.Rounded.ArrowDownward, contentDescription = "Scroll to bottom")
+                }
             }
         }
         ComposerBar(state, viewModel)
     }
+}
+
+private fun sessionListItemCount(state: UiState, details: SessionDetails): Int {
+    var count = 2
+    if (details.plan != null) count += 1
+    if (details.approvals.isNotEmpty()) count += 1 + details.approvals.size
+    if (state.streamingText.isNotBlank()) count += 1
+    count += details.messages.size
+    if (details.patches.isNotEmpty()) count += 1 + details.patches.size
+    if (details.commandRuns.isNotEmpty()) count += 1 + details.commandRuns.size
+    return count + 1
 }
 
 @Composable
@@ -354,25 +563,50 @@ private fun SessionHeader(details: SessionDetails, streamStatus: String) {
                 Text(
                     details.session.activeModelConfig?.displayName ?: "No model selected",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            Spacer(Modifier.width(8.dp))
             StatusPill(streamStatus)
         }
     }
 }
-
 @Composable
 private fun PlanCard(plan: PlanBundle, viewModel: MebiusViewModel) {
-    Panel {
-        Text(plan.plan.summary.ifBlank { plan.plan.goal ?: "Plan" }, fontWeight = FontWeight.SemiBold)
-        Text(plan.plan.status, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
-        Spacer(Modifier.height(8.dp))
+    AccentPanel(accent = MaterialTheme.colorScheme.tertiary) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Rounded.AutoAwesome,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.tertiary,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                plan.plan.summary.ifBlank { plan.plan.goal ?: "Plan" },
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+            )
+            StatusPill(plan.plan.status)
+        }
+        Spacer(Modifier.height(10.dp))
         plan.steps.take(5).forEach { step ->
-            Text("${step.order + 1}. ${step.title}", style = MaterialTheme.typography.bodyMedium)
-            step.detail?.let {
-                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(modifier = Modifier.padding(vertical = 3.dp)) {
+                Text(
+                    "${step.order + 1}",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.width(20.dp),
+                )
+                Column {
+                    Text(step.title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                    step.detail?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
             }
         }
         val questions = plan.questions.ifEmpty { plan.plan.questions }
@@ -380,41 +614,60 @@ private fun PlanCard(plan: PlanBundle, viewModel: MebiusViewModel) {
             Spacer(Modifier.height(10.dp))
             val question = questions.first()
             Text(question.prompt, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(4.dp))
             question.choices.take(3).forEach { choice ->
-                TextButton(onClick = { viewModel.answerFirstPlanQuestion(plan, choice.id) }) {
-                    Text(choice.label)
+                OutlinedButton(
+                    onClick = { viewModel.answerFirstPlanQuestion(plan, choice.id) },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                ) {
+                    Text(choice.label, modifier = Modifier.fillMaxWidth())
                 }
+                Spacer(Modifier.height(4.dp))
             }
         }
         Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { viewModel.approvePlan(plan) }) {
+            Button(onClick = { viewModel.approvePlan(plan) }, shape = RoundedCornerShape(12.dp)) {
                 Icon(Icons.Rounded.Check, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
                 Text("Approve")
             }
-            OutlinedButton(onClick = { viewModel.cancelPlan(plan) }) {
+            OutlinedButton(onClick = { viewModel.cancelPlan(plan) }, shape = RoundedCornerShape(12.dp)) {
                 Text("Cancel")
             }
         }
     }
 }
-
 @Composable
 private fun ApprovalCard(
     approval: Approval,
     onApprove: (Approval) -> Unit,
     onReject: (Approval) -> Unit,
 ) {
-    Panel {
+    AccentPanel(accent = MaterialTheme.colorScheme.secondary) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Rounded.Terminal, contentDescription = null, tint = MaterialTheme.colorScheme.secondary)
-            Spacer(Modifier.width(8.dp))
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.secondaryContainer),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Rounded.Terminal,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            Spacer(Modifier.width(10.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(approval.toolCall.name, fontWeight = FontWeight.SemiBold)
                 Text(
                     approval.reason ?: approval.preview?.command ?: approval.preview?.path ?: "Tool approval requested",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -433,12 +686,12 @@ private fun ApprovalCard(
         }
         Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { onApprove(approval) }) {
+            Button(onClick = { onApprove(approval) }, shape = RoundedCornerShape(12.dp)) {
                 Icon(Icons.Rounded.Check, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
                 Text("Allow once")
             }
-            OutlinedButton(onClick = { onReject(approval) }) {
+            OutlinedButton(onClick = { onReject(approval) }, shape = RoundedCornerShape(12.dp)) {
                 Icon(Icons.Rounded.Close, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
                 Text("Reject")
@@ -446,24 +699,165 @@ private fun ApprovalCard(
         }
     }
 }
+@Composable
+private fun MessageBubble(message: Message, streaming: Boolean = false) {
+    val isUser = message.role == "user"
+    val isTool = message.role == "tool"
+    val bubbleColor = if (isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface
+    val textColor = if (isUser) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+    val shape = if (isUser) {
+        RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomStart = 18.dp, bottomEnd = 4.dp)
+    } else {
+        RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomStart = 4.dp, bottomEnd = 18.dp)
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
+    ) {
+        Surface(
+            color = bubbleColor,
+            shape = shape,
+            tonalElevation = if (isUser) 0.dp else 2.dp,
+            shadowElevation = if (streaming) 4.dp else 1.dp,
+            modifier = Modifier.fillMaxWidth(if (isUser) 0.86f else 0.94f),
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp)) {
+                if (isTool) {
+                    ToolMessageContent(message, textColor)
+                } else if (isUser) {
+                    Text(
+                        message.content,
+                        color = textColor,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                } else {
+                    val codeBackground = MaterialTheme.colorScheme.surfaceVariant
+                    Markdown(
+                        content = message.content,
+                        colors = markdownColor(
+                            text = textColor,
+                            codeText = textColor,
+                            codeBackground = codeBackground,
+                            inlineCodeText = textColor,
+                            inlineCodeBackground = codeBackground,
+                        ),
+                        typography = markdownTypography(
+                            text = MaterialTheme.typography.bodyMedium,
+                            code = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            paragraph = MaterialTheme.typography.bodyMedium,
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                if (streaming) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "typing…",
+                        color = textColor.copy(alpha = 0.6f),
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+            }
+        }
+    }
+}
 
 @Composable
+private fun ToolMessageContent(message: Message, textColor: Color) {
+    val expandedStates = remember { mutableStateMapOf<String, Boolean>() }
+    val expanded = expandedStates[message.id] == true
+    Column {
+        Row(verticalAlignment = Alignment.Top) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(MaterialTheme.colorScheme.secondaryContainer)
+                    .padding(horizontal = 8.dp, vertical = 5.dp),
+            ) {
+                Text(
+                    "Tool",
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                toolSummary(message),
+                color = textColor,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        if (message.content.isNotBlank()) {
+            Spacer(Modifier.height(8.dp))
+            TextButton(onClick = { expandedStates[message.id] = !expanded }) {
+                Text(if (expanded) "Hide details" else "Details")
+            }
+            if (expanded) {
+                CodeBlock(message.content.take(2400))
+            }
+        }
+    }
+}
+
+@Composable
+private fun PatchCard(patch: FilePatch) {
+    val sc = statusColorsFor(patch.status)
+    AccentPanel(accent = sc.accent) {
+        Text(patch.relativePath, fontWeight = FontWeight.SemiBold, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
+        StatusPill(patch.status)
+        CodeBlock(patch.diffText)
+    }
+}
+
+@Composable
+private fun CommandRunCard(run: CommandRunView) {
+    val sc = statusColorsFor(run.status)
+    AccentPanel(accent = sc.accent) {
+        Text(run.command, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodyMedium)
+        StatusPill("${run.status}${run.exitCode?.let { " · exit $it" } ?: ""}")
+        if (run.stdout.isNotBlank()) CodeBlock(run.stdout.take(1600))
+        if (run.stderr.isNotBlank()) CodeBlock(run.stderr.take(1600))
+    }
+}
+@Composable
 private fun RecentSessionCard(session: RecentSession, onClick: () -> Unit) {
+    val label = if (session.pendingApprovalCount > 0) "${session.pendingApprovalCount} waiting" else (session.latestPlanStatus ?: session.status)
+    val sc = statusColorsFor(label)
     Card(
         onClick = onClick,
-        shape = RoundedCornerShape(8.dp),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(session.title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(session.projectName, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            if (session.pendingApprovalCount > 0) {
-                StatusPill("${session.pendingApprovalCount} waiting")
-            } else {
-                StatusPill(session.latestPlanStatus ?: session.status)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .width(4.dp)
+                    .height(58.dp)
+                    .background(sc.accent),
+            )
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 12.dp, top = 14.dp, bottom = 14.dp, end = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(session.title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        session.projectName,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                StatusPill(label)
             }
         }
     }
@@ -473,97 +867,107 @@ private fun RecentSessionCard(session: RecentSession, onClick: () -> Unit) {
 private fun ProjectCard(project: Project, onOpen: () -> Unit, onNewSession: () -> Unit) {
     Panel {
         Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(RoundedCornerShape(11.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Rounded.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+            }
+            Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(project.name, fontWeight = FontWeight.SemiBold)
                 Text(
                     "${project.sourceType} / ${project.workspaceMode ?: "managed"}",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
                 )
             }
             TextButton(onClick = onOpen) { Text("Open") }
         }
-        OutlinedButton(onClick = onNewSession, modifier = Modifier.fillMaxWidth()) {
+        Spacer(Modifier.height(10.dp))
+        OutlinedButton(
+            onClick = onNewSession,
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
             Text("Start session")
         }
     }
 }
 
 @Composable
-private fun MessageBubble(message: Message, streaming: Boolean = false) {
-    val isUser = message.role == "user"
-    val color = if (isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface
-    val textColor = if (isUser) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
+private fun MetricCard(value: String, label: String, accent: Color, modifier: Modifier = Modifier) {
+    Card(
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        modifier = modifier,
     ) {
-        Surface(
-            color = color,
-            shape = RoundedCornerShape(8.dp),
-            tonalElevation = if (streaming) 4.dp else 0.dp,
-            modifier = Modifier.fillMaxWidth(if (isUser) 0.86f else 0.94f),
-        ) {
-            Text(
-                message.content,
-                modifier = Modifier.padding(12.dp),
-                color = textColor,
-                style = MaterialTheme.typography.bodyMedium,
+        Column(modifier = Modifier.padding(vertical = 14.dp, horizontal = 12.dp)) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(accent),
             )
+            Spacer(Modifier.height(8.dp))
+            Text(value, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
 
-@Composable
-private fun PatchCard(patch: FilePatch) {
-    Panel {
-        Text(patch.relativePath, fontWeight = FontWeight.SemiBold)
-        Text(patch.status, color = MaterialTheme.colorScheme.primary)
-        CodeBlock(patch.diffText)
-    }
-}
-
-@Composable
-private fun CommandRunCard(run: CommandRunView) {
-    Panel {
-        Text(run.command, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold)
-        Text("${run.status}${run.exitCode?.let { " / exit $it" } ?: ""}", color = MaterialTheme.colorScheme.primary)
-        if (run.stdout.isNotBlank()) CodeBlock(run.stdout.take(1600))
-        if (run.stderr.isNotBlank()) CodeBlock(run.stderr.take(1600))
-    }
-}
-
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ComposerBar(state: UiState, viewModel: MebiusViewModel) {
-    Column(
-        modifier = Modifier
-            .background(MaterialTheme.colorScheme.surface)
-            .padding(12.dp),
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        shadowElevation = 8.dp,
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(
-                selected = state.composerMode == ComposerMode.Build,
-                onClick = { viewModel.setComposerMode(ComposerMode.Build) },
-                label = { Text("Build") },
-            )
-            FilterChip(
-                selected = state.composerMode == ComposerMode.Plan,
-                onClick = { viewModel.setComposerMode(ComposerMode.Plan) },
-                label = { Text("Plan") },
-            )
-        }
-        Spacer(Modifier.height(8.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                value = state.composerText,
-                onValueChange = viewModel::setComposerText,
-                placeholder = { Text(if (state.composerMode == ComposerMode.Plan) "Create a plan..." else "Send a task update...") },
-                modifier = Modifier.weight(1f),
-                minLines = 1,
-                maxLines = 4,
-            )
-            Spacer(Modifier.width(8.dp))
-            IconButton(onClick = viewModel::submitComposer) {
-                Icon(Icons.Rounded.Send, contentDescription = "Send")
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = state.composerMode == ComposerMode.Build,
+                    onClick = { viewModel.setComposerMode(ComposerMode.Build) },
+                    label = { Text("Build") },
+                    leadingIcon = if (state.composerMode == ComposerMode.Build) {
+                        { Icon(Icons.Rounded.Bolt, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                    } else null,
+                    shape = RoundedCornerShape(10.dp),
+                )
+                FilterChip(
+                    selected = state.composerMode == ComposerMode.Plan,
+                    onClick = { viewModel.setComposerMode(ComposerMode.Plan) },
+                    label = { Text("Plan") },
+                    leadingIcon = if (state.composerMode == ComposerMode.Plan) {
+                        { Icon(Icons.Rounded.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                    } else null,
+                    shape = RoundedCornerShape(10.dp),
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.Bottom) {
+                OutlinedTextField(
+                    value = state.composerText,
+                    onValueChange = viewModel::setComposerText,
+                    placeholder = { Text(if (state.composerMode == ComposerMode.Plan) "Create a plan..." else "Send a task update...") },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(20.dp),
+                    minLines = 1,
+                    maxLines = 4,
+                )
+                Spacer(Modifier.width(8.dp))
+                FilledIconButton(
+                    onClick = viewModel::submitComposer,
+                    enabled = state.composerText.isNotBlank(),
+                    shape = CircleShape,
+                    modifier = Modifier.size(52.dp),
+                ) {
+                    Icon(Icons.Rounded.Send, contentDescription = "Send")
+                }
             }
         }
     }
@@ -572,11 +976,32 @@ private fun ComposerBar(state: UiState, viewModel: MebiusViewModel) {
 @Composable
 private fun Panel(content: @Composable ColumnScope.() -> Unit) {
     Card(
-        shape = RoundedCornerShape(8.dp),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Column(modifier = Modifier.padding(14.dp), content = content)
+        Column(modifier = Modifier.padding(16.dp), content = content)
+    }
+}
+
+@Composable
+private fun AccentPanel(accent: Color, content: @Composable ColumnScope.() -> Unit) {
+    Card(
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row {
+            Box(
+                modifier = Modifier
+                    .width(4.dp)
+                    .fillMaxHeight()
+                    .background(accent),
+            )
+            Column(modifier = Modifier.padding(16.dp), content = content)
+        }
     }
 }
 
@@ -584,14 +1009,14 @@ private fun Panel(content: @Composable ColumnScope.() -> Unit) {
 private fun CodeBlock(text: String) {
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = RoundedCornerShape(6.dp),
+        shape = RoundedCornerShape(10.dp),
         modifier = Modifier
             .fillMaxWidth()
             .padding(top = 8.dp),
     ) {
         Text(
             text.ifBlank { "No preview" },
-            modifier = Modifier.padding(10.dp),
+            modifier = Modifier.padding(12.dp),
             fontFamily = FontFamily.Monospace,
             style = MaterialTheme.typography.bodySmall,
             maxLines = 18,
@@ -602,31 +1027,80 @@ private fun CodeBlock(text: String) {
 
 @Composable
 private fun SectionTitle(label: String) {
-    Text(label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-}
-
-@Composable
-private fun MetricChip(value: String, label: String) {
-    AssistChip(
-        onClick = {},
-        label = { Text("$value $label") },
+    Text(
+        label,
+        style = MaterialTheme.typography.titleMedium,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier.padding(top = 4.dp, start = 2.dp),
     )
 }
 
 @Composable
 private fun StatusPill(label: String) {
+    val sc = statusColorsFor(label)
     Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
+        color = sc.container,
         shape = RoundedCornerShape(999.dp),
     ) {
-        Text(
-            label,
+        Row(
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-            style = MaterialTheme.typography.labelMedium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .clip(CircleShape)
+                    .background(sc.accent),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                label,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Medium,
+                color = sc.content,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
+}
+
+private fun toolSummary(message: Message): String {
+    val parsedContent = runCatching { com.mebiuscode.mobile.data.MebiusJson.json.parseToJsonElement(message.content) }.getOrNull()
+    val parsedObject = parsedContent as? kotlinx.serialization.json.JsonObject
+    val name = message.metadata.stringValue("toolName")
+        ?: inferredToolName(parsedObject)
+        ?: "Tool result"
+    val detail = message.metadata.stringValue("query")
+        ?: parsedObject?.stringValue("query")
+        ?: message.metadata.stringValue("command")
+        ?: parsedObject?.stringValue("command")
+        ?: message.metadata.stringListValue("targetPaths")?.joinToString(", ")
+        ?: parsedObject?.stringValue("provider")
+        ?: compactPreview(message.content)
+    val status = message.metadata.stringValue("status")
+    return listOfNotNull(name, detail, status).filter { it.isNotBlank() }.joinToString(" · ")
+}
+
+private fun inferredToolName(parsedObject: kotlinx.serialization.json.JsonObject?): String? {
+    if (parsedObject?.containsKey("query") == true || parsedObject?.containsKey("provider") == true) return "web_search"
+    return null
+}
+
+private fun kotlinx.serialization.json.JsonObject.stringValue(key: String): String? {
+    return this[key]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotBlank() }
+}
+
+private fun kotlinx.serialization.json.JsonObject.stringListValue(key: String): List<String>? {
+    val array = this[key] as? JsonArray ?: return null
+    return array.mapNotNull { item -> item.jsonPrimitive.contentOrNull?.trim()?.takeIf { it.isNotBlank() } }
+        .takeIf { it.isNotEmpty() }
+}
+
+private fun compactPreview(value: String): String? {
+    val compact = value.replace(Regex("\\s+"), " ").trim()
+    if (compact.isBlank()) return null
+    return if (compact.length > 96) "${compact.take(96)}..." else compact
 }
 
 @Composable
@@ -636,10 +1110,17 @@ private fun LoadingPane(label: String) {
             .fillMaxSize()
             .padding(24.dp),
         verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        LogoBadge(48)
+        Spacer(Modifier.height(16.dp))
         Text(label, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(12.dp))
-        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+        LinearProgressIndicator(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(999.dp)),
+        )
     }
 }
 
@@ -653,8 +1134,13 @@ private fun ErrorPane(message: String, retry: () -> Unit) {
         horizontalAlignment = Alignment.Start,
     ) {
         Text("Could not load", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(4.dp))
         Text(message, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.height(12.dp))
-        Button(onClick = retry) { Text("Retry") }
+        Spacer(Modifier.height(16.dp))
+        Button(onClick = retry, shape = RoundedCornerShape(12.dp)) {
+            Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("Retry")
+        }
     }
 }

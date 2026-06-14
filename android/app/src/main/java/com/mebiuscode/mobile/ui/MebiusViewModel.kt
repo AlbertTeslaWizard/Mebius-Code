@@ -13,13 +13,17 @@ import com.mebiuscode.mobile.data.PlanQuestionAnswer
 import com.mebiuscode.mobile.data.Project
 import com.mebiuscode.mobile.data.SessionDetails
 import com.mebiuscode.mobile.data.SseClient
+import com.mebiuscode.mobile.data.SseStreamException
 import com.mebiuscode.mobile.data.contentDelta
 import com.mebiuscode.mobile.data.statusText
 import com.mebiuscode.mobile.data.userMessage
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 data class UiState(
@@ -51,6 +55,11 @@ class MebiusViewModel(
     private val repository: MebiusRepository,
     private val sseClient: SseClient = SseClient(),
 ) : ViewModel() {
+    private companion object {
+        const val SILENT_STREAM_RETRY_LIMIT = 5
+        val STREAM_RETRY_DELAYS_MS = longArrayOf(1_000, 2_000, 4_000, 8_000, 15_000)
+    }
+
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state
     private var streamJob: Job? = null
@@ -248,32 +257,142 @@ class MebiusViewModel(
     }
 
     private fun reloadCurrentSession() {
-        _state.value.selectedSessionId?.let(::openSession)
+        _state.value.selectedSessionId?.let { sessionId ->
+            viewModelScope.launch {
+                refreshSessionDetails(sessionId)
+            }
+        }
     }
 
     private fun subscribeSession(sessionId: String) {
         streamJob?.cancel()
         streamJob = viewModelScope.launch {
-            sseClient.stream(repository.eventUrl(sessionId)).collect { event ->
-                when (event.type) {
-                    "token" -> {
-                        val delta = event.contentDelta().orEmpty()
-                        _state.update {
-                            it.copy(streamStatus = "responding", streamingText = it.streamingText + delta)
+            var consecutiveFailures = 0
+            while (isActive && isCurrentSession(sessionId)) {
+                try {
+                    _state.update {
+                        it.copy(streamStatus = if (consecutiveFailures == 0) "connecting" else "reconnecting")
+                    }
+                    sseClient.stream(repository.eventUrl(sessionId)).collect { event ->
+                        when (event.type) {
+                            "connected" -> {
+                                val shouldRefresh = consecutiveFailures > 0
+                                consecutiveFailures = 0
+                                _state.update { it.copy(streamStatus = "connected", error = null) }
+                                if (shouldRefresh) {
+                                    refreshSessionDetails(sessionId, clearStreamingText = true)
+                                }
+                            }
+                            "token" -> {
+                                val delta = event.contentDelta().orEmpty()
+                                _state.update {
+                                    it.copy(streamStatus = "responding", streamingText = it.streamingText + delta)
+                                }
+                            }
+                            "message_created", "plan_updated", "tool_call_result" -> {
+                                _state.update {
+                                    it.copy(streamStatus = event.type, streamingText = "")
+                                }
+                                refreshSessionDetails(sessionId)
+                            }
+                            "done" -> {
+                                _state.update { it.copy(streamStatus = event.type, streamingText = "") }
+                            }
+                            "agent_status" -> {
+                                _state.update { it.copy(streamStatus = event.statusText() ?: "active") }
+                            }
+                            "session_deleted" -> {
+                                handleMissingSession("Session was deleted.")
+                                throw CancellationException("Session was deleted.")
+                            }
+                            else -> _state.update { it.copy(streamStatus = event.type) }
                         }
                     }
-                    "message_created", "plan_updated", "tool_call_result", "done" -> {
-                        _state.update { it.copy(streamStatus = event.type) }
-                        if (event.type != "done") reloadCurrentSession()
+                    throw SseStreamException(null, "Event stream closed")
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    if (!isCurrentSession(sessionId)) return@launch
+                    if (handleTerminalStreamError(error)) return@launch
+
+                    consecutiveFailures += 1
+                    _state.update {
+                        it.copy(
+                            streamStatus = "reconnecting",
+                            error = if (consecutiveFailures == SILENT_STREAM_RETRY_LIMIT) {
+                                "Session stream disconnected. Retrying..."
+                            } else {
+                                it.error
+                            },
+                        )
                     }
-                    "agent_status" -> {
-                        _state.update { it.copy(streamStatus = event.statusText() ?: "active") }
-                    }
-                    "session_deleted" -> backToDashboard()
-                    else -> _state.update { it.copy(streamStatus = event.type) }
+                    delay(streamRetryDelay(consecutiveFailures))
                 }
             }
         }
+    }
+
+    private suspend fun refreshSessionDetails(sessionId: String, clearStreamingText: Boolean = false) {
+        runCatching { repository.loadSession(sessionId) }
+            .onSuccess { details ->
+                if (isCurrentSession(sessionId)) {
+                    _state.update {
+                        it.copy(
+                            sessionDetails = LoadState.Ready(details),
+                            streamingText = if (clearStreamingText) "" else it.streamingText,
+                        )
+                    }
+                }
+            }
+            .onFailure { error ->
+                if (isCurrentSession(sessionId)) {
+                    _state.update { it.copy(error = error.userMessage()) }
+                }
+            }
+    }
+
+    private fun isCurrentSession(sessionId: String): Boolean {
+        val state = _state.value
+        return state.selectedSessionId == sessionId && state.route is Route.Session
+    }
+
+    private fun handleTerminalStreamError(error: Throwable): Boolean {
+        return when ((error as? SseStreamException)?.statusCode) {
+            401, 403 -> {
+                _state.update {
+                    it.copy(
+                        streamStatus = "auth_error",
+                        error = "Session stream authorization failed. Please sign in again.",
+                    )
+                }
+                true
+            }
+            404 -> {
+                handleMissingSession("Session no longer exists.")
+                true
+            }
+            else -> false
+        }
+    }
+
+    private fun handleMissingSession(message: String) {
+        _state.update {
+            it.copy(
+                route = Route.Dashboard,
+                selectedProject = null,
+                selectedSessionId = null,
+                sessionDetails = LoadState.Idle,
+                streamStatus = "idle",
+                streamingText = "",
+                error = message,
+            )
+        }
+        refreshOverview()
+    }
+
+    private fun streamRetryDelay(failureCount: Int): Long {
+        val index = (failureCount - 1).coerceIn(0, STREAM_RETRY_DELAYS_MS.lastIndex)
+        return STREAM_RETRY_DELAYS_MS[index]
     }
 }
 

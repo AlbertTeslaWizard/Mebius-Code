@@ -250,3 +250,19 @@ body {
 :root[data-theme="light"] .settings-panel {
   background: var(--mebius-panel);
 }
+
+/* Fix for text rendering in input fields - ensure descenders and underscores are visible */
+.n-input__input-el,
+.n-input__textarea-el {
+  line-height: 1.5 !important;
+  padding-top: 2px !important;
+  padding-bottom: 2px !important;
+}
+
+.n-input-wrapper {
+  min-height: fit-content !important;
+}
+
+.n-input--textarea .n-input-wrapper {
+  min-height: auto !important;
+}

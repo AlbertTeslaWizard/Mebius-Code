@@ -4,6 +4,7 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import okhttp3.OkHttpClient
@@ -22,6 +23,10 @@ class SseClient {
         val source = factory.newEventSource(
             request,
             object : EventSourceListener() {
+                override fun onOpen(eventSource: EventSource, response: Response) {
+                    trySend(SseEvent("connected", JsonObject(emptyMap())))
+                }
+
                 override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
                     val parsed: JsonElement = runCatching {
                         MebiusJson.json.parseToJsonElement(data)
@@ -30,7 +35,14 @@ class SseClient {
                 }
 
                 override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
-                    close(t ?: RuntimeException("Event stream failed with HTTP ${response?.code ?: 0}"))
+                    val statusCode = response?.code
+                    val message = when {
+                        statusCode != null && !t?.message.isNullOrBlank() -> "HTTP $statusCode: ${t?.message}"
+                        statusCode != null -> "Event stream failed with HTTP $statusCode"
+                        !t?.message.isNullOrBlank() -> t?.message ?: "Event stream failed"
+                        else -> "Event stream failed"
+                    }
+                    close(SseStreamException(statusCode, message, t))
                 }
 
                 override fun onClosed(eventSource: EventSource) {
@@ -41,6 +53,12 @@ class SseClient {
         awaitClose { source.cancel() }
     }
 }
+
+class SseStreamException(
+    val statusCode: Int?,
+    message: String,
+    cause: Throwable? = null,
+) : RuntimeException(message, cause)
 
 fun SseEvent.contentDelta(): String? =
     runCatching { data.jsonObject["delta"]?.toString()?.trim('"') }.getOrNull()

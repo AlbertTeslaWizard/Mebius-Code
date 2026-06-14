@@ -200,9 +200,9 @@ function nodeIcon(node: TreeNode) {
   font-size: 12px;
   gap: 0.35rem;
   grid-template-columns: 14px 18px minmax(0, 1fr) auto;
-  height: 29px;
+  min-height: 29px;
   letter-spacing: 0;
-  line-height: 1;
+  line-height: 1.4;
   margin: 1px 0;
   outline: none;
   padding-bottom: 0;
