@@ -6,16 +6,23 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
+import java.util.concurrent.TimeUnit
 
 class SseClient {
-    private val client = OkHttpClient.Builder().build()
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.MILLISECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
     private val factory = EventSources.createFactory(client)
 
     fun stream(url: String): Flow<SseEvent> = callbackFlow {
@@ -60,8 +67,9 @@ class SseStreamException(
     cause: Throwable? = null,
 ) : RuntimeException(message, cause)
 
-fun SseEvent.contentDelta(): String? =
-    runCatching { data.jsonObject["delta"]?.toString()?.trim('"') }.getOrNull()
+fun SseEvent.contentDelta(): String? = stringField("delta")
 
-fun SseEvent.statusText(): String? =
-    runCatching { data.jsonObject["status"]?.toString()?.trim('"') }.getOrNull()
+fun SseEvent.statusText(): String? = stringField("status")
+
+private fun SseEvent.stringField(key: String): String? =
+    runCatching { data.jsonObject[key]?.jsonPrimitive?.contentOrNull }.getOrNull()

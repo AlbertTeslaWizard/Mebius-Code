@@ -6,7 +6,7 @@ import { map } from 'rxjs/operators';
 export class EventsService {
   private readonly subjects = new Map<string, Subject<MessageEvent>>();
 
-  private readonly SSE_KEEPALIVE_MS = 15_000;
+  private readonly SSE_KEEPALIVE_MS = 5_000;
 
   stream(sessionId: string): Observable<MessageEvent> {
     const events$ = this.getSubject(sessionId).asObservable();
@@ -35,4 +35,3 @@ export class EventsService {
     return subject;
   }
 }
-

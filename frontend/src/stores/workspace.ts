@@ -488,32 +488,6 @@ export const useWorkspaceStore = defineStore('workspace', {
         const locale = useLocaleStore();
         throw new Error(locale.t('pendingApprovalBeforeChat'));
       }
-      if (trimmed.startsWith('/')) {
-        if (trimmed === '/undo') {
-          await this.undoLastTurn();
-          return;
-        }
-        if (trimmed.startsWith('/undo ')) {
-          throw new Error('/undo does not accept arguments.');
-        }
-        if (trimmed === '/redo') {
-          await this.redoLastTurn();
-          return;
-        }
-        if (trimmed.startsWith('/redo ')) {
-          throw new Error('/redo does not accept arguments.');
-        }
-        const result = await request<unknown>(`/sessions/${this.currentSession.id}/commands`, {
-          method: 'POST',
-          body: jsonBody({ command: trimmed }),
-        });
-        this.eventLog.unshift({
-          type: 'command_result',
-          data: result as SsePayload,
-          time: new Date().toISOString(),
-        });
-        return result;
-      }
       await this.ensureEventStream();
       this.agentActivity = { status: 'thinking' };
       try {

@@ -435,6 +435,7 @@ class MebiusViewModel(
                             "done" -> {
                                 _state.update { it.copy(streamStatus = event.type, streamingText = "") }
                             }
+                            "keepalive" -> Unit
                             "agent_status" -> {
                                 val status = event.statusText() ?: "active"
                                 if (status == "session_deleted") {

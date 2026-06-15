@@ -16,6 +16,7 @@ import retrofit2.http.Path
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import okhttp3.MediaType.Companion.toMediaType
+import java.util.concurrent.TimeUnit
 
 interface MebiusApi {
     @POST("auth/login")
@@ -170,6 +171,9 @@ object MebiusJson {
 fun createMebiusApi(apiBaseUrl: String): MebiusApi {
     val contentType = "application/json".toMediaType()
     val client = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.MINUTES)
         .addInterceptor(ErrorInterceptor)
         .build()
     return Retrofit.Builder()

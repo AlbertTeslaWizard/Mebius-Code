@@ -91,9 +91,6 @@ import com.mebiuscode.mobile.data.PlanBundle
 import com.mebiuscode.mobile.data.Project
 import com.mebiuscode.mobile.data.RecentSession
 import com.mebiuscode.mobile.data.SessionDetails
-import com.mikepenz.markdown.m3.Markdown
-import com.mikepenz.markdown.m3.markdownColor
-import com.mikepenz.markdown.m3.markdownTypography
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.contentOrNull
@@ -962,28 +959,16 @@ private fun MessageBubble(message: Message, streaming: Boolean = false) {
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 } else {
-                    val codeBackground = MaterialTheme.colorScheme.surfaceVariant
-                    Markdown(
+                    MessageMarkdown(
                         content = message.content,
-                        colors = markdownColor(
-                            text = textColor,
-                            codeText = textColor,
-                            codeBackground = codeBackground,
-                            inlineCodeText = textColor,
-                            inlineCodeBackground = codeBackground,
-                        ),
-                        typography = markdownTypography(
-                            text = MaterialTheme.typography.bodyMedium,
-                            code = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                            paragraph = MaterialTheme.typography.bodyMedium,
-                        ),
+                        textColor = textColor,
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
                 if (streaming) {
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        "typing…",
+                        "typing...",
                         color = textColor.copy(alpha = 0.6f),
                         style = MaterialTheme.typography.labelSmall,
                     )

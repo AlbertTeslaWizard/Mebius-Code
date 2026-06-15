@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import DOMPurify from 'dompurify';
+import type { Config as DOMPurifyConfig } from 'dompurify';
+import katex from 'katex';
+import 'katex/dist/katex.min.css';
 import MarkdownIt from 'markdown-it';
+import texmath from 'markdown-it-texmath';
+import 'markdown-it-texmath/css/texmath.css';
 
 const props = defineProps<{
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -14,9 +19,20 @@ const markdown = new MarkdownIt({
   html: false,
   linkify: true,
   typographer: false,
+}).use(texmath, {
+  engine: katex,
+  delimiters: ['brackets', 'dollars', 'beg_end'],
+  outerSpace: true,
+  katexOptions: {
+    throwOnError: false,
+  },
 });
 
-const renderedMarkdown = computed(() => DOMPurify.sanitize(markdown.render(props.content)));
+const sanitizeConfig: DOMPurifyConfig = {
+  ADD_TAGS: ['eq', 'eqn'],
+};
+
+const renderedMarkdown = computed(() => DOMPurify.sanitize(markdown.render(props.content), sanitizeConfig));
 
 const parsedToolContent = computed<Record<string, unknown> | null>(() => {
   try {
