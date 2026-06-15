@@ -6,14 +6,14 @@
 | --- | --- | --- |
 | 后端框架 | NestJS + TypeScript | 使用类、装饰器、依赖注入、模块和服务组织业务逻辑，适合面向对象课程设计表达 |
 | 前端框架 | Vue 3 + TypeScript + Vite | 构建单页 Web 客户端，类型约束明确，开发和演示成本低 |
-| TUI 客户端 | Bun + TypeScript + OpenTUI + Solid | 构建可在终端中运行的第二客户端，复用同一套 NestJS API、SSE、审批和工作区能力 |
-| Android 客户端 | Kotlin + Jetpack Compose + Retrofit + OkHttp SSE | 构建轻量移动伴随客户端，复用认证、会话、Plan、审批和 SSE 能力 |
+| TUI 客户端 | Bun + TypeScript + OpenTUI + Solid + unified-latex | 构建可在终端中运行的第二客户端，复用同一套 NestJS API、SSE、审批和工作区能力，并将常见 LaTeX 公式转换为终端可读文本 |
+| Android 客户端 | Kotlin + Jetpack Compose + Retrofit + OkHttp SSE + WebView/KaTeX | 构建轻量移动伴随客户端，复用认证、会话、Plan、审批和 SSE 能力，并通过随包本地 KaTeX 资源渲染数学公式 |
 | 状态管理 | Pinia | 将认证、工作区、审批、本地化、主题偏好等客户端状态模块化 |
-| UI 与编辑 | Naive UI、Tailwind CSS、CodeMirror、Shiki、Markdown-it、DOMPurify | 支持工作台界面、明暗主题、代码编辑、代码高亮、Markdown 消息和安全渲染 |
+| UI 与编辑 | Naive UI、Tailwind CSS、CodeMirror、Shiki、Markdown-it、markdown-it-texmath、KaTeX、DOMPurify | 支持工作台界面、明暗主题、代码编辑、代码高亮、Markdown/数学公式消息和安全渲染 |
 | 数据库 | PostgreSQL | 保存用户、模型配置、项目、会话、消息、计划、审批和审计记录 |
 | ORM | TypeORM | 以实体类映射数据库表，便于表达领域对象关系 |
 | 认证 | JWT + Passport | 支持 Web 客户端无状态访问受保护接口 |
-| 实时事件 | Server-Sent Events | 将模型 token、工具状态、审批、命令输出等事件推送到 Web 和 TUI 客户端 |
+| 实时事件 | Server-Sent Events | 将模型 token、工具状态、审批、命令输出等事件推送到 Web、TUI 和 Android 客户端 |
 | 模型接入 | OpenAI-compatible Chat Completions API | 兼容多个模型 Provider 和工具调用协议 |
 | 外部工具接入 | MCP Streamable HTTP、Exa/Tavily Web Search | 动态接入远程文档和公共 Web 检索工具，并将外部内容作为不可信上下文注入 Agent |
 | 邮件服务 | Nodemailer + SMTP | 发送注册邮箱验证码，支持课程演示环境按需开启邮件投递 |
@@ -109,14 +109,14 @@ External / Runtime Resources
 
 - `WorkspaceFileTree`：展示项目文件树，触发文件选择、重命名和删除。
 - `CodeEditor`：使用 CodeMirror 编辑当前文本文件。
-- `CodePreview`：使用 Shiki 高亮展示代码。
+- `CodePreview`：使用 Shiki 高亮展示代码，并按当前明暗主题切换 `light-plus` / `dark-plus`。
 - `DiffPreview`：展示 Agent 生成补丁的差异。
-- `MessageContent`：渲染 Markdown 消息，并通过 DOMPurify 做 HTML 净化。
+- `MessageContent`：渲染 Markdown、表格、链接和 KaTeX 数学公式，并通过 DOMPurify 做 HTML 净化；tool role 消息默认展示工具摘要，详情折叠查看。
 - `ThemeToggle`：在工作区顶部切换明暗主题，并通过用户偏好接口持久化选择。
 
 `WorkspaceView` 右侧工作台分为文件、审查、运行和事件四个页签。文件页签保留文件树和文件预览的独立滚动区域，审查页签和运行页签采用面板级滚动，保证长计划、长审批列表、命令申请表单和命令输出可以整体上下翻动。主工作区采用项目侧栏、会话栏、聊天区和上下文侧栏的多面板布局；项目侧栏和上下文侧栏保存折叠状态与宽度，会话栏保存折叠状态。会话栏折叠时聊天区切换为单列占满剩余宽度；项目侧栏 resize handle 只负责宽度拖拽，滚轮事件转交给侧栏滚动容器，避免拖拽热区覆盖纵向滚动。
 
-Web 聊天输入区使用 Build / Plan 分段模式：Build 模式将普通文本提交给 Agent，Plan 模式创建计划；`/undo`、`/redo`、`/clear`、`/compact` 等 Slash Command 始终按命令处理，不受当前模式影响。批准后的计划通过 `approvedPlanId` 触发执行，前端在 `turn_undone`、`turn_redone` 和 `plan_updated` 事件后刷新消息、补丁、命令运行记录和计划。
+Web 聊天输入区使用 Build / Plan 分段模式：Build 模式将普通文本提交给 Agent，Plan 模式创建计划；`/undo`、`/redo`、`/clear`、`/compact` 等 Slash Command 始终按命令处理，不受当前模式影响。批准后的计划通过 `approvedPlanId` 触发执行。前端在 `done` 事件后重新拉取服务端消息以校准流式临时内容；在 `turn_undone`、`turn_redone` 和 `plan_updated` 事件后刷新消息、补丁、命令运行记录和计划。
 
 ### 3.4 主题与可读性
 
@@ -146,7 +146,9 @@ MVP 阶段 `mebius` 不自动启动 NestJS 后端，而是连接已经运行的 
 
 TUI 工作台采用三栏结构：左侧展示项目、Session、文件树和 Git 状态；中间展示聊天记录、流式输出、Agent 活动指示器和输入框；右侧默认展示 Status / Session 状态面板，并在审批时切换为审批预览。终端宽度不足时，右侧和左侧面板可以折叠或切换。
 
-TUI 的命令入口包括聊天输入中的 Slash Command 和 `Ctrl+P` 命令面板。输入区有 Build 与 Plan 两种模式，`Tab` 切换模式；Build 模式运行 Agent，Plan 模式创建计划，Slash Command 始终优先按命令处理。`/new` 创建并切换到新会话，`/sessions` 打开全屏历史会话选择器，`/models` 打开模型选择器，`/skills` 打开技能浏览与选择界面，`/mcp` 打开 MCP 浏览与管理界面，`/themes` 切换 TUI 主题，`/permissions` 查询或切换当前会话权限模式，`/init` 生成项目 `AGENTS.md`，`/undo` 和 `/redo` 调用后端回合撤销/重做，`/clear` 和 `/compact` 调用后端会话命令。输入 `/` 时触发 Slash 命令自动补全，展示内置命令和已发现技能列表建议，选择建议后执行对应命令或插入技能前缀。`/sessions` 复用 `GET /projects/:projectId/sessions`、`GET /sessions/:id` 和 `GET /sessions/:id/messages` 等既有 API，不新增后端数据结构。
+TUI 的命令入口包括聊天输入中的 Slash Command 和 `Ctrl+P` 命令面板。输入区有 Build 与 Plan 两种模式，`Tab` 切换模式；Build 模式运行 Agent，Plan 模式创建计划，Slash Command 始终优先按命令处理。`/new` 创建并切换到新会话，`/sessions` 打开全屏历史会话选择器，`/models` 打开模型选择器，`/skills` 打开技能浏览与选择界面，`/mcp` 打开 MCP 浏览与管理界面，`/themes` 切换 TUI 主题，`/permissions` 查询或切换当前会话权限模式，`/init` 生成项目 `AGENTS.md`，`/undo` 和 `/redo` 调用后端回合撤销/重做，`/clear` 和 `/compact` 调用后端会话命令，`/tools expand` 与 `/tools collapse` 控制 tool role 消息详情展开状态。输入 `/` 时触发 Slash 命令自动补全，展示内置命令和已发现技能列表建议，选择建议后执行对应命令或插入技能前缀。`/sessions` 复用 `GET /projects/:projectId/sessions`、`GET /sessions/:id` 和 `GET /sessions/:id/messages` 等既有 API，不新增后端数据结构。
+
+TUI 消息渲染在 OpenTUI Markdown 渲染前执行 `preprocessMarkdownMath()`：对 `\[`/`\]`、`$$`、`\(`/`\)`、行内 `$...$` 和常见 LaTeX 环境做保守识别，跳过 fenced code block，并通过 `@unified-latex/unified-latex-util-parse` 将 `\frac`、`\sqrt`、希腊字母、比较符号和常见函数渲染为终端可读文本。tool role 消息由 `toolMessageSummary()` 提取工具名、查询、命令、目标路径和状态，详细 JSON 通过 `formatToolMessageDetails()` 格式化并截断长内容，避免大工具结果占满终端。
 
 MCP 浏览器通过 `/mcp`、`/mcp refresh` 或 `/mcp verbose` 打开，展示用户已配置的 MCP Server、启用状态、诊断状态、工具数量和工具详情。`/mcp context7` 创建或更新 Context7 预设；`/mcp add <slug> <url>`、`/mcp tools <slug>`、`/mcp enable <slug>`、`/mcp disable <slug>`、`/mcp remove <slug>` 通过后端 Slash Command 管理远程 MCP Server。TUI 中的 MCP 面板支持 Up/Down 导航、Enter/Tab 打开详情、Space 启停服务器、Ctrl+R 刷新诊断和 Escape 返回或关闭。
 
@@ -181,11 +183,11 @@ TUI 技能发现按优先级扫描以下目录：`.mebius/skills/`、`.opencode/
 
 Android 伴随客户端位于 `android/`，使用 Kotlin、Jetpack Compose、Material 3、Retrofit、OkHttp SSE、kotlinx.serialization 和 EncryptedSharedPreferences。它不是手机 IDE，也不承担本地 workspace、Git、MCP 或技能管理职责，而是面向移动端快速查看和决策的轻量客户端。
 
-Android 的信息架构分为登录页、概览页、项目会话页和会话详情页。登录页连接已有 API 并在本地安全保存 API 地址、JWT 和显示名称；概览页聚合当前用户、系统能力、项目、最近会话和待审批项；项目会话页展示项目下的会话列表并支持新建、重命名、删除；会话详情页展示消息流、计划卡、工具审批卡、补丁摘要、命令结果和 SSE 状态。
+Android 的信息架构分为登录页、设置页、概览页、项目会话页和会话详情页。登录页连接已有 API 并在本地安全保存 API 地址、JWT 和显示名称；设置页展示当前用户和 API base URL，保存前用当前 session 验证新地址，并支持确认登出；概览页聚合当前用户、系统能力、项目、最近会话和待审批项；项目会话页展示项目下的会话列表并支持新建、重命名、删除；会话详情页展示消息流、计划卡、工具审批卡、补丁摘要、命令结果和 SSE 状态。
 
 Android 复用后端同一套会话、计划和审批接口：`/mobile/overview` 提供概览聚合，`/projects/:projectId/sessions` 和 `/sessions/:id` 管理会话，`/sessions/:id/messages` 与 `/sessions/:id/events` 提供消息和 SSE，`/sessions/:id/run` 与 `/sessions/:id/plan` 发送 Build / Plan 输入，`/plans/:id/approve`、`/plans/:id/cancel` 和 `/approvals/:id/approve|reject` 处理计划与工具决策。工具审批在 Android 上仅保留一次性批准和拒绝，避免把移动端做成完整工作台。
 
-Android 会话详情默认按“消息流 + 计划卡 + 审批卡 + 结果摘要”组织，消息中的 tool role 以可读摘要形式展示，不展开成 Web 端那样的完整编辑和命令控制面板。SSE 事件用于驱动会话状态、流式文本、计划更新和会话删除后的界面重载。
+Android 会话详情默认按“消息流 + 计划卡 + 审批卡 + 结果摘要”组织，消息中的 tool role 以可读摘要形式展示，不展开成 Web 端那样的完整编辑和命令控制面板。`MessageMarkdown` 支持标题、列表、引用、代码、表格、链接和显示数学块；数学块通过本地 `android_asset/katex/` 中的 KaTeX JS/CSS/字体在受限 WebView 中渲染，WebView 禁用网络加载和跨文件访问，仅允许加载随包 KaTeX 资源。SSE 事件用于驱动会话状态、流式文本、计划更新和会话删除后的界面重载。
 
 ## 6. 数据设计
 
@@ -324,6 +326,7 @@ local 项目的唯一性以 ownerId + 标准化 realpath 为准。Windows 下需
 9. 写入补丁、未授权命令执行或非只读 MCP 工具会生成待审批记录，Agent 暂停并等待用户批准。
 10. 用户批准后，系统执行工具、记录结果，再由 Agent 根据保存的 pending tool resume context 恢复模型回合，保留审批前的 assistant tool call 和已完成 tool messages。
 11. 达到最大工具轮数仍未完成时，系统保存提示消息并标记最新运行中的计划失败。
+12. Agent 回合结束时发布 `done` 事件。Web 和 TUI 收到后重新拉取服务端消息；TUI 对 undo/redo 事件还同步刷新审批、计划、命令运行、Git 状态和模型选择，保证终端 transcript 与后端持久化状态一致。
 
 ### 8.7 补丁应用与回滚
 
@@ -389,6 +392,7 @@ local 项目的唯一性以 ownerId + 标准化 realpath 为准。Windows 下需
 4. 用户提交 Build 输入时调用 `POST /sessions/:id/run`；提交 Plan 输入时调用 `POST /sessions/:id/plan`，并在收到 SSE 事件后刷新会话详情。
 5. 对计划卡片，Android 支持回答首个澄清问题、定稿、批准并执行、取消；对工具审批，Android 只提供一次性批准和拒绝。
 6. 当 SSE 收到 `session_deleted`、`message_created`、`plan_updated` 或 `tool_call_result` 等事件时，客户端停止旧流或刷新当前会话，保持移动端视图与 Web/TUI 一致。
+7. 用户进入设置页修改 API 地址时，客户端先用当前 JWT 请求新地址的概览接口，验证成功后持久化新 API base URL 并刷新移动概览；登出时清理 EncryptedSharedPreferences 中的会话信息。
 
 ## 9. 安全设计
 
@@ -421,6 +425,7 @@ local 项目的唯一性以 ownerId + 标准化 realpath 为准。Windows 下需
 TUI 本机测试时，MVP 要求手动启动 PostgreSQL 和 NestJS API，不由 `mebius` 自动拉起后端。local workspace 需要设置 `MEBIUS_CODE_SERVER_MODE=local_runtime` 和 `MEBIUS_CODE_LOCAL_WORKSPACES_ENABLED=true`，且不能使用 production API 容器绑定 Windows 或用户本机路径。远程 API 模式下，TUI 只操作远程后端已有 workspace。
 
 Android 客户端使用 Android Studio 或 `android/gradlew :app:assembleDebug` 构建。模拟器默认使用 `http://10.0.2.2:3000/api` 访问宿主机后端；真机演示需要填写同一局域网可访问的后端地址或 HTTPS 地址。Android 客户端只连接已运行 API，不启动 PostgreSQL 或 NestJS 服务。
+Android APK 随包携带 Mebius 应用图标、品牌徽标和 `android_asset/katex/` 本地 KaTeX 资源，移动端数学公式渲染不依赖 CDN 或外部网络。
 
 ## 11. UML 图
 

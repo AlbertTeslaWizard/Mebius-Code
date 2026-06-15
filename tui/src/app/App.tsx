@@ -3216,13 +3216,23 @@ export function App(props: AppProps) {
 function Header(props: { state: WorkspaceState; busy: boolean }) {
   const theme = useTheme();
   const mode = props.state.mode === 'remote' ? 'remote API' : 'local API';
+  const statusLabel = createMemo(() => (props.busy ? 'busy' : props.state.activity));
   return (
     <box style={{ height: 3, paddingX: 1, alignItems: 'center', flexDirection: 'row', backgroundColor: theme().background }}>
-      <text fg={theme().text}>Mebius</text>
-      <text fg={theme().muted}> - {props.state.project.name}</text>
-      <text fg={theme().muted}> - {props.state.session.title}</text>
-      <text fg={theme().muted}> - {mode}</text>
-      <text fg={props.busy ? theme().yellow : theme().green}> - {props.busy ? 'busy' : props.state.activity}</text>
+      <text fg={theme().blue}>Mebius</text>
+      <text fg={theme().text}> Code</text>
+      <text fg={theme().muted}>  ›  </text>
+      <text fg={theme().text} truncate style={{ width: 26, flexShrink: 1 }}>
+        {props.state.project.name}
+      </text>
+      <text fg={theme().muted}> / </text>
+      <text fg={theme().muted} truncate style={{ flexGrow: 1, minWidth: 0 }}>
+        {props.state.session.title}
+      </text>
+      <text fg={theme().muted}>  ·  </text>
+      <text fg={props.state.mode === 'remote' ? theme().yellow : theme().green}>{mode}</text>
+      <text fg={theme().muted}>  ·  </text>
+      <text fg={props.busy ? theme().yellow : theme().green}>{statusLabel()}</text>
     </box>
   );
 }
@@ -3882,12 +3892,12 @@ function ModalShell(props: { title: string; onClose: () => void; children: JSX.E
           }}
         >
           <box style={{ width: '100%', height: 1, flexDirection: 'row', flexShrink: 0 }}>
-            <text fg={theme().text}>
-              {props.title}
-            </text>
+            <text fg={theme().blue}>▸ </text>
+            <text fg={theme().text}>{props.title}</text>
             <box style={{ flexGrow: 1 }} />
-            <text fg={theme().muted}>esc</text>
+            <text fg={theme().muted}>Esc close</text>
           </box>
+          <box style={{ width: '100%', height: 1, minHeight: 1, flexShrink: 0, marginTop: 1, marginBottom: 1, backgroundColor: theme().border }} />
           {props.children}
         </box>
       </box>
@@ -4043,8 +4053,8 @@ function PermissionsPanel(props: {
                   <text fg={selected() ? theme().text : theme().text}>{option.label}</text>
                   <Show when={option.danger}>
                     <text fg={theme().red}> dangerous</text>
-      </Show>
-    </box>
+                  </Show>
+                </box>
                 <text fg={selected() ? theme().text : theme().muted} wrapMode="word" style={{ width: '100%', minWidth: 0 }}>
                   {option.description}
                 </text>
@@ -4099,7 +4109,7 @@ function Composer(props: {
       border
       borderStyle="rounded"
       borderColor={theme().border}
-      focusedBorderColor={theme().border}
+      focusedBorderColor={props.accentColor}
       style={{
         width: '100%',
         height: COMPOSER_HEIGHT,
@@ -4117,7 +4127,7 @@ function Composer(props: {
           ref={textareaRef}
           focused={props.focused}
           initialValue={props.value}
-          placeholder={props.placeholder ?? null}
+          placeholder={props.placeholder ?? 'Ask, plan, or run — / for commands'}
           backgroundColor={theme().input}
           focusedBackgroundColor={theme().input}
           textColor={theme().text}
@@ -4309,8 +4319,13 @@ function WelcomeScreen(props: {
         </box>
       </Show>
       <box style={{ height: 1 }} />
+      <box style={{ flexDirection: 'row' }}>
+        <text fg={theme().blue}>Agentic coding</text>
+        <text fg={theme().muted}> in your terminal</text>
+      </box>
+      <box style={{ height: 1 }} />
       <box style={{ width: welcomeWidth(), flexDirection: 'column' }}>
-        <Composer {...props.composer} placeholder={'Ask anything... "Fix a TODO in the codebase"'} />
+        <Composer {...props.composer} placeholder={'Ask, edit, run, or type / for commands'} />
         <Show when={props.slashAutocomplete.visible}>
           <SlashCommandAutocomplete
             suggestions={props.slashAutocomplete.suggestions}
@@ -4321,20 +4336,34 @@ function WelcomeScreen(props: {
       </box>
       <box style={{ height: 1 }} />
       <box style={{ width: welcomeWidth(), flexDirection: 'row', justifyContent: 'flex-end' }}>
-        <text fg={theme().text}>Tab</text>
-        <text fg={theme().muted}> agents  </text>
-        <text fg={theme().text}>Ctrl+P</text>
-        <text fg={theme().muted}> commands  </text>
-        <text fg={theme().text}>/models</text>
+        <KeyHint keyLabel="Tab" label="mode" />
         <text fg={theme().muted}>  </text>
-        <text fg={theme().text}>/skills</text>
+        <KeyHint keyLabel="Ctrl+P" label="commands" />
+        <text fg={theme().muted}>  </text>
+        <KeyHint keyLabel="/models" label="model" />
+        <text fg={theme().muted}>  </text>
+        <KeyHint keyLabel="/skills" label="skills" />
       </box>
       <box style={{ height: 1 }} />
-      <box style={{ flexDirection: 'row' }}>
+      <box style={{ width: welcomeWidth(), flexDirection: 'row', justifyContent: 'center' }}>
         <text fg={theme().yellow}>Tip</text>
-        <text fg={theme().muted}> start with / for commands</text>
+        <text fg={theme().muted}> start with </text>
+        <text fg={theme().text}>/</text>
+        <text fg={theme().muted}> for commands · </text>
+        <text fg={theme().text}>Plan</text>
+        <text fg={theme().muted}> before bigger changes</text>
       </box>
       <box style={{ flexGrow: 1, minHeight: 0 }} />
+    </box>
+  );
+}
+
+function KeyHint(props: { keyLabel: string; label: string }) {
+  const theme = useTheme();
+  return (
+    <box style={{ flexDirection: 'row', flexShrink: 0 }}>
+      <text fg={theme().text}>{props.keyLabel}</text>
+      <text fg={theme().muted}> {props.label}</text>
     </box>
   );
 }
@@ -4443,6 +4472,13 @@ function ChatPanel(props: {
           />
         }
       >
+      <box style={{ width: '100%', height: 1, minHeight: 1, flexDirection: 'row', flexShrink: 0 }}>
+        <text fg={theme().muted}>Transcript</text>
+        <box style={{ flexGrow: 1 }} />
+        <Show when={props.indicator.active}>
+          <text fg={props.composerAccentColor}>{props.indicator.phase}</text>
+        </Show>
+      </box>
       <scrollbox
         stickyScroll
         stickyStart="bottom"
@@ -4637,8 +4673,10 @@ function MessageBlock(props: {
   const theme = useTheme();
   const role = createMemo(() => props.message().role);
   const isUserMessage = createMemo(() => role() === 'user');
+  const isToolMessage = createMemo(() => role() === 'tool');
   const accentColor = createMemo(() => (isUserMessage() ? theme().blue : roleColor(role(), theme())));
-  const streamingLabel = createMemo(() => (props.message().streaming ? ' - streaming' : ''));
+  const cardBackground = createMemo(() => (isUserMessage() || isToolMessage() ? theme().input : theme().background));
+  const streamingLabel = createMemo(() => (props.message().streaming ? ' · streaming' : ''));
   return (
     <box
       style={{
@@ -4650,15 +4688,19 @@ function MessageBlock(props: {
         flexDirection: 'row',
         alignItems: 'stretch',
         marginBottom: 1,
-        backgroundColor: isUserMessage() ? theme().input : theme().background,
+        backgroundColor: cardBackground(),
       }}
     >
       <box style={{ width: 1, flexShrink: 0, alignSelf: 'stretch', backgroundColor: accentColor() }} />
       <box style={{ width: '100%', flexGrow: 1, minWidth: 0, paddingX: 1, flexDirection: 'column' }}>
-        <text fg={accentColor()} style={{ width: '100%', minWidth: 0, flexShrink: 0 }}>
-          {role()}
-          {streamingLabel()}
-        </text>
+        <box style={{ width: '100%', height: 1, minHeight: 1, flexDirection: 'row', flexShrink: 0 }}>
+          <text fg={accentColor()}>{roleDisplayName(role())}</text>
+          <text fg={theme().muted}>{streamingLabel()}</text>
+          <box style={{ flexGrow: 1 }} />
+          <Show when={isToolMessage()}>
+            <text fg={theme().muted}>tool output</text>
+          </Show>
+        </box>
         <Show when={isUserMessage() && props.message().metadata?.activeSkills}>
           <text fg={theme().muted} style={{ width: '100%', minWidth: 0, flexShrink: 0 }}>
             Skills: {(props.message().metadata?.activeSkills as string[]).join(', ')}
@@ -4855,12 +4897,19 @@ function ApprovalView(props: { approval: Approval }) {
   const preview = props.approval.preview;
   return (
     <scrollbox style={{ flexGrow: 1 }}>
-      <text fg={theme().yellow}>Pending {props.approval.toolCall.name}</text>
-      <text fg={theme().muted}>Use the bottom approval bar to allow or reject.</text>
-      <text fg={theme().muted}>You can also type /approve or /reject.</text>
+      <box style={{ flexDirection: 'column', marginBottom: 1 }}>
+        <text fg={theme().yellow}>Permission Required</text>
+        <text fg={theme().muted}>Pending {props.approval.toolCall.name}</text>
+        <text fg={theme().muted}>Review the request, then use the bottom approval bar.</text>
+      </box>
       <Show when={preview}>
         {(value) => <Preview preview={value()} />}
       </Show>
+      <box style={{ flexDirection: 'column', marginTop: 1 }}>
+        <text fg={theme().muted}>Shortcuts</text>
+        <text fg={theme().text}>/approve</text>
+        <text fg={theme().text}>/reject</text>
+      </box>
     </scrollbox>
   );
 }
@@ -4869,10 +4918,16 @@ function Preview(props: { preview: ApprovalPreview }) {
   const theme = useTheme();
   if (props.preview.kind === 'command') {
     return (
-      <box style={{ flexDirection: 'column' }}>
-        <text fg={theme().softRed}>Command requires approval</text>
-        <text fg={theme().text}>{props.preview.command}</text>
-        <text fg={theme().muted}>cwd: {props.preview.cwd ?? 'workspace root'}</text>
+      <box style={{ flexDirection: 'column', marginTop: 1 }}>
+        <text fg={theme().softRed}>Command</text>
+        <box style={{ flexDirection: 'row', minWidth: 0 }}>
+          <text fg={theme().muted} style={{ width: 5, flexShrink: 0 }}>run</text>
+          <text fg={theme().text} wrapMode="word" style={{ flexGrow: 1, minWidth: 0 }}>{props.preview.command}</text>
+        </box>
+        <box style={{ flexDirection: 'row', minWidth: 0 }}>
+          <text fg={theme().muted} style={{ width: 5, flexShrink: 0 }}>cwd</text>
+          <text fg={theme().text} wrapMode="word" style={{ flexGrow: 1, minWidth: 0 }}>{props.preview.cwd ?? 'workspace root'}</text>
+        </box>
         <Show when={highRiskCommand(props.preview.command)}>
           <text fg={theme().red}>High risk command: review carefully before approving.</text>
         </Show>
@@ -4941,7 +4996,7 @@ function StatusPanel(props: { state: WorkspaceState; mode: ComposerMode; busy: b
         />
       </StatusSection>
 
-      <StatusSection title="Logs">
+      <StatusSection title="Activity">
         <Show when={recentEvents().length > 0} fallback={<text fg={theme().muted}>-</text>}>
           <For each={recentEvents()}>
             {(event) => (
@@ -4962,8 +5017,11 @@ function StatusPanel(props: { state: WorkspaceState; mode: ComposerMode; busy: b
 function StatusSection(props: { title: string; children: JSX.Element }) {
   const theme = useTheme();
   return (
-    <box style={{ flexDirection: 'column', marginBottom: 1 }}>
-      <text fg={theme().muted}>{props.title}</text>
+    <box style={{ flexDirection: 'column', marginBottom: 1, paddingBottom: 1 }}>
+      <box style={{ flexDirection: 'row', height: 1, minHeight: 1 }}>
+        <text fg={theme().blue}>▸ </text>
+        <text fg={theme().muted}>{props.title}</text>
+      </box>
       {props.children}
     </box>
   );
@@ -4973,7 +5031,7 @@ function StatusRow(props: { label: string; value: string; valueColor?: string })
   const theme = useTheme();
   return (
     <box style={{ flexDirection: 'row', minWidth: 0 }}>
-      <text fg={theme().muted} style={{ width: 9, flexShrink: 0 }}>
+      <text fg={theme().muted} style={{ width: 8, flexShrink: 0 }}>
         {props.label}
       </text>
       <text fg={props.valueColor ?? theme().text} wrapMode="word" style={{ flexGrow: 1, minWidth: 0 }}>
@@ -5422,6 +5480,14 @@ function permissionModeIndex(mode: PermissionMode | undefined): number {
     PERMISSION_MODE_OPTIONS.findIndex((option) => option.mode === mode),
     0,
   );
+}
+
+function roleDisplayName(role: Message['role']): string {
+  if (role === 'user') return 'You';
+  if (role === 'assistant') return 'Mebius';
+  if (role === 'tool') return 'Tool';
+  if (role === 'system') return 'System';
+  return role;
 }
 
 function roleColor(role: Message['role'], theme: TuiTheme): string {
