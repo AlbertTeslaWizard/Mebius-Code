@@ -1,5 +1,15 @@
 package com.mebiuscode.mobile.ui
 
+import android.annotation.SuppressLint
+import android.graphics.Color as AndroidColor
+import android.os.Handler
+import android.os.Looper
+import android.view.View
+import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
@@ -20,10 +30,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
@@ -35,6 +49,13 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import java.io.ByteArrayInputStream
+import java.util.Locale
+import kotlin.math.roundToInt
+
+private const val KATEX_ASSET_BASE_URL = "file:///android_asset/katex/"
+private const val MATH_HEIGHT_BRIDGE_NAME = "AndroidMath"
 
 @Composable
 fun MessageMarkdown(
@@ -54,7 +75,7 @@ fun MessageMarkdown(
                 is MarkdownBlock.Heading -> MarkdownHeading(block, textColor)
                 MarkdownBlock.HorizontalRule -> MarkdownHorizontalRule()
                 is MarkdownBlock.ListItems -> MarkdownListItems(block, textColor)
-                is MarkdownBlock.MathDisplay -> MarkdownMathBlock(block.latex)
+                is MarkdownBlock.MathDisplay -> MarkdownMathBlock(block.latex, textColor)
                 is MarkdownBlock.Paragraph -> InlineMarkdownText(
                     block.text,
                     color = textColor,
@@ -115,22 +136,203 @@ private fun MarkdownHorizontalRule() {
 }
 
 @Composable
-private fun MarkdownMathBlock(latex: String) {
-    Surface(
-        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.48f),
-        shape = RoundedCornerShape(8.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Text(
-            latex.ifBlank { " " },
-            color = MaterialTheme.colorScheme.onSecondaryContainer,
-            modifier = Modifier
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 10.dp, vertical = 9.dp),
-            fontFamily = FontFamily.Monospace,
-            style = MaterialTheme.typography.bodySmall,
-        )
+@SuppressLint("SetJavaScriptEnabled")
+private fun MarkdownMathBlock(latex: String, textColor: Color) {
+    val density = LocalDensity.current
+    val cssColor = remember(textColor) { textColor.toCssRgba() }
+    val html = remember(latex, cssColor) { katexDocument(latex, cssColor) }
+    var height by remember(latex) { mutableStateOf(54.dp) }
+
+    AndroidView(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(height),
+        factory = { context ->
+            WebView(context).apply {
+                setBackgroundColor(AndroidColor.TRANSPARENT)
+                isHorizontalScrollBarEnabled = false
+                isVerticalScrollBarEnabled = false
+                overScrollMode = View.OVER_SCROLL_NEVER
+                settings.allowContentAccess = false
+                settings.allowFileAccess = true
+                settings.allowFileAccessFromFileURLs = false
+                settings.allowUniversalAccessFromFileURLs = false
+                settings.blockNetworkLoads = true
+                settings.domStorageEnabled = false
+                settings.javaScriptEnabled = true
+                settings.loadsImagesAutomatically = false
+                settings.mediaPlaybackRequiresUserGesture = true
+                settings.useWideViewPort = true
+                webViewClient = LocalKatexWebViewClient()
+                addJavascriptInterface(
+                    MathHeightBridge { heightPx ->
+                        height = (with(density) { heightPx.toDp() } + 6.dp).coerceAtLeast(54.dp)
+                    },
+                    MATH_HEIGHT_BRIDGE_NAME,
+                )
+            }
+        },
+        update = { webView ->
+            if (webView.tag != html) {
+                webView.tag = html
+                webView.loadDataWithBaseURL(KATEX_ASSET_BASE_URL, html, "text/html", "UTF-8", null)
+            }
+        },
+    )
+}
+
+private class MathHeightBridge(private val onHeightChanged: (Int) -> Unit) {
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    @JavascriptInterface
+    fun onHeightChanged(heightPx: Int) {
+        if (heightPx <= 0) return
+        mainHandler.post { onHeightChanged(heightPx) }
     }
+}
+
+private class LocalKatexWebViewClient : WebViewClient() {
+    override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = true
+
+    override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+        val uri = request.url
+        val path = uri.path.orEmpty()
+        return if (uri.scheme == "file" && path.startsWith("/android_asset/katex/")) {
+            null
+        } else {
+            emptyWebResponse()
+        }
+    }
+}
+
+private fun emptyWebResponse(): WebResourceResponse =
+    WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
+
+private fun katexDocument(latex: String, cssColor: String): String {
+    val latexLiteral = latex.toJavaScriptString()
+    return """
+        <!doctype html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+          <link rel="stylesheet" href="katex.min.css">
+          <style>
+            html,
+            body {
+              background: transparent;
+              color: $cssColor;
+              margin: 0;
+              overflow: hidden;
+              padding: 0;
+            }
+
+            #math {
+              box-sizing: border-box;
+              color: $cssColor;
+              min-width: 100%;
+              overflow-x: auto;
+              overflow-y: hidden;
+              padding: 6px 0;
+            }
+
+            .katex {
+              color: inherit;
+              font-size: 1.08em;
+            }
+
+            .katex-display {
+              margin: 0;
+              overflow-x: auto;
+              overflow-y: hidden;
+              text-align: center;
+            }
+
+            .math-error {
+              font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+              font-size: 14px;
+              line-height: 1.45;
+              white-space: pre-wrap;
+            }
+          </style>
+        </head>
+        <body>
+          <div id="math"></div>
+          <script src="katex.min.js"></script>
+          <script>
+            (function () {
+              var latex = $latexLiteral;
+              var root = document.getElementById("math");
+
+              function reportHeight() {
+                var height = Math.ceil(Math.max(
+                  document.documentElement.scrollHeight,
+                  document.body.scrollHeight,
+                  root.scrollHeight
+                ));
+                if (window.$MATH_HEIGHT_BRIDGE_NAME && window.$MATH_HEIGHT_BRIDGE_NAME.onHeightChanged) {
+                  window.$MATH_HEIGHT_BRIDGE_NAME.onHeightChanged(height);
+                }
+              }
+
+              try {
+                katex.render(latex, root, {
+                  displayMode: true,
+                  output: "htmlAndMathml",
+                  strict: "ignore",
+                  throwOnError: false
+                });
+              } catch (error) {
+                root.className = "math-error";
+                root.textContent = latex;
+              }
+
+              requestAnimationFrame(function () {
+                reportHeight();
+                setTimeout(reportHeight, 50);
+                setTimeout(reportHeight, 200);
+              });
+            }());
+          </script>
+        </body>
+        </html>
+    """.trimIndent()
+}
+
+private fun Color.toCssRgba(): String {
+    val redValue = (red * 255).roundToInt().coerceIn(0, 255)
+    val greenValue = (green * 255).roundToInt().coerceIn(0, 255)
+    val blueValue = (blue * 255).roundToInt().coerceIn(0, 255)
+    val alphaValue = alpha.coerceIn(0f, 1f)
+    return String.format(Locale.US, "rgba(%d, %d, %d, %.3f)", redValue, greenValue, blueValue, alphaValue)
+}
+
+private fun String.toJavaScriptString(): String = buildString {
+    append('"')
+    for (char in this@toJavaScriptString) {
+        when (char) {
+            '\\' -> append("\\\\")
+            '"' -> append("\\\"")
+            '\b' -> append("\\b")
+            '\u000C' -> append("\\f")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            '<' -> append("\\u003C")
+            '>' -> append("\\u003E")
+            '&' -> append("\\u0026")
+            '\u2028' -> append("\\u2028")
+            '\u2029' -> append("\\u2029")
+            else -> {
+                if (char.code < 0x20) {
+                    append(String.format(Locale.US, "\\u%04x", char.code))
+                } else {
+                    append(char)
+                }
+            }
+        }
+    }
+    append('"')
 }
 
 @Composable
