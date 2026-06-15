@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import DOMPurify from 'dompurify';
 import type { HighlighterCore } from '@shikijs/core';
 import { Check, Clipboard, Code2, FileWarning, Loader2 } from 'lucide-vue-next';
+import { useAuthStore } from '../stores/auth';
 
 const highlightedLanguages = new Set([
   'css',
@@ -45,6 +46,7 @@ const props = withDefaults(
   },
 );
 
+const auth = useAuthStore();
 const highlightedHtml = ref('');
 const highlightedLanguage = ref('text');
 const highlighting = ref(false);
@@ -57,9 +59,10 @@ const lineCount = computed(() => props.content.split(/\r\n|\r|\n/).length);
 const languageLabel = computed(() => languageDisplayName(highlightedLanguage.value));
 const formattedSize = computed(() => formatBytes(props.size, props.bytesLabel));
 const canCopy = computed(() => Boolean(props.content) && !props.loading);
+const shikiTheme = computed(() => (auth.themeMode === 'dark' ? 'dark-plus' : 'light-plus'));
 
 watch(
-  () => [props.path, props.content, props.loading] as const,
+  () => [props.path, props.content, props.loading, shikiTheme.value] as const,
   () => {
     void renderHighlighted();
   },
@@ -86,7 +89,7 @@ async function renderHighlighted() {
     const highlighter = await getHighlighter();
     const html = highlighter.codeToHtml(props.content || ' ', {
       lang: language,
-      theme: 'light-plus',
+      theme: shikiTheme.value,
     });
     if (runId !== highlightRun) return;
     highlightedLanguage.value = language;
@@ -94,7 +97,7 @@ async function renderHighlighted() {
   } catch {
     if (runId !== highlightRun) return;
     highlightedLanguage.value = 'text';
-    highlightedHtml.value = renderPlainText(props.content);
+    highlightedHtml.value = renderPlainText(props.content, shikiTheme.value);
   } finally {
     if (runId === highlightRun) {
       highlighting.value = false;
@@ -107,6 +110,7 @@ function getHighlighter() {
     import('@shikijs/core'),
     import('@shikijs/engine-javascript'),
     import('@shikijs/themes/light-plus'),
+    import('@shikijs/themes/dark-plus'),
     import('@shikijs/langs/css'),
     import('@shikijs/langs/dockerfile'),
     import('@shikijs/langs/html'),
@@ -128,6 +132,7 @@ function getHighlighter() {
       { createHighlighterCore },
       { createJavaScriptRegexEngine },
       lightPlus,
+      darkPlus,
       css,
       dockerfile,
       html,
@@ -146,7 +151,7 @@ function getHighlighter() {
       yaml,
     ]) =>
       createHighlighterCore({
-        themes: [lightPlus.default],
+        themes: [lightPlus.default, darkPlus.default],
         langs: [
           css.default,
           dockerfile.default,
@@ -277,13 +282,13 @@ function formatBytes(size: number, bytesLabel: string) {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function renderPlainText(content: string) {
+function renderPlainText(content: string, theme: string) {
   const lines = (content || ' ').split(/\r\n|\r|\n/);
   const renderedLines = lines
     .map((line) => `<span class="line">${escapeHtml(line) || ' '}</span>`)
     .join('\n');
 
-  return `<pre class="shiki light-plus code-preview__fallback" tabindex="0"><code>${renderedLines}</code></pre>`;
+  return `<pre class="shiki ${theme} code-preview__fallback" tabindex="0"><code>${renderedLines}</code></pre>`;
 }
 
 function escapeHtml(value: string) {
@@ -420,6 +425,7 @@ function escapeHtml(value: string) {
 .code-preview__scroller :deep(.shiki) {
   background: var(--workspace-card-bg, #ffffff) !important;
   border: 0;
+  color: var(--workspace-message-text, #111827);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 12px;
   line-height: 1.65;
