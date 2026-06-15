@@ -14,6 +14,7 @@
   "dependencies": {
     "@opentui/core": "0.3.4",
     "@opentui/solid": "0.3.4",
+    "@unified-latex/unified-latex-util-parse": "1.8.4",
     "solid-js": "1.9.12"
   },
   "devDependencies": {

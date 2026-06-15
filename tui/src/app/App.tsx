@@ -55,6 +55,7 @@ import {
 } from '../skills/ui';
 import { ApprovalInlinePanel, type ApprovalChoice } from './ApprovalInlinePanel';
 import { AgentActivityIndicator } from './AgentActivityIndicator';
+import { preprocessMarkdownMath } from './markdownMath';
 import {
   PlanQuestionPanel,
   PlanReadyPanel,
@@ -63,6 +64,11 @@ import {
   type PlanQuestionFocusTarget,
 } from './PlanApprovalPanel';
 import { getTuiTheme, resolveTuiThemeName, tuiThemeList, type TuiTheme } from './theme';
+import {
+  formatToolMessageDetails,
+  parseToolsCommand,
+  toolMessageSummary,
+} from './toolMessages';
 
 const ThemeContext = createContext<Accessor<TuiTheme>>();
 const STREAMING_MARKDOWN_RENDER_MS = 50;
@@ -224,6 +230,8 @@ const commandPaletteCommands: CommandPaletteCommand[] = [
   { label: '/plan-approve', insert: '/plan-approve', description: 'Approve the latest plan' },
   { label: '/approve', insert: '/approve', description: 'Approve the active tool request' },
   { label: '/reject', insert: '/reject', description: 'Reject the active tool request' },
+  { label: '/tools expand', insert: '/tools expand', description: 'Show all tool message details' },
+  { label: '/tools collapse', insert: '/tools collapse', description: 'Hide all tool message details' },
   { label: '/undo', insert: '/undo', description: 'Undo the last conversation turn' },
   { label: '/redo', insert: '/redo', description: 'Redo the last undone conversation turn' },
   { label: '/stream-test', insert: '/stream-test', description: 'Test TUI streaming without a model provider' },
@@ -320,6 +328,7 @@ const slashCommands: SlashCommand[] = [
     kind: 'immediate',
     run: (ctx) => ctx.runCommand('/reject'),
   },
+  { id: 'tools', name: '/tools', description: 'Expand or collapse tool message details', kind: 'input' },
   {
     id: 'undo',
     name: '/undo',
@@ -479,6 +488,7 @@ export function App(props: AppProps) {
   const [mcpPalette, setMcpPalette] = createSignal<McpPaletteState | null>(null);
   const [activeSkillIds, setActiveSkillIds] = createSignal<string[]>([]);
   const [recentModelKeys, setRecentModelKeys] = createSignal<string[]>(initialRecentModelKeys(props.initialState.modelChoices));
+  const [expandedToolMessageIds, setExpandedToolMessageIds] = createSignal<Set<string>>(new Set());
   const renderer = useRenderer();
   const skillDetailCache = new SkillDetailCache();
   let eventStreamAbort: AbortController | null = null;
@@ -579,6 +589,14 @@ export function App(props: AppProps) {
   const activeSkillItems = createMemo(() => {
     const ids = new Set(activeSkillIds());
     return skillsIndex().skills.filter((skill) => ids.has(skill.id));
+  });
+
+  createEffect(() => {
+    const toolMessageIds = new Set(state().messages.filter((message) => message.role === 'tool').map((message) => message.id));
+    setExpandedToolMessageIds((current) => {
+      const next = new Set([...current].filter((id) => toolMessageIds.has(id)));
+      return next.size === current.size ? current : next;
+    });
   });
 
   createEffect(() => {
@@ -1119,6 +1137,47 @@ export function App(props: AppProps) {
     setInput('');
     setComposerCursorOffset(0);
     void command.run?.(slashCommandContext());
+  }
+
+  function toggleToolMessageDetails(messageId: string) {
+    setExpandedToolMessageIds((current) => {
+      const next = new Set(current);
+      if (next.has(messageId)) {
+        next.delete(messageId);
+      } else {
+        next.add(messageId);
+      }
+      return next;
+    });
+  }
+
+  function expandAllToolMessageDetails() {
+    const ids = state()
+      .messages.filter((message) => message.role === 'tool')
+      .map((message) => message.id);
+    setExpandedToolMessageIds(new Set(ids));
+    setState((prev) => ({ ...prev, activity: ids.length > 0 ? `Tool details expanded (${ids.length})` : 'No tool messages to expand', error: '' }));
+  }
+
+  function collapseAllToolMessageDetails() {
+    setExpandedToolMessageIds(new Set<string>());
+    setState((prev) => ({ ...prev, activity: 'Tool details collapsed', error: '' }));
+  }
+
+  function handleToolsCommand(value: string): boolean {
+    const action = parseToolsCommand(value);
+    if (action === 'expand') {
+      expandAllToolMessageDetails();
+      return true;
+    }
+    if (action === 'collapse') {
+      collapseAllToolMessageDetails();
+      return true;
+    }
+    if (value === '/tools' || value.startsWith('/tools ')) {
+      throw new Error('Usage: /tools expand or /tools collapse');
+    }
+    return false;
   }
 
   function handleApprovalKeyDown(event: KeyEvent): boolean {
@@ -2372,6 +2431,9 @@ export function App(props: AppProps) {
   }
 
   async function handleCommand(value: string) {
+    if (handleToolsCommand(value)) {
+      return;
+    }
     if (value === '/approve') {
       await approvePendingToolRequest('once');
       return;
@@ -2877,9 +2939,11 @@ export function App(props: AppProps) {
         <box style={{ flexDirection: 'row', flexGrow: 1, minHeight: 0 }}>
           <ChatPanel
             messages={state().messages}
+            expandedToolMessageIds={expandedToolMessageIds()}
             error={state().error}
             indicator={agentIndicator()}
             composerAccentColor={composerAccentColor()}
+            onToggleToolMessageDetails={toggleToolMessageDetails}
             slashAutocomplete={{
               visible: slashAutocompleteVisible(),
               suggestions: filteredSlashSuggestions(),
@@ -4277,9 +4341,11 @@ function WelcomeScreen(props: {
 
 function ChatPanel(props: {
   messages: Message[];
+  expandedToolMessageIds: Set<string>;
   error: string;
   indicator: AgentIndicatorState;
   composerAccentColor: string;
+  onToggleToolMessageDetails: (messageId: string) => void;
   slashAutocomplete: {
     visible: boolean;
     suggestions: SlashCommand[];
@@ -4387,7 +4453,13 @@ function ChatPanel(props: {
           <text fg={theme().red}>{props.error}</text>
         </Show>
         <Index each={visibleMessages()}>
-          {(message) => <MessageBlock message={message} />}
+          {(message) => (
+            <MessageBlock
+              message={message}
+              expandedToolMessageIds={props.expandedToolMessageIds}
+              onToggleToolMessageDetails={props.onToggleToolMessageDetails}
+            />
+          )}
         </Index>
       </scrollbox>
       <Show when={!panelPending() && props.slashAutocomplete.visible}>
@@ -4557,7 +4629,11 @@ function isVisibleTranscriptMessage(message: Message): boolean {
   return !(message.role === 'assistant' && metadata?.kind === 'assistant_tool_turn' && metadata.hidden === true);
 }
 
-function MessageBlock(props: { message: Accessor<Message> }) {
+function MessageBlock(props: {
+  message: Accessor<Message>;
+  expandedToolMessageIds: Set<string>;
+  onToggleToolMessageDetails: (messageId: string) => void;
+}) {
   const theme = useTheme();
   const role = createMemo(() => props.message().role);
   const isUserMessage = createMemo(() => role() === 'user');
@@ -4588,42 +4664,102 @@ function MessageBlock(props: { message: Accessor<Message> }) {
             Skills: {(props.message().metadata?.activeSkills as string[]).join(', ')}
           </text>
         </Show>
-        <MessageBody message={props.message} />
+        <MessageBody
+          message={props.message}
+          expandedToolMessageIds={props.expandedToolMessageIds}
+          onToggleToolMessageDetails={props.onToggleToolMessageDetails}
+        />
       </box>
     </box>
   );
 }
 
-function MessageBody(props: { message: Accessor<Message> }) {
+function MessageBody(props: {
+  message: Accessor<Message>;
+  expandedToolMessageIds: Set<string>;
+  onToggleToolMessageDetails: (messageId: string) => void;
+}) {
   const theme = useTheme();
   const content = createThrottledMessageContent(props.message);
+  const toolMessage = createMemo(() => props.message().role === 'tool');
   const markdownMessage = createMemo(() => {
     const role = props.message().role;
     return role === 'assistant' || role === 'system';
   });
   const messageMarkdownStyle = createMemo(() => createMessageMarkdownStyle(theme()));
   const markdownTableOptions = createMemo(() => createMarkdownTableOptions(theme()));
+  const renderedContent = createMemo(() => (markdownMessage() ? preprocessMarkdownMath(content()) : content()));
+  const toolExpanded = createMemo(() => props.expandedToolMessageIds.has(props.message().id));
   return (
     <Show
-      when={markdownMessage()}
+      when={toolMessage()}
       fallback={
-        <text fg={theme().text} wrapMode="word" style={{ width: '100%', minWidth: 0, flexShrink: 0 }}>
-          {content()}
-        </text>
+        <Show
+          when={markdownMessage()}
+          fallback={
+            <text fg={theme().text} wrapMode="word" style={{ width: '100%', minWidth: 0, flexShrink: 0 }}>
+              {content()}
+            </text>
+          }
+        >
+          <markdown
+            content={renderedContent()}
+            syntaxStyle={messageMarkdownStyle()}
+            fg={theme().text}
+            conceal={true}
+            concealCode={false}
+            streaming={props.message().streaming ?? false}
+            internalBlockMode="top-level"
+            tableOptions={markdownTableOptions()}
+            style={{ width: '100%', minWidth: 0, flexShrink: 0 }}
+          />
+        </Show>
       }
     >
-      <markdown
-        content={content()}
-        syntaxStyle={messageMarkdownStyle()}
-        fg={theme().text}
-        conceal={true}
-        concealCode={false}
-        streaming={props.message().streaming ?? false}
-        internalBlockMode="top-level"
-        tableOptions={markdownTableOptions()}
-        style={{ width: '100%', minWidth: 0, flexShrink: 0 }}
+      <ToolMessageBody
+        message={props.message}
+        content={content}
+        expanded={toolExpanded}
+        onToggle={props.onToggleToolMessageDetails}
       />
     </Show>
+  );
+}
+
+function ToolMessageBody(props: {
+  message: Accessor<Message>;
+  content: Accessor<string>;
+  expanded: Accessor<boolean>;
+  onToggle: (messageId: string) => void;
+}) {
+  const theme = useTheme();
+  const summary = createMemo(() => toolMessageSummary({ content: props.content(), metadata: props.message().metadata }));
+  const details = createMemo(() => formatToolMessageDetails(props.content()));
+  const hasDetails = createMemo(() => props.content().trim().length > 0);
+  return (
+    <box style={{ width: '100%', minWidth: 0, flexShrink: 0, flexDirection: 'column' }}>
+      <box
+        style={{ width: '100%', minWidth: 0, flexShrink: 0, flexDirection: 'row' }}
+        onMouseDown={() => props.onToggle(props.message().id)}
+      >
+        <text fg={theme().yellow} style={{ width: 4, flexShrink: 0 }}>
+          {props.expanded() ? '[-]' : '[+]'}
+        </text>
+        <text fg={theme().text} wrapMode="word" style={{ flexGrow: 1, minWidth: 0 }}>
+          {summary()}
+        </text>
+      </box>
+      <Show when={!props.expanded() && hasDetails()}>
+        <text fg={theme().muted} style={{ width: '100%', minWidth: 0, flexShrink: 0 }}>
+          details hidden - /tools expand
+        </text>
+      </Show>
+      <Show when={props.expanded() && hasDetails()}>
+        <text fg={theme().muted} wrapMode="word" style={{ width: '100%', minWidth: 0, flexShrink: 0 }}>
+          {details()}
+        </text>
+      </Show>
+    </box>
   );
 }
 

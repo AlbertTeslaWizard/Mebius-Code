@@ -87,6 +87,7 @@ const projectForm = reactive({ name: '', description: '' });
 const importForm = reactive({ gitUrl: '', branch: '' });
 const importMode = ref<ImportMode>('git');
 const projectImportOpen = ref(false);
+const gitPublishOpen = ref(false);
 const archiveFile = ref<File | null>(null);
 const archiveFileInput = ref<HTMLInputElement | null>(null);
 const gitCommitMessage = ref('');
@@ -2048,139 +2049,152 @@ function projectDescription(project: { description?: string; sourceType: string;
           </div>
         </section>
 
-        <section class="left-sidebar-card border-t border-mebius-border p-3">
-          <div class="mb-2 flex items-center justify-between gap-2">
-            <div class="flex items-center gap-2 text-sm font-medium">
+        <section class="left-sidebar-card border-t border-mebius-border">
+          <button
+            type="button"
+            class="left-sidebar-disclosure"
+            :aria-expanded="gitPublishOpen"
+            @click="gitPublishOpen = !gitPublishOpen"
+          >
+            <span class="left-sidebar-disclosure__title">
               <n-icon><GitBranch /></n-icon>
               {{ locale.t('gitPublish') }}
-            </div>
-            <n-button
-              quaternary
-              size="small"
-              :loading="isLoadingGitStatus"
-              :disabled="!workspace.currentProject || isLoadingGitStatus || busy"
-              @click="refreshGitStatus"
-            >
-              <template #icon><n-icon><RefreshCw /></n-icon></template>
-              {{ locale.t('gitRefreshStatus') }}
-            </n-button>
-          </div>
-
-          <p v-if="workspace.gitStatusError" class="m-0 mb-2 text-xs leading-5 text-red-600">
-            {{ workspace.gitStatusError || locale.t('gitStatusFailed') }}
-          </p>
-          <p v-else-if="isLoadingGitStatus" class="m-0 mb-2 text-xs leading-5 text-mebius-muted">
-            {{ locale.t('gitStatusLoading') }}
-          </p>
-          <template v-else-if="gitStatus">
-            <p v-if="!gitStatus.isGitRepo" class="m-0 mb-2 text-xs leading-5 text-mebius-muted">
-              {{ locale.t('gitStatusUnavailable') }}
-            </p>
-            <template v-else>
-              <div class="mb-2 rounded-xl border border-mebius-border/80 bg-slate-50 p-2 text-xs text-mebius-muted">
-                <p class="m-0">{{ locale.t('gitCurrentBranch', { branch: gitStatus.branch ?? 'HEAD' }) }}</p>
-                <p v-if="gitStatus.tracking" class="m-0 mt-1">
-                  {{ locale.t('gitTrackingBranch', { tracking: gitStatus.tracking }) }}
-                </p>
-                <p class="m-0 mt-1">{{ locale.t('gitRemoteCount', { count: gitStatus.remotes.length }) }}</p>
-                <p class="m-0 mt-1">{{ locale.t('gitAheadCount', { count: String(gitStatus.ahead) }) }}</p>
-                <p class="m-0 mt-1">{{ locale.t('gitBehindCount', { count: String(gitStatus.behind) }) }}</p>
-                <p class="m-0 mt-1">
-                  staged {{ gitStatus.counts.staged }} · unstaged {{ gitStatus.counts.unstaged }} · untracked
-                  {{ gitStatus.counts.untracked }}
-                </p>
-              </div>
-
-              <n-input
-                v-model:value="gitCommitMessage"
-                class="mb-2"
+            </span>
+            <n-icon class="left-sidebar-disclosure__chevron">
+              <ChevronDown v-if="gitPublishOpen" />
+              <ChevronRight v-else />
+            </n-icon>
+          </button>
+          <div v-if="gitPublishOpen" class="p-3 pt-0">
+            <div class="mb-2 flex items-center justify-end gap-2">
+              <n-button
+                quaternary
                 size="small"
-                :disabled="isPublishingGit || busy"
-                :placeholder="locale.t('gitCommitPlaceholder')"
-              />
-              <div class="grid grid-cols-2 gap-2">
-                <n-button size="small" :disabled="!canCommitGit" :loading="isPublishingGit && busy" @click="commitGit">
-                  {{ locale.t('gitCommit') }}
-                </n-button>
-                <n-button size="small" secondary :disabled="!canPushGit" :loading="isPublishingGit && busy" @click="pushGit">
-                  {{ locale.t('gitPush') }}
-                </n-button>
-              </div>
+                :loading="isLoadingGitStatus"
+                :disabled="!workspace.currentProject || isLoadingGitStatus || busy"
+                @click="refreshGitStatus"
+              >
+                <template #icon><n-icon><RefreshCw /></n-icon></template>
+                {{ locale.t('gitRefreshStatus') }}
+              </n-button>
+            </div>
 
-              <p class="m-0 mt-2 text-xs leading-5 text-mebius-muted">
-                {{ pushStatusHint }}
+            <p v-if="workspace.gitStatusError" class="m-0 mb-2 text-xs leading-5 text-red-600">
+              {{ workspace.gitStatusError || locale.t('gitStatusFailed') }}
+            </p>
+            <p v-else-if="isLoadingGitStatus" class="m-0 mb-2 text-xs leading-5 text-mebius-muted">
+              {{ locale.t('gitStatusLoading') }}
+            </p>
+            <template v-else-if="gitStatus">
+              <p v-if="!gitStatus.isGitRepo" class="m-0 mb-2 text-xs leading-5 text-mebius-muted">
+                {{ locale.t('gitStatusUnavailable') }}
               </p>
-              <p v-if="gitStatus.hasRemote" class="m-0 mt-1 text-xs leading-5 text-mebius-muted">
-                {{ locale.t('gitRequiresRemote') }}
-              </p>
+              <template v-else>
+                <div class="mb-2 rounded-xl border border-mebius-border/80 bg-slate-50 p-2 text-xs text-mebius-muted">
+                  <p class="m-0">{{ locale.t('gitCurrentBranch', { branch: gitStatus.branch ?? 'HEAD' }) }}</p>
+                  <p v-if="gitStatus.tracking" class="m-0 mt-1">
+                    {{ locale.t('gitTrackingBranch', { tracking: gitStatus.tracking }) }}
+                  </p>
+                  <p class="m-0 mt-1">{{ locale.t('gitRemoteCount', { count: gitStatus.remotes.length }) }}</p>
+                  <p class="m-0 mt-1">{{ locale.t('gitAheadCount', { count: String(gitStatus.ahead) }) }}</p>
+                  <p class="m-0 mt-1">{{ locale.t('gitBehindCount', { count: String(gitStatus.behind) }) }}</p>
+                  <p class="m-0 mt-1">
+                    staged {{ gitStatus.counts.staged }} · unstaged {{ gitStatus.counts.unstaged }} · untracked
+                    {{ gitStatus.counts.untracked }}
+                  </p>
+                </div>
 
-              <div class="mt-3">
-                <div class="mb-1 flex items-center justify-between gap-2">
-                  <div class="text-xs font-medium text-mebius-muted">{{ locale.t('gitChangedFiles') }}</div>
-                  <div class="flex items-center gap-2">
-                    <n-button
-                      size="tiny"
-                      quaternary
-                      :disabled="!canStageAllGit"
-                      @click="stageAllGit"
-                    >
-                      {{ locale.t('gitStageAll') }}
-                    </n-button>
-                    <n-button
-                      size="tiny"
-                      quaternary
-                      :disabled="!canUnstageAllGit"
-                      @click="unstageAllGit"
-                    >
-                      {{ locale.t('gitUnstageAll') }}
-                    </n-button>
-                  </div>
+                <n-input
+                  v-model:value="gitCommitMessage"
+                  class="mb-2"
+                  size="small"
+                  :disabled="isPublishingGit || busy"
+                  :placeholder="locale.t('gitCommitPlaceholder')"
+                />
+                <div class="grid grid-cols-2 gap-2">
+                  <n-button size="small" :disabled="!canCommitGit" :loading="isPublishingGit && busy" @click="commitGit">
+                    {{ locale.t('gitCommit') }}
+                  </n-button>
+                  <n-button size="small" secondary :disabled="!canPushGit" :loading="isPublishingGit && busy" @click="pushGit">
+                    {{ locale.t('gitPush') }}
+                  </n-button>
                 </div>
-                <div
-                  v-if="gitStatus.files.length"
-                  class="max-h-36 space-y-1 overflow-y-auto rounded-xl border border-mebius-border/80 bg-slate-50 p-2"
-                >
-                  <div
-                    v-for="file in gitStatus.files"
-                    :key="file.path"
-                    class="flex items-center justify-between gap-2 text-xs"
-                  >
-                    <div class="min-w-0 flex-1">
-                      <div class="truncate">{{ file.path }}</div>
-                      <div class="text-[11px] text-mebius-muted">{{ gitStateLabel(file.state) }}</div>
-                    </div>
-                    <div class="flex shrink-0 items-center gap-2">
-                      <n-button
-                        v-if="canStageFile(file)"
-                        size="tiny"
-                        quaternary
-                        :disabled="busy || isPublishingGit"
-                        @click="stageGitFile(file.path)"
-                      >
-                        {{ locale.t('gitStage') }}
-                      </n-button>
-                      <n-button
-                        v-if="canUnstageFile(file)"
-                        size="tiny"
-                        quaternary
-                        :disabled="busy || isPublishingGit"
-                        @click="unstageGitFile(file.path)"
-                      >
-                        {{ locale.t('gitUnstage') }}
-                      </n-button>
-                    </div>
-                  </div>
-                </div>
-                <p v-else class="m-0 text-xs leading-5 text-mebius-muted">
-                  {{ locale.t('gitNoChanges') }}
+
+                <p class="m-0 mt-2 text-xs leading-5 text-mebius-muted">
+                  {{ pushStatusHint }}
                 </p>
-              </div>
-            </template>
-          </template>
+                <p v-if="gitStatus.hasRemote" class="m-0 mt-1 text-xs leading-5 text-mebius-muted">
+                  {{ locale.t('gitRequiresRemote') }}
+                </p>
 
-          <p v-if="gitPublishFeedback" class="m-0 mt-2 text-xs leading-5" :class="gitPublishFeedbackClass">
-            {{ gitPublishFeedback }}
-          </p>
+                <div class="mt-3">
+                  <div class="mb-1 flex items-center justify-between gap-2">
+                    <div class="text-xs font-medium text-mebius-muted">{{ locale.t('gitChangedFiles') }}</div>
+                    <div class="flex items-center gap-2">
+                      <n-button
+                        size="tiny"
+                        quaternary
+                        :disabled="!canStageAllGit"
+                        @click="stageAllGit"
+                      >
+                        {{ locale.t('gitStageAll') }}
+                      </n-button>
+                      <n-button
+                        size="tiny"
+                        quaternary
+                        :disabled="!canUnstageAllGit"
+                        @click="unstageAllGit"
+                      >
+                        {{ locale.t('gitUnstageAll') }}
+                      </n-button>
+                    </div>
+                  </div>
+                  <div
+                    v-if="gitStatus.files.length"
+                    class="max-h-36 space-y-1 overflow-y-auto rounded-xl border border-mebius-border/80 bg-slate-50 p-2"
+                  >
+                    <div
+                      v-for="file in gitStatus.files"
+                      :key="file.path"
+                      class="flex items-center justify-between gap-2 text-xs"
+                    >
+                      <div class="min-w-0 flex-1">
+                        <div class="truncate">{{ file.path }}</div>
+                        <div class="text-[11px] text-mebius-muted">{{ gitStateLabel(file.state) }}</div>
+                      </div>
+                      <div class="flex shrink-0 items-center gap-2">
+                        <n-button
+                          v-if="canStageFile(file)"
+                          size="tiny"
+                          quaternary
+                          :disabled="busy || isPublishingGit"
+                          @click="stageGitFile(file.path)"
+                        >
+                          {{ locale.t('gitStage') }}
+                        </n-button>
+                        <n-button
+                          v-if="canUnstageFile(file)"
+                          size="tiny"
+                          quaternary
+                          :disabled="busy || isPublishingGit"
+                          @click="unstageGitFile(file.path)"
+                        >
+                          {{ locale.t('gitUnstage') }}
+                        </n-button>
+                      </div>
+                    </div>
+                  </div>
+                  <p v-else class="m-0 text-xs leading-5 text-mebius-muted">
+                    {{ locale.t('gitNoChanges') }}
+                  </p>
+                </div>
+              </template>
+            </template>
+
+            <p v-if="gitPublishFeedback" class="m-0 mt-2 text-xs leading-5" :class="gitPublishFeedbackClass">
+              {{ gitPublishFeedback }}
+            </p>
+          </div>
         </section>
         </div>
 

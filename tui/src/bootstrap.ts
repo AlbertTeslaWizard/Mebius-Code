@@ -245,12 +245,12 @@ export function attachEventStream(input: {
 
     flushPendingToken();
     input.setState((state) => reduceEvent(state, event));
-    if (shouldReloadTurnState(event.type)) {
+    if (shouldReloadMessagesAfterEvent(event.type)) {
       const current = input.state();
-      void Promise.all([
-        api.listMessages(sessionId).catch(() => current.messages),
-        refreshReviewData(current),
-      ]).then(([messages, updates]) => {
+      const updatesPromise = shouldReloadTurnState(event.type)
+        ? refreshReviewData(current)
+        : Promise.resolve({});
+      void Promise.all([api.listMessages(sessionId).catch(() => current.messages), updatesPromise]).then(([messages, updates]) => {
         if (input.abortSignal.aborted) return;
         input.setState((state) => ({ ...state, ...updates, messages }));
       });
@@ -314,6 +314,10 @@ function shouldRefreshReviewData(eventType: string): boolean {
 
 function shouldReloadTurnState(eventType: string): boolean {
   return eventType === 'turn_undone' || eventType === 'turn_redone';
+}
+
+export function shouldReloadMessagesAfterEvent(eventType: string): boolean {
+  return eventType === 'done' || shouldReloadTurnState(eventType);
 }
 
 function reduceEvent(state: WorkspaceState, event: SseEvent): WorkspaceState {

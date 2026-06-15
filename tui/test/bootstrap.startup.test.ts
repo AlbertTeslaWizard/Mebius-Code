@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { resolveStartupSession } from '../src/bootstrap';
+import { resolveStartupSession, shouldReloadMessagesAfterEvent } from '../src/bootstrap';
 import type { Message, ModelConfig, Project, Session } from '../src/types';
 
 type StartupApi = Parameters<typeof resolveStartupSession>[0]['api'];
@@ -109,6 +109,16 @@ describe('startup session selection', () => {
         input: { title: 'TUI session for Demo', modelConfigId: 'model-1' },
       },
     ]);
+  });
+});
+
+describe('event transcript reloads', () => {
+  it('reloads persisted messages after turn completion and turn history changes', () => {
+    expect(shouldReloadMessagesAfterEvent('done')).toBe(true);
+    expect(shouldReloadMessagesAfterEvent('turn_undone')).toBe(true);
+    expect(shouldReloadMessagesAfterEvent('turn_redone')).toBe(true);
+    expect(shouldReloadMessagesAfterEvent('tool_call_result')).toBe(false);
+    expect(shouldReloadMessagesAfterEvent('message_created')).toBe(false);
   });
 });
 
