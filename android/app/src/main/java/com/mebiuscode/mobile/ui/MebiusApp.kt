@@ -2,6 +2,7 @@ package com.mebiuscode.mobile.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -69,6 +70,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
@@ -77,6 +79,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.res.painterResource
+import com.mebiuscode.mobile.R
 import com.mebiuscode.mobile.data.Approval
 import com.mebiuscode.mobile.data.CommandRunView
 import com.mebiuscode.mobile.data.FilePatch
@@ -111,9 +115,9 @@ fun MebiusApp(viewModel: MebiusViewModel) {
         topBar = {
             MebiusTopBar(
                 state = state,
-                onBack = viewModel::backToDashboard,
+                onBack = viewModel::navigateBack,
                 onRefresh = viewModel::refreshOverview,
-                onLogout = viewModel::logout,
+                onSettings = viewModel::openSettings,
             )
         },
         containerColor = MaterialTheme.colorScheme.background,
@@ -126,6 +130,7 @@ fun MebiusApp(viewModel: MebiusViewModel) {
             when (val route = state.route) {
                 Route.Login -> LoginScreen(state, viewModel)
                 Route.Dashboard -> DashboardScreen(state, viewModel)
+                Route.Settings -> SettingsScreen(state, viewModel)
                 is Route.ProjectSessions -> ProjectSessionsScreen(state, viewModel, route.projectId)
                 is Route.Session -> SessionScreen(state, viewModel)
             }
@@ -138,22 +143,14 @@ private fun LogoBadge(size: Int = 36) {
     Box(
         modifier = Modifier
             .size(size.dp)
-            .clip(RoundedCornerShape((size / 3).dp))
-            .background(
-                Brush.linearGradient(
-                    listOf(
-                        MaterialTheme.colorScheme.primary,
-                        MaterialTheme.colorScheme.secondary,
-                    ),
-                ),
-            ),
+            .clip(CircleShape),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(
-            Icons.Rounded.AutoAwesome,
+        Image(
+            painter = painterResource(R.drawable.mebius_loop_badge),
             contentDescription = null,
-            tint = Color.White,
-            modifier = Modifier.size((size * 0.55f).dp),
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize(),
         )
     }
 }
@@ -164,7 +161,7 @@ private fun MebiusTopBar(
     state: UiState,
     onBack: () -> Unit,
     onRefresh: () -> Unit,
-    onLogout: () -> Unit,
+    onSettings: () -> Unit,
 ) {
     TopAppBar(
         title = {
@@ -179,6 +176,7 @@ private fun MebiusTopBar(
                         when (state.route) {
                             Route.Login -> "Android companion"
                             Route.Dashboard -> "Tasks and approvals"
+                            Route.Settings -> "Settings"
                             is Route.ProjectSessions -> state.selectedProject?.name ?: "Project"
                             is Route.Session -> state.streamStatus
                         },
@@ -199,11 +197,13 @@ private fun MebiusTopBar(
         },
         actions = {
             if (state.route !is Route.Login) {
-                IconButton(onClick = onRefresh) {
-                    Icon(Icons.Rounded.Refresh, contentDescription = "Refresh")
+                if (state.route !is Route.Settings) {
+                    IconButton(onClick = onRefresh) {
+                        Icon(Icons.Rounded.Refresh, contentDescription = "Refresh")
+                    }
                 }
-                IconButton(onClick = onLogout) {
-                    Icon(Icons.Rounded.Settings, contentDescription = "Logout")
+                IconButton(onClick = onSettings, enabled = state.route !is Route.Settings) {
+                    Icon(Icons.Rounded.Settings, contentDescription = "Settings")
                 }
             }
         },
@@ -315,6 +315,98 @@ private fun LoginScreen(state: UiState, viewModel: MebiusViewModel) {
         }
     }
 }
+
+@Composable
+private fun SettingsScreen(state: UiState, viewModel: MebiusViewModel) {
+    var showSignOutDialog by remember { mutableStateOf(false) }
+    val currentApi = state.loginApi
+    val currentUser = (state.overview as? LoadState.Ready)?.value?.user?.name
+        ?: state.userName.ifBlank { "Signed in" }
+    val canSave = state.settingsApi.trim().isNotBlank() &&
+        !state.settingsSaving &&
+        state.settingsApi.trim() != currentApi.trim()
+
+    if (showSignOutDialog) {
+        SignOutDialog(
+            onDismiss = { showSignOutDialog = false },
+            onConfirm = {
+                showSignOutDialog = false
+                viewModel.logout()
+            },
+        )
+    }
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        item { Spacer(Modifier.height(8.dp)) }
+        item {
+            Panel {
+                Text("Connection", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    currentUser,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(14.dp))
+                OutlinedTextField(
+                    value = state.settingsApi,
+                    onValueChange = viewModel::setSettingsApi,
+                    label = { Text("API base URL") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Saving verifies this API with your current session before changing the app connection.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.height(16.dp))
+                Button(
+                    onClick = viewModel::saveSettingsApi,
+                    enabled = canSave,
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp),
+                ) {
+                    Text(if (state.settingsSaving) "Saving..." else "Save API", fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+        item {
+            Panel {
+                Text("Account", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Signing out clears the saved token on this device.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.height(14.dp))
+                OutlinedButton(
+                    onClick = { showSignOutDialog = true },
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp),
+                ) {
+                    Text("Sign out", fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+        item { Spacer(Modifier.height(8.dp)) }
+    }
+}
+
 @Composable
 private fun DashboardScreen(state: UiState, viewModel: MebiusViewModel) {
     when (val overview = state.overview) {
@@ -1109,6 +1201,30 @@ private fun DeleteSessionDialog(
         confirmButton = {
             TextButton(onClick = onConfirm) {
                 Text("Delete")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+    )
+}
+
+@Composable
+private fun SignOutDialog(
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Sign out?") },
+        text = {
+            Text("Sign out on this device? You will need to enter your account password to sign in again.")
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text("Sign out")
             }
         },
         dismissButton = {

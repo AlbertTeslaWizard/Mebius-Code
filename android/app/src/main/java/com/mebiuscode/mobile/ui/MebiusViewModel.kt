@@ -31,6 +31,10 @@ data class UiState(
     val loginApi: String = "http://10.0.2.2:3000/api",
     val loginEmail: String = "",
     val loginPassword: String = "",
+    val settingsApi: String = "",
+    val settingsSaving: Boolean = false,
+    val settingsReturnRoute: Route = Route.Dashboard,
+    val userName: String = "",
     val overview: LoadState<MobileOverview> = LoadState.Idle,
     val sessionDetails: LoadState<SessionDetails> = LoadState.Idle,
     val selectedProject: Project? = null,
@@ -45,6 +49,7 @@ data class UiState(
 sealed interface Route {
     data object Login : Route
     data object Dashboard : Route
+    data object Settings : Route
     data class ProjectSessions(val projectId: String) : Route
     data class Session(val sessionId: String) : Route
 }
@@ -69,6 +74,8 @@ class MebiusViewModel(
             _state.update {
                 it.copy(
                     loginApi = stored.apiBaseUrl,
+                    settingsApi = stored.apiBaseUrl,
+                    userName = stored.userName,
                     route = Route.Dashboard,
                     overview = LoadState.Loading,
                 )
@@ -80,6 +87,7 @@ class MebiusViewModel(
     fun setLoginApi(value: String) = _state.update { it.copy(loginApi = value) }
     fun setLoginEmail(value: String) = _state.update { it.copy(loginEmail = value) }
     fun setLoginPassword(value: String) = _state.update { it.copy(loginPassword = value) }
+    fun setSettingsApi(value: String) = _state.update { it.copy(settingsApi = value) }
     fun setComposerText(value: String) = _state.update { it.copy(composerText = value) }
     fun setComposerMode(mode: ComposerMode) = _state.update { it.copy(composerMode = mode) }
     fun clearError() = _state.update { it.copy(error = null) }
@@ -92,9 +100,13 @@ class MebiusViewModel(
                 repository.login(snapshot.loginApi, snapshot.loginEmail, snapshot.loginPassword)
             }.onSuccess { overview ->
                 _state.update {
+                    val currentApi = repository.currentSession?.apiBaseUrl ?: snapshot.loginApi
                     it.copy(
                         route = Route.Dashboard,
                         overview = LoadState.Ready(overview),
+                        loginApi = currentApi,
+                        settingsApi = currentApi,
+                        userName = repository.currentSession?.userName.orEmpty(),
                         loginPassword = "",
                         error = null,
                     )
@@ -109,6 +121,76 @@ class MebiusViewModel(
         streamJob?.cancel()
         repository.logout()
         _state.value = UiState()
+    }
+
+    fun openSettings() {
+        streamJob?.cancel()
+        val snapshot = _state.value
+        val returnRoute = when (snapshot.route) {
+            Route.Login, Route.Settings -> Route.Dashboard
+            else -> snapshot.route
+        }
+        _state.update {
+            it.copy(
+                route = Route.Settings,
+                settingsApi = repository.currentSession?.apiBaseUrl ?: it.loginApi,
+                settingsReturnRoute = returnRoute,
+                settingsSaving = false,
+                error = null,
+            )
+        }
+    }
+
+    fun closeSettings() {
+        val returnRoute = _state.value.settingsReturnRoute
+        when (returnRoute) {
+            is Route.Session -> openSession(returnRoute.sessionId)
+            is Route.ProjectSessions -> {
+                _state.update { it.copy(route = returnRoute, error = null) }
+                refreshOverview()
+            }
+            Route.Dashboard, Route.Login, Route.Settings -> {
+                _state.update { it.copy(route = Route.Dashboard, error = null) }
+                refreshOverview()
+            }
+        }
+    }
+
+    fun saveSettingsApi() {
+        val snapshot = _state.value
+        _state.update { it.copy(settingsSaving = true, error = null) }
+        viewModelScope.launch {
+            runCatching {
+                repository.updateApiBaseUrl(snapshot.settingsApi)
+            }.onSuccess { overview ->
+                val currentApi = repository.currentSession?.apiBaseUrl ?: snapshot.settingsApi
+                _state.update {
+                    it.copy(
+                        loginApi = currentApi,
+                        settingsApi = currentApi,
+                        settingsSaving = false,
+                        overview = LoadState.Ready(overview),
+                        userName = repository.currentSession?.userName.orEmpty(),
+                        error = null,
+                    )
+                }
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(
+                        settingsSaving = false,
+                        error = error.userMessage(),
+                    )
+                }
+            }
+        }
+    }
+
+    fun navigateBack() {
+        when (_state.value.route) {
+            Route.Login, Route.Dashboard -> Unit
+            Route.Settings -> closeSettings()
+            is Route.ProjectSessions, is Route.Session -> backToDashboard()
+        }
     }
 
     fun refreshOverview() {

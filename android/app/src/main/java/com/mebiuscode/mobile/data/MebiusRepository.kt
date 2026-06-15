@@ -32,6 +32,18 @@ class MebiusRepository(
         client.overview(bearer(session.accessToken))
     }
 
+    suspend fun updateApiBaseUrl(apiBaseUrl: String): MobileOverview = withContext(Dispatchers.IO) {
+        val session = storedSession ?: error("Not logged in")
+        val normalized = normalizeApiBaseUrl(apiBaseUrl)
+        val client = createMebiusApi(normalized)
+        val overview = client.overview(bearer(session.accessToken))
+        val updatedSession = session.copy(apiBaseUrl = normalized)
+        store.save(updatedSession)
+        storedSession = updatedSession
+        api = client
+        overview
+    }
+
     fun logout() {
         store.clear()
         storedSession = null
