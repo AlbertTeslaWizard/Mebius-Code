@@ -2,7 +2,7 @@
 
 Language: **English** | [简体中文](README.zh-CN.md)
 
-Mebius Code is a multi-client agentic coding platform for the Object-Oriented Technology and Methods course project. It provides a backend service for model configuration, project workspaces, coding sessions, Plan Mode, tool approvals, and server-side code operations.
+Mebius Code is a multi-client agentic coding platform. It provides a backend service for model configuration, project workspaces, coding sessions, Plan Mode, tool approvals, and server-side code operations.
 
 The visible product name is **Mebius Code**. Engineering identifiers use lowercase names such as `mebius-code`, `mebius_code`, and `MEBIUS_CODE_`.
 
@@ -13,8 +13,7 @@ backend/                 NestJS backend service
 frontend/                Vue 3 + TypeScript web workspace
 tui/                     Bun + OpenTUI terminal workspace
 android/                 Native Kotlin + Jetpack Compose Android companion app
-docs/                    Markdown source documents for final DOCX deliverables
-面向对象技术与方法结课设计.docx  Original course requirement document
+docs/                    Project requirements, design, and management documents
 ```
 
 ## Backend Quick Start
@@ -63,7 +62,7 @@ instructions. In the TUI, run `/init` to generate a starter file.
 ## TUI Quick Start
 
 The TUI connects to an already running backend API. It does not start the
-backend in the MVP. Release builds default to the public course API:
+backend in the MVP. Release builds default to the public API:
 
 ```text
 http://182.92.150.169/api
@@ -113,5 +112,5 @@ gradle :app:assembleDebug
 
 Debug builds default to `http://10.0.2.2:3000/api`; release APKs default to
 `http://182.92.150.169/api`. The API address can still be changed from the
-login and settings screens. Course demo APKs are published from GitHub
-Releases and can be installed directly without app store submission.
+login and settings screens. APKs are published from GitHub Releases and can be
+installed directly without app store submission.

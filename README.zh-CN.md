@@ -2,7 +2,7 @@
 
 语言：[English](README.md) | **简体中文**
 
-Mebius Code 是面向《面向对象技术与方法》课程项目的多客户端 Agent 编码平台。它提供后端服务，用于模型配置、项目工作区、编码会话、Plan Mode、工具审批和服务端代码操作。
+Mebius Code 是一个多客户端 Agent 编码平台。它提供后端服务，用于模型配置、项目工作区、编码会话、Plan Mode、工具审批和服务端代码操作。
 
 产品展示名称为 **Mebius Code**。工程标识使用小写名称，例如 `mebius-code`、`mebius_code` 和 `MEBIUS_CODE_`。
 
@@ -13,8 +13,7 @@ backend/                 NestJS 后端服务
 frontend/                Vue 3 + TypeScript Web 工作台
 tui/                     Bun + OpenTUI 终端工作台
 android/                 Kotlin + Jetpack Compose Android 伴随客户端
-docs/                    最终 DOCX 交付物的 Markdown 源文档
-面向对象技术与方法结课设计.docx  原始课程要求文档
+docs/                    项目需求、设计和管理文档
 ```
 
 ## 后端快速开始
@@ -57,7 +56,7 @@ Mebius Code 会读取项目根目录的 `AGENTS.md` 作为仓库级 Agent 指令
 
 ## TUI 快速开始
 
-TUI 连接已经运行的后端 API。MVP 阶段它不会自动启动后端。发布版默认连接课程公网 API：
+TUI 连接已经运行的后端 API。MVP 阶段它不会自动启动后端。发布版默认连接公网 API：
 
 ```text
 http://182.92.150.169/api
@@ -101,4 +100,4 @@ Android 应用是连接已有 Mebius API 实例的轻量伴随客户端。它支
 gradle :app:assembleDebug
 ```
 
-Debug 构建默认连接 `http://10.0.2.2:3000/api`；release APK 默认连接 `http://182.92.150.169/api`。API 地址仍可在登录页和设置页修改。课程演示 APK 通过 GitHub Releases 发布，可以不经过应用市场上架直接安装。
+Debug 构建默认连接 `http://10.0.2.2:3000/api`；release APK 默认连接 `http://182.92.150.169/api`。API 地址仍可在登录页和设置页修改。APK 通过 GitHub Releases 发布，可以不经过应用市场上架直接安装。
