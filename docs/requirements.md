@@ -265,11 +265,14 @@ Mebius Code
 ### 6.10 TUI 客户端
 
 - TUI 客户端位于 `tui/` 包，采用 Bun runtime、TypeScript、OpenTUI、Solid，CLI bin 命令为 `mebius`。
+- TUI 客户端应通过 npm 包 `mebius-code` 分发，安装后暴露全局命令 `mebius`；npm postinstall 应从 GitHub Releases 下载当前平台原生二进制并校验 SHA256，避免普通用户手动安装 Bun。
+- TUI 客户端应同时提供 Unix `curl | bash` 和 Windows PowerShell 安装方式，覆盖 Linux x64、macOS x64/arm64 和 Windows x64。
 - `mebius` 默认以当前目录作为目标工作区，`mebius /path/to/project` 支持显式指定目录。
 - MVP 阶段 TUI 不自动启动 NestJS 后端，而是连接已运行的 API；API 不可达时，TUI 和 `mebius doctor` 应给出清晰错误提示。
 - TUI 启动时应调用 `GET /api/system/capabilities`，判断后端版本、serverMode、local workspace 能力、workspace modes 和功能开关。
 - 当 API 地址为 localhost、127.0.0.1 或 ::1，且后端声明 local workspace 可用时，TUI 可以请求创建或获取当前目录对应的 local 项目。
 - 当 `mebius --api <url>` 指向非本机地址时，TUI 默认进入 remote API mode，只能打开远程后端已有项目，不得提交本机路径。
+- TUI 发布版默认 API 地址应指向公网演示服务 `http://182.92.150.169/api`，但用户仍可通过 `--api`、`login --api` 或 `config set api` 切换到私有后端。
 - `mebius --api <url>` 只作为本次启动临时覆盖；持久保存 API 地址通过 `mebius login --api <url>` 或 `mebius config set api <url>` 完成。
 - TUI 应支持 `login`、`logout`、`doctor` 和 API 配置命令，本地保存 apiBaseUrl、JWT、最近项目、最近会话和用户偏好。
 - TUI 主界面采用左侧项目/文件/Git、中间聊天/输入、右侧状态/审批/预览的多面板工作台，并按终端宽度自适应。
@@ -298,7 +301,8 @@ Mebius Code
 
 - Android 客户端位于 `android/`，采用 Kotlin、Jetpack Compose、Material 3、Retrofit、OkHttp SSE、kotlinx.serialization 和 EncryptedSharedPreferences。
 - Android 客户端应连接已有 Mebius API，不负责启动后端，不注册本机 local workspace，不实现手机端 IDE、文件编辑、Git 发布、MCP/Skills 管理或模型 Provider 设置。
-- 用户可以在 Android 客户端登录，安全保存 API 地址、JWT 和用户名称；默认模拟器 API 地址为 `http://10.0.2.2:3000/api`，真机需使用可访问的 LAN 或 HTTPS 地址。
+- 用户可以在 Android 客户端登录，安全保存 API 地址、JWT 和用户名称；debug 构建默认模拟器 API 地址为 `http://10.0.2.2:3000/api`，release 构建默认公网 API 地址为 `http://182.92.150.169/api`，用户仍可在登录页或设置页修改。
+- Android 客户端在课程演示阶段可不依赖应用市场上架，先通过 GitHub Releases 发布签名 APK，供用户下载后侧载安装；后续如进入正式公开分发，再补充应用市场上架流程。
 - Android 客户端应提供设置页，允许用户查看当前连接、修改 API base URL、保存前用当前 session 验证新地址，并支持确认后登出清理本地会话。
 - Android 客户端应提供移动概览页，展示当前用户、系统能力、项目列表、最近会话、Agent 活动、最新计划状态和待审批数量。
 - Android 客户端应能打开项目会话列表，创建新会话、重命名会话、删除会话，并打开会话详情继续查看消息。
@@ -314,7 +318,9 @@ Mebius Code
 - 可靠性：模型调用失败、流式输出失败、命令失败和补丁冲突都应以可理解错误返回。
 - 可维护性：后端按模块划分，前端按视图、组件、状态管理和 API 类型组织。
 - 可测试性：关键服务应有单元测试覆盖，包括注册验证码、用户偏好归一化、移动端概览聚合、模型流式解析、Plan Mode 生命周期与幂等创建、计划讨论与修订、旧计划状态归一化、Agent 工具循环与待审批阻塞、未知工具名校验、审批后恢复和工具消息还原、回合撤销/重做、活动技能注入、项目指令注入、Web 检索、MCP 工具暴露、模型诊断事件发布、命令策略、会话命令授权、命令运行环境提示、路径沙箱、local workspace 创建/删除保护、项目 Git 操作和审计查询；TUI 应覆盖启动、登录提示、API 不可达、SSE 解析、历史会话切换、Plan 问答/审查/讨论/修订、审批动作、文件树忽略规则、技能发现与选择、MCP 浏览、Slash 命令解析、Markdown 数学公式转换和工具消息摘要；Android 应通过 Kotlin 类型、Compose 构建和移动端手动验收覆盖登录、设置页、概览、会话、SSE、Plan、审批、Markdown 和本地 KaTeX 数学公式渲染主路径。
-- 可部署性：本地和服务器环境均可通过 Docker Compose 启动 PostgreSQL 和后端 API。
+- 可部署性：本地环境应可通过 Docker Compose 启动 PostgreSQL 和后端 API；服务器演示环境应支持公网 IP 访问、Nginx 静态前端托管和 `/api` 反向代理，并允许后端以 systemd 服务连接本机 PostgreSQL 容器运行。
+- 可分发性：仓库应通过 tag 触发 GitHub Actions 自动生成 TUI 原生二进制、TUI 安装脚本、Android release APK、SHA256 校验文件、GitHub Release 和 npm 包，保证 Web、TUI、Android 三端都能从公网入口或发布产物访问。
+- 运维可验证性：服务器部署完成后应能通过 `GET /api/health` 验证后端健康状态，通过浏览器访问 Web 首页，并通过管理员账号登录验证认证链路、数据库连接和前后端代理配置。
 - 性能约束：文件树单层读取数量、文本文件大小、命令输出长度、命令运行时长、归档上传大小和解压大小均应设限；真实本地仓库文件树不得递归扫描 `.git`、`node_modules`、数据集和模型产物等大型目录。
 
 ## 8. 客户端与服务端职责

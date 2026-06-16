@@ -2,6 +2,45 @@
 
 Terminal client for Mebius Code.
 
+Release builds default to the public course API:
+
+```text
+http://182.92.150.169/api
+```
+
+## Install
+
+With npm:
+
+```bash
+npm install -g mebius-code
+```
+
+macOS, Linux, or WSL:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AlbertTeslaWizard/Mebius-Code/main/scripts/install-tui.sh | bash
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/AlbertTeslaWizard/Mebius-Code/main/scripts/install-tui.ps1 | iex
+```
+
+Then sign in:
+
+```bash
+mebius login
+mebius doctor
+mebius
+```
+
+Use `--api` for a one-off API override or `mebius config set api <url>` to
+persist a different API URL.
+
+## Development
+
 ```bash
 bun install
 bun run start
@@ -15,6 +54,7 @@ MVP behavior:
 - `mebius --api <url>` is a temporary override for the current run.
 - `mebius login --api <url>` and `mebius config set api <url>` persist the API URL.
 - Local workspace binding only happens for localhost API URLs and only when `/api/system/capabilities` says the backend supports it.
+- Remote public API mode cannot register a path from the user's machine; create or import a project in the Web app first.
 
 ## Composer
 

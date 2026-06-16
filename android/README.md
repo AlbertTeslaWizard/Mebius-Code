@@ -22,10 +22,18 @@ Open `android/` in Android Studio or run from this directory with a local Androi
 gradle :app:assembleDebug
 ```
 
-Default emulator API URL:
+Debug builds default to the Android emulator API URL:
 
 ```text
 http://10.0.2.2:3000/api
 ```
 
-For a physical device, use a reachable LAN or HTTPS URL for the backend API.
+Release APKs default to the public course API:
+
+```text
+http://182.92.150.169/api
+```
+
+Users can still change the API address before signing in or later from Settings.
+Course demo releases are distributed as signed APKs through GitHub Releases; app
+store submission is not required for the course demo path.

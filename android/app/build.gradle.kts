@@ -9,6 +9,9 @@ android {
     namespace = "com.mebiuscode.mobile"
     compileSdk = 35
 
+    val debugApiBaseUrl = "http://10.0.2.2:3000/api"
+    val releaseApiBaseUrl = "http://182.92.150.169/api"
+
     defaultConfig {
         applicationId = "com.mebiuscode.mobile"
         minSdk = 26
@@ -17,10 +20,37 @@ android {
         versionName = "0.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "DEFAULT_API_BASE_URL", "\"$debugApiBaseUrl\"")
     }
 
     buildFeatures {
         compose = true
+        buildConfig = true
+    }
+
+    signingConfigs {
+        create("release") {
+            val keystoreFile = System.getenv("ANDROID_KEYSTORE_FILE")
+            if (!keystoreFile.isNullOrBlank()) {
+                storeFile = file(keystoreFile)
+                storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            buildConfigField("String", "DEFAULT_API_BASE_URL", "\"$debugApiBaseUrl\"")
+        }
+        release {
+            buildConfigField("String", "DEFAULT_API_BASE_URL", "\"$releaseApiBaseUrl\"")
+            isMinifyEnabled = false
+            if (!System.getenv("ANDROID_KEYSTORE_FILE").isNullOrBlank()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
     }
 
     compileOptions {

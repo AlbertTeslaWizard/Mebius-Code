@@ -3,7 +3,15 @@ import { dirname, join } from 'path';
 import { homedir } from 'os';
 import type { TuiConfig } from './types';
 
-export const DEFAULT_API_BASE_URL = 'http://localhost:3000/api';
+export const TUI_VERSION = '0.1.1';
+export const DEFAULT_API_BASE_URL =
+  normalizeDefaultApiBaseUrl(process.env.MEBIUS_API_BASE_URL) ?? 'http://182.92.150.169/api';
+
+function normalizeDefaultApiBaseUrl(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  return trimmed.replace(/\/+$/, '');
+}
 
 export function configPath(): string {
   if (process.platform === 'win32') {

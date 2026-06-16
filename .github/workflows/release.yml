@@ -1,0 +1,170 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  tui-native:
+    name: TUI native (${{ matrix.asset }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: mebius-linux-x64
+            archive: mebius-linux-x64.tar.gz
+            expected_arch: x86_64
+          - os: macos-13
+            asset: mebius-darwin-x64
+            archive: mebius-darwin-x64.tar.gz
+            expected_arch: x86_64
+          - os: macos-14
+            asset: mebius-darwin-arm64
+            archive: mebius-darwin-arm64.tar.gz
+            expected_arch: arm64
+          - os: windows-latest
+            asset: mebius-windows-x64
+            archive: mebius-windows-x64.zip
+            expected_arch: AMD64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: tui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tui/package-lock.json
+      - name: Check runner architecture
+        shell: bash
+        run: |
+          actual="$(uname -m)"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then actual="$PROCESSOR_ARCHITECTURE"; fi
+          test "$actual" = "${{ matrix.expected_arch }}"
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: bun test
+      - name: Build native binary
+        shell: bash
+        run: |
+          mkdir -p dist/native
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            bun ./scripts/build-native.ts --outfile dist/native/mebius.exe
+          else
+            bun ./scripts/build-native.ts --outfile dist/native/mebius
+          fi
+      - name: Package Unix binary
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist/release
+          tar -C dist/native -czf "dist/release/${{ matrix.archive }}" mebius
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/release | Out-Null
+          Compress-Archive -LiteralPath dist/native/mebius.exe -DestinationPath "dist/release/${{ matrix.archive }}" -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: tui/dist/release/${{ matrix.archive }}
+
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Decode release keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            test -n "${!name}" || {
+              echo "$name secret is required for release APK signing." >&2
+              exit 1
+            }
+          done
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/app/release-keystore.jks
+      - name: Build release APK
+        env:
+          ANDROID_KEYSTORE_FILE: ${{ github.workspace }}/android/app/release-keystore.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          chmod +x android/gradlew
+          android/gradlew -p android :app:assembleRelease
+      - name: Stage APK
+        run: |
+          mkdir -p release
+          apk="$(find android/app/build/outputs/apk/release -name '*.apk' | head -n 1)"
+          test -n "$apk"
+          cp "$apk" "release/Mebius-Code-android-${GITHUB_REF_NAME}.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: release/Mebius-Code-android-${{ github.ref_name }}.apk
+
+  publish-release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - tui-native
+      - android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+      - name: Collect artifacts
+        run: |
+          mkdir -p release
+          find release-artifacts -maxdepth 3 -type f -exec cp {} release/ \;
+          cp scripts/install-tui.sh release/install.sh
+          cp scripts/install-tui.ps1 release/install.ps1
+          (cd release && sha256sum * > SHA256SUMS)
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+
+  npm:
+    name: Publish npm package
+    runs-on: ubuntu-latest
+    needs:
+      - publish-release
+    defaults:
+      run:
+        working-directory: tui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+          cache-dependency-path: tui/package-lock.json
+      - run: npm ci --ignore-scripts
+      - name: Check npm token
+        run: test -n "$NODE_AUTH_TOKEN"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -305,7 +305,7 @@ private fun LoginScreen(state: UiState, viewModel: MebiusViewModel) {
         }
         item {
             Text(
-                "Emulator default: http://10.0.2.2:3000/api. Physical devices need a LAN or HTTPS address.",
+                "Default API: ${state.loginApi}. You can change it before signing in or later in Settings.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

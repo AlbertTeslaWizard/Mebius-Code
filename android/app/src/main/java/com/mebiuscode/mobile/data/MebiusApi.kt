@@ -1,5 +1,6 @@
 package com.mebiuscode.mobile.data
 
+import com.mebiuscode.mobile.BuildConfig
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.ResponseBody
@@ -187,7 +188,7 @@ fun createMebiusApi(apiBaseUrl: String): MebiusApi {
 fun bearer(token: String): String = "Bearer $token"
 
 fun normalizeApiBaseUrl(value: String): String {
-    val trimmed = value.trim().ifBlank { "http://10.0.2.2:3000/api" }
+    val trimmed = value.trim().ifBlank { BuildConfig.DEFAULT_API_BASE_URL }
     return if (trimmed.endsWith("/")) trimmed else "$trimmed/"
 }
 

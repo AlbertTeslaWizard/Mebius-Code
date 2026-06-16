@@ -61,7 +61,29 @@ instructions. In the TUI, run `/init` to generate a starter file.
 ## TUI Quick Start
 
 The TUI connects to an already running backend API. It does not start the
-backend in the MVP.
+backend in the MVP. Release builds default to the public course API:
+
+```text
+http://182.92.150.169/api
+```
+
+Install the released TUI with one of these methods:
+
+```bash
+npm install -g mebius-code
+```
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AlbertTeslaWizard/Mebius-Code/main/scripts/install-tui.sh | bash
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/AlbertTeslaWizard/Mebius-Code/main/scripts/install-tui.ps1 | iex
+```
+
+For local development:
 
 ```bash
 cd tui
@@ -69,8 +91,9 @@ bun install
 bun run start
 ```
 
-The installed CLI command is `mebius`. Use `mebius login --api http://localhost:3000/api`
-to persist credentials and API configuration.
+The installed CLI command is `mebius`. Use `mebius login`, or
+`mebius login --api http://localhost:3000/api` for a local backend, to persist
+credentials and API configuration.
 See [tui/README.md](tui/README.md) for TUI commands and shortcuts.
 
 ## Android Quick Start
@@ -86,5 +109,7 @@ Android Gradle setup:
 gradle :app:assembleDebug
 ```
 
-The default emulator API URL is `http://10.0.2.2:3000/api`. Physical devices
-need a LAN or HTTPS API address that can reach the backend.
+Debug builds default to `http://10.0.2.2:3000/api`; release APKs default to
+`http://182.92.150.169/api`. The API address can still be changed from the
+login and settings screens. Course demo APKs are published from GitHub
+Releases and can be installed directly without app store submission.

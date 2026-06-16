@@ -3,6 +3,7 @@ package com.mebiuscode.mobile.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.mebiuscode.mobile.BuildConfig
 import com.mebiuscode.mobile.data.Approval
 import com.mebiuscode.mobile.data.LoadState
 import com.mebiuscode.mobile.data.MebiusRepository
@@ -28,7 +29,7 @@ import kotlinx.coroutines.launch
 
 data class UiState(
     val route: Route = Route.Login,
-    val loginApi: String = "http://10.0.2.2:3000/api",
+    val loginApi: String = BuildConfig.DEFAULT_API_BASE_URL,
     val loginEmail: String = "",
     val loginPassword: String = "",
     val settingsApi: String = "",

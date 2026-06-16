@@ -6,18 +6,23 @@ import { stdin as input, stdout as output } from 'process';
 import { ApiClient } from './api/client';
 import { bootstrapWorkspace } from './bootstrap';
 import { App } from './app/App';
-import { clearToken, DEFAULT_API_BASE_URL, loadConfig, saveConfig } from './config';
+import { clearToken, DEFAULT_API_BASE_URL, loadConfig, saveConfig, TUI_VERSION } from './config';
 import { bunAvailable, isGitRepository, isLocalApiBase, isWritableDirectory, normalizeTargetPath } from './runtime';
 
 interface ParsedArgs {
   command?: string;
   targetPath?: string;
   api?: string;
+  version?: boolean;
   rest: string[];
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.version) {
+    console.log(TUI_VERSION);
+    return;
+  }
 
   if (args.command === 'login') {
     await login(args.api);
@@ -160,6 +165,9 @@ function parseArgs(args: string[]): ParsedArgs {
       index += 1;
       continue;
     }
+    if (arg === '--version' || arg === '-v') {
+      return { command, targetPath, api, version: true, rest };
+    }
     if (!command && ['login', 'logout', 'doctor', 'config'].includes(arg)) {
       command = arg;
       continue;
@@ -175,7 +183,7 @@ function parseArgs(args: string[]): ParsedArgs {
     rest.push(arg);
   }
 
-  return { command, targetPath, api, rest };
+  return { command, targetPath, api, version: false, rest };
 }
 
 void main();
