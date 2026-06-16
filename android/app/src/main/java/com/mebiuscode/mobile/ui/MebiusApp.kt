@@ -317,7 +317,7 @@ private fun LoginScreen(state: UiState, viewModel: MebiusViewModel) {
 private fun SettingsScreen(state: UiState, viewModel: MebiusViewModel) {
     var showSignOutDialog by remember { mutableStateOf(false) }
     val currentApi = state.loginApi
-    val currentUser = (state.overview as? LoadState.Ready)?.value?.user?.name
+    val currentUser = (state.overview as? LoadState.Ready)?.value?.user?.nickname
         ?: state.userName.ifBlank { "Signed in" }
     val canSave = state.settingsApi.trim().isNotBlank() &&
         !state.settingsSaving &&

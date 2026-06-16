@@ -14,7 +14,7 @@ export class UsersService {
 
   async create(input: {
     email: string;
-    name: string;
+    nickname: string;
     passwordHash: string;
     role?: UserRole;
   }): Promise<User> {
@@ -27,7 +27,7 @@ export class UsersService {
     return this.users.save(
       this.users.create({
         email,
-        name: input.name,
+        nickname: input.nickname,
         passwordHash: input.passwordHash,
         role: input.role ?? UserRole.User,
       }),
@@ -36,6 +36,18 @@ export class UsersService {
 
   async findById(id: string): Promise<User> {
     const user = await this.users.findOne({ where: { id } });
+    if (!user) {
+      throw new NotFoundException('User not found.');
+    }
+    return user;
+  }
+
+  async findByIdWithPassword(id: string): Promise<User> {
+    const user = await this.users
+      .createQueryBuilder('user')
+      .addSelect('user.passwordHash')
+      .where('user.id = :id', { id })
+      .getOne();
     if (!user) {
       throw new NotFoundException('User not found.');
     }
@@ -58,5 +70,9 @@ export class UsersService {
     const user = await this.findById(id);
     user.preferences = mergeUserPreferences(user.preferences, patch);
     return this.users.save(user);
+  }
+
+  async updatePasswordHash(id: string, passwordHash: string): Promise<void> {
+    await this.users.update(id, { passwordHash });
   }
 }

@@ -10,8 +10,8 @@ export class User {
   @Column({ unique: true })
   email: string;
 
-  @Column()
-  name: string;
+  @Column({ name: 'nickname' })
+  nickname: string;
 
   @Column({ name: 'password_hash', select: false })
   passwordHash: string;

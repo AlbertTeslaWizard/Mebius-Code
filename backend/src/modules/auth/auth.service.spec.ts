@@ -1,5 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
+import { hash } from 'bcryptjs';
 import { UserRole } from '../../common/enums/user-role.enum';
 import { User } from '../users/user.entity';
 import { UsersService } from '../users/users.service';
@@ -10,6 +11,8 @@ describe('AuthService', () => {
   const createdAt = new Date('2026-06-01T00:00:00.000Z');
   const users = {
     create: jest.fn(async (input: Partial<User>) => userFixture(input)),
+    findByIdWithPassword: jest.fn(),
+    updatePasswordHash: jest.fn(),
   } as unknown as jest.Mocked<UsersService>;
   const jwt = {
     signAsync: jest.fn(async () => 'jwt-token'),
@@ -30,7 +33,7 @@ describe('AuthService', () => {
   it('verifies the email code before creating an account', async () => {
     const result = await service.register({
       email: 'user@example.com',
-      name: 'Test User',
+      nickname: 'Test User',
       password: 'secret123',
       verificationCode: '123456',
     });
@@ -42,7 +45,7 @@ describe('AuthService', () => {
     expect(users.create).toHaveBeenCalledWith(
       expect.objectContaining({
         email: 'user@example.com',
-        name: 'Test User',
+        nickname: 'Test User',
         role: UserRole.User,
       }),
     );
@@ -52,7 +55,7 @@ describe('AuthService', () => {
   it('keeps admin invite code registration behavior', async () => {
     await service.register({
       email: 'admin@example.com',
-      name: 'Admin User',
+      nickname: 'Admin User',
       password: 'secret123',
       verificationCode: '123456',
       adminInviteCode: 'admin-secret',
@@ -65,11 +68,52 @@ describe('AuthService', () => {
     );
   });
 
+  it('updates password after verifying the current password', async () => {
+    users.findByIdWithPassword.mockResolvedValue(
+      userFixture({ passwordHash: await hash('old-secret', 12) }),
+    );
+
+    await expect(
+      service.updatePassword('user-1', {
+        currentPassword: 'old-secret',
+        newPassword: 'new-secret',
+      }),
+    ).resolves.toEqual({ changed: true });
+
+    expect(users.findByIdWithPassword).toHaveBeenCalledWith('user-1');
+    expect(users.updatePasswordHash).toHaveBeenCalledWith('user-1', expect.any(String));
+  });
+
+  it('rejects password updates when the current password is wrong', async () => {
+    users.findByIdWithPassword.mockResolvedValue(
+      userFixture({ passwordHash: await hash('old-secret', 12) }),
+    );
+
+    await expect(
+      service.updatePassword('user-1', {
+        currentPassword: 'wrong-secret',
+        newPassword: 'new-secret',
+      }),
+    ).rejects.toThrow('Current password is incorrect.');
+    expect(users.updatePasswordHash).not.toHaveBeenCalled();
+  });
+
+  it('rejects password updates that reuse the current password', async () => {
+    await expect(
+      service.updatePassword('user-1', {
+        currentPassword: 'same-secret',
+        newPassword: 'same-secret',
+      }),
+    ).rejects.toThrow('New password must be different');
+    expect(users.findByIdWithPassword).not.toHaveBeenCalled();
+    expect(users.updatePasswordHash).not.toHaveBeenCalled();
+  });
+
   function userFixture(input: Partial<User>): User {
     return {
       id: 'user-1',
       email: input.email ?? 'user@example.com',
-      name: input.name ?? 'Test User',
+      nickname: input.nickname ?? 'Test User',
       passwordHash: input.passwordHash ?? 'hash',
       role: input.role ?? UserRole.User,
       preferences: {},

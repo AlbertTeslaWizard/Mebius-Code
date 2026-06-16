@@ -4,6 +4,7 @@ import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { SendRegisterVerificationCodeDto } from './dto/send-register-verification-code.dto';
+import { UpdatePasswordDto } from './dto/update-password.dto';
 import { UpdateUserPreferencesDto } from './dto/update-user-preferences.dto';
 import { JwtAuthGuard } from './jwt-auth.guard';
 
@@ -36,5 +37,11 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   updatePreferences(@Req() request: RequestWithUser, @Body() dto: UpdateUserPreferencesDto) {
     return this.auth.updatePreferences(request.user.sub, dto);
+  }
+
+  @Patch('me/password')
+  @UseGuards(JwtAuthGuard)
+  updatePassword(@Req() request: RequestWithUser, @Body() dto: UpdatePasswordDto) {
+    return this.auth.updatePassword(request.user.sub, dto);
   }
 }

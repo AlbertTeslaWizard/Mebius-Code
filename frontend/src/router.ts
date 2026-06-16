@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router';
 import { getAccessToken } from './api/http';
+import AccountView from './views/AccountView.vue';
 import AuthView from './views/AuthView.vue';
 import AuditView from './views/AuditView.vue';
 import CommandsView from './views/CommandsView.vue';
@@ -13,6 +14,12 @@ export const router = createRouter({
     { path: '/login', name: 'login', component: AuthView },
     { path: '/register', name: 'register', component: AuthView },
     { path: '/app', name: 'app', component: WorkspaceView, meta: { requiresAuth: true } },
+    {
+      path: '/settings/account',
+      name: 'account',
+      component: AccountView,
+      meta: { requiresAuth: true },
+    },
     {
       path: '/settings/models',
       name: 'models',

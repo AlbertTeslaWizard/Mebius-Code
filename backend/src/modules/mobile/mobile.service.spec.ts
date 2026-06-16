@@ -66,7 +66,7 @@ describe('MobileService', () => {
     auth.currentUser.mockResolvedValue({
       id: 'owner-1',
       email: 'dev@example.com',
-      name: 'Dev',
+      nickname: 'Dev',
       role: 'user',
       preferences: {
         layout: {

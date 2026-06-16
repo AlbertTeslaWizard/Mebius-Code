@@ -65,7 +65,7 @@ External / Runtime Resources
 
 | 模块 | 职责 |
 | --- | --- |
-| `auth` | 注册邮箱验证码发送与校验、注册、登录、JWT 签发、当前用户查询、布局和主题偏好更新 |
+| `auth` | 注册邮箱验证码发送与校验、注册、登录、JWT 签发、当前用户查询、密码修改、布局和主题偏好更新 |
 | `users` | 用户实体、邮箱唯一性、密码哈希、角色、布局偏好和主题偏好合并 |
 | `system` | 对外声明后端版本、serverMode、workspace modes、source types 和功能开关 |
 | `mobile` | Android 概览聚合，返回当前用户、系统能力、项目、最近会话、待审批项和轻量审批预览 |
@@ -200,7 +200,7 @@ Android 会话详情默认按“消息流 + 计划卡 + 审批卡 + 结果摘要
 
 | 实体 | 关键字段 | 关系 |
 | --- | --- | --- |
-| `User` | email、name、passwordHash、role、preferences | 拥有模型配置、项目、会话、MCP Server 配置和审计记录；preferences 包含布局宽度、左右侧栏和会话栏折叠状态、明暗主题和自定义技能目录 |
+| `User` | email、nickname、passwordHash、role、preferences | 拥有模型配置、项目、会话、MCP Server 配置和审计记录；preferences 包含布局宽度、左右侧栏和会话栏折叠状态、明暗主题和自定义技能目录 |
 | `EmailVerificationCode` | email、purpose、codeHash、expiresAt、consumedAt、attempts | 保存注册验证码哈希、过期时间、消费状态和尝试次数 |
 | `ModelConfig` | displayName、baseUrl、modelName、providerId、encryptedApiKey、supportsTools、isDefault | 属于一个用户，可作为会话活动模型 |
 | `Project` | name、description、sourceType、workspaceMode、workspacePath、deletePolicy、gitUrl | 属于一个用户，包含多个会话；manual/git/archive 为 managed workspace，local 为 attached workspace |
@@ -241,7 +241,7 @@ local 项目的唯一性以 ownerId + 标准化 realpath 为准。Windows 下需
 | 分组 | 主要接口 |
 | --- | --- |
 | 健康检查与系统能力 | `GET /health`、`GET /system/capabilities` |
-| 认证 | `POST /auth/register/verification-code`、`POST /auth/register`、`POST /auth/login`、`GET /auth/me`、`PATCH /auth/me/preferences` |
+| 认证 | `POST /auth/register/verification-code`、`POST /auth/register`、`POST /auth/login`、`GET /auth/me`、`PATCH /auth/me/password`、`PATCH /auth/me/preferences` |
 | 移动端 | `GET /mobile/overview` |
 | 模型配置 | `GET/POST /model-configs`、`PATCH/DELETE /model-configs/:id`、`POST /model-configs/:id/test` |
 | 项目 | `GET/POST /projects`、`POST /projects/local`、`DELETE /projects/:id`、`POST /projects/:id/import/git`、`POST /projects/:id/import/archive` |
@@ -272,7 +272,7 @@ local 项目的唯一性以 ownerId + 标准化 realpath 为准。Windows 下需
 
 1. 前端先调用 `POST /auth/register/verification-code` 请求注册邮箱验证码。
 2. `EmailVerificationService` 校验邮箱未注册、发送频率和全局上限，生成 6 位验证码，bcrypt 哈希后保存到 `EmailVerificationCode`，并通过 `MailService` 使用 SMTP 发送邮件。
-3. 前端提交邮箱、姓名、密码、验证码和可选管理员邀请码。
+3. 前端提交邮箱、昵称、密码、验证码和可选管理员邀请码。
 4. `AuthService` 校验并消费验证码，再使用 bcrypt 哈希密码。
 5. `UsersService` 校验邮箱唯一性并创建用户。
 6. 若邀请码匹配 `ADMIN_INVITE_CODE`，用户角色为管理员。

@@ -16,7 +16,7 @@ const isRegister = computed(() => route.name === 'register');
 const error = ref('');
 const form = reactive({
   email: '',
-  name: '',
+  nickname: '',
   password: '',
   verificationCode: '',
   adminInviteCode: '',
@@ -29,7 +29,7 @@ const canSubmit = computed(
   () =>
     !!form.email &&
     !!form.password &&
-    (!isRegister.value || (!!form.name && /^\d{6}$/.test(form.verificationCode))),
+    (!isRegister.value || (!!form.nickname && /^\d{6}$/.test(form.verificationCode))),
 );
 const canSendVerificationCode = computed(
   () => isRegister.value && !!form.email && !codeSending.value && resendAfter.value <= 0,
@@ -57,7 +57,7 @@ async function submit() {
     if (isRegister.value) {
       await auth.register({
         email: form.email,
-        name: form.name,
+        nickname: form.nickname,
         password: form.password,
         verificationCode: form.verificationCode,
         adminInviteCode: form.adminInviteCode || undefined,
@@ -118,8 +118,8 @@ onUnmounted(clearCountdown);
       </n-alert>
 
       <n-form label-placement="top" @submit.prevent="submit">
-        <n-form-item v-if="isRegister" :label="locale.t('name')">
-          <n-input v-model:value="form.name" :placeholder="locale.t('yourName')" autocomplete="name" />
+        <n-form-item v-if="isRegister" :label="locale.t('nickname')">
+          <n-input v-model:value="form.nickname" :placeholder="locale.t('yourNickname')" autocomplete="nickname" />
         </n-form-item>
         <n-form-item :label="locale.t('email')">
           <div class="flex w-full gap-2">

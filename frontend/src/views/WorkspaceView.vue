@@ -235,6 +235,7 @@ const eventFilterOptions = computed<Array<{ label: string; value: EventFilter }>
   { label: locale.t('eventFilterMessages'), value: 'messages' },
 ]);
 const settingsOptions = computed(() => [
+  { label: locale.t('accountSecurity'), key: 'account' },
   { label: locale.t('modelConfigs'), key: 'models' },
   ...(auth.user?.role === 'admin' ? [{ label: locale.t('commandPolicy'), key: 'commands' }] : []),
   { label: locale.t('auditLogs'), key: 'audit' },
@@ -1267,6 +1268,7 @@ function openSettings(key: string) {
     return;
   }
   const routes: Record<string, string> = {
+    account: '/settings/account',
     models: '/settings/models',
     commands: '/settings/commands',
     audit: '/settings/audit',

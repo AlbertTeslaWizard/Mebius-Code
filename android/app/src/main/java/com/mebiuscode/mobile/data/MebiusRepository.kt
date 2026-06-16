@@ -19,7 +19,7 @@ class MebiusRepository(
         val normalized = normalizeApiBaseUrl(apiBaseUrl)
         val client = createMebiusApi(normalized)
         val auth = client.login(LoginRequest(email.trim(), password))
-        val session = StoredSession(normalized, auth.accessToken, auth.user.name)
+        val session = StoredSession(normalized, auth.accessToken, auth.user.nickname)
         store.save(session)
         storedSession = session
         api = client

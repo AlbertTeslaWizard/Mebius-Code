@@ -76,7 +76,7 @@ export async function login(email: string, password: string): Promise<AuthRespon
 
 export async function register(input: {
   email: string;
-  name: string;
+  nickname: string;
   password: string;
   verificationCode: string;
   adminInviteCode?: string;

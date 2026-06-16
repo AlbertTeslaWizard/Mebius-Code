@@ -44,6 +44,8 @@ GET /api/system/capabilities
 POST /api/auth/register
 POST /api/auth/login
 GET  /api/auth/me
+PATCH /api/auth/me/password
+PATCH /api/auth/me/preferences
 
 GET    /api/model-configs
 POST   /api/model-configs

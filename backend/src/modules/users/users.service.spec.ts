@@ -140,7 +140,7 @@ function userFixture(preferences: unknown): User {
   return {
     id: 'user-1',
     email: 'user@example.com',
-    name: 'Test User',
+    nickname: 'Test User',
     passwordHash: 'hash',
     role: UserRole.User,
     preferences: preferences as User['preferences'],

@@ -26,7 +26,7 @@ export type UserPreferencesPatch = {
 export interface User {
   id: string;
   email: string;
-  name: string;
+  nickname: string;
   role: 'user' | 'admin';
   preferences: UserPreferences;
   createdAt: string;
