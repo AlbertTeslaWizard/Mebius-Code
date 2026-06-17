@@ -67,6 +67,13 @@ type EventFilter = 'all' | 'model' | 'tools' | 'commands' | 'messages';
 type ImportMode = 'git' | 'archive';
 type WorkbenchTab = 'files' | 'review' | 'runs' | 'events';
 
+const messageRoleDisplayNames = {
+  user: 'You',
+  assistant: 'Mebius',
+  tool: 'Tool',
+  system: 'System',
+} as const;
+
 const mainWorkspaceMinWidth = 360;
 const sidebarResizeStep = 16;
 const chatFollowThreshold = 96;
@@ -2372,8 +2379,8 @@ function projectDescription(project: { description?: string; sourceType: string;
                   class="chat-message rounded border border-mebius-border bg-white p-3"
                   :class="`chat-message--${message.role}`"
                 >
-                  <div class="mb-2 text-xs font-semibold uppercase tracking-wide text-mebius-muted">
-                    {{ message.role }}
+                  <div class="mb-2 text-xs font-semibold tracking-wide text-mebius-muted">
+                    {{ messageRoleDisplayNames[message.role] }}
                   </div>
                   <MessageContent :role="message.role" :content="message.content" :metadata="message.metadata" />
                 </div>
