@@ -68,7 +68,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.package }}
-          path: tui/dist/native/${{ matrix.executable }}
+          path: tui/dist/native/**
 
   npm:
     name: Publish npm packages
