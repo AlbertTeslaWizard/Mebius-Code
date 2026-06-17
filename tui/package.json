@@ -1,6 +1,6 @@
 {
   "name": "mebius-code",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "private": false,
   "description": "Terminal client for Mebius Code.",
   "license": "UNLICENSED",
@@ -25,10 +25,10 @@
     "test": "bun test"
   },
   "optionalDependencies": {
-    "@albert_tesla/mebius-code-darwin-arm64": "0.1.5",
-    "@albert_tesla/mebius-code-darwin-x64": "0.1.5",
-    "@albert_tesla/mebius-code-linux-x64": "0.1.5",
-    "@albert_tesla/mebius-code-win32-x64": "0.1.5"
+    "@albert_tesla/mebius-code-darwin-arm64": "0.1.6",
+    "@albert_tesla/mebius-code-darwin-x64": "0.1.6",
+    "@albert_tesla/mebius-code-linux-x64": "0.1.6",
+    "@albert_tesla/mebius-code-win32-x64": "0.1.6"
   },
   "publishConfig": {
     "access": "public"
