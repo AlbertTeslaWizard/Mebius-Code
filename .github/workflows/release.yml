@@ -52,6 +52,14 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: bun test
+      - name: Install Linux musl OpenTUI package for Bun compile
+        if: matrix.package == 'mebius-code-linux-x64'
+        shell: bash
+        run: |
+          opentui_version="$(node -p "require('./node_modules/@opentui/core/package.json').version")"
+          package_archive="$(npm pack --silent "@opentui/core-linux-x64-musl@$opentui_version")"
+          mkdir -p node_modules/@opentui/core-linux-x64-musl
+          tar -xzf "$package_archive" -C node_modules/@opentui/core-linux-x64-musl --strip-components=1
       - name: Build native binary
         shell: bash
         run: |
