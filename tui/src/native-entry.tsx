@@ -1,2 +1,6 @@
 import '@opentui/solid/preload';
-import './cli';
+
+process.env.MEBIUS_NATIVE_ENTRY = '1';
+
+const { main } = await import('./cli');
+await main();

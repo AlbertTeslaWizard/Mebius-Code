@@ -3,11 +3,14 @@
 import { render } from '@opentui/solid';
 import { createInterface } from 'readline/promises';
 import { stdin as input, stdout as output } from 'process';
+import { resolve } from 'path';
+import { fileURLToPath } from 'url';
 import { ApiClient } from './api/client';
 import { bootstrapWorkspace } from './bootstrap';
 import { App } from './app/App';
+import { configCommand, configWithApiBaseUrl, describeApiMode, startupFailureHints } from './cli-config';
 import { clearToken, DEFAULT_API_BASE_URL, loadConfig, saveConfig, TUI_VERSION } from './config';
-import { bunAvailable, isGitRepository, isLocalApiBase, isWritableDirectory, normalizeTargetPath } from './runtime';
+import { bunAvailable, isGitRepository, isWritableDirectory, normalizeTargetPath } from './runtime';
 
 interface ParsedArgs {
   command?: string;
@@ -17,8 +20,8 @@ interface ParsedArgs {
   rest: string[];
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
+export async function main(argv = process.argv.slice(2)) {
+  const args = parseArgs(argv);
   if (args.version) {
     console.log(TUI_VERSION);
     return;
@@ -54,7 +57,10 @@ async function main() {
     await render(() => <App initialState={initialState} />);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Mebius TUI failed to start.';
-    console.error(`Mebius could not start: ${message}`);
+    console.error(`Mebius could not start with API ${apiBaseUrl}: ${message}`);
+    for (const hint of startupFailureHints(apiBaseUrl)) {
+      console.error(hint);
+    }
     console.error('Run `mebius doctor` for diagnostics.');
     process.exitCode = 1;
   }
@@ -69,9 +75,9 @@ async function login(apiOverride?: string) {
     const email = await rl.question('Email: ');
     const password = await rl.question('Password: ');
     const auth = await api.login(email.trim(), password);
+    const nextConfig = apiOverride ? configWithApiBaseUrl(config, apiBaseUrl) : { ...config, apiBaseUrl };
     await saveConfig({
-      ...config,
-      apiBaseUrl,
+      ...nextConfig,
       accessToken: auth.accessToken,
     });
     console.log(`Logged in as ${auth.user.email}.`);
@@ -81,26 +87,15 @@ async function login(apiOverride?: string) {
   }
 }
 
-async function configCommand(args: string[]) {
-  const [action, key, value] = args;
-  if (action === 'set' && key === 'api' && value) {
-    const config = await loadConfig();
-    await saveConfig({ ...config, apiBaseUrl: value });
-    console.log(`API saved: ${value}`);
-    return;
-  }
-
-  console.log('Usage: mebius config set api <url>');
-  process.exitCode = 1;
-}
-
 async function doctor(apiOverride?: string, targetPath?: string) {
   const config = await loadConfig();
   const apiBaseUrl = apiOverride ?? config.apiBaseUrl ?? DEFAULT_API_BASE_URL;
   const api = new ApiClient(apiBaseUrl, config.accessToken);
   const checks: Array<[string, boolean, string]> = [];
 
-  checks.push(['Bun available', await bunAvailable(), 'Install Bun from https://bun.sh']);
+  const bunOk = await bunAvailable();
+  checks.push(['Bun available', bunOk, bunOk ? 'available' : 'Install Bun from https://bun.sh']);
+  checks.push(['API mode', true, describeApiMode(apiBaseUrl)]);
 
   let capabilities: Awaited<ReturnType<ApiClient['capabilities']>> | null = null;
   try {
@@ -108,6 +103,9 @@ async function doctor(apiOverride?: string, targetPath?: string) {
     checks.push(['API reachable', true, apiBaseUrl]);
   } catch (error) {
     checks.push(['API reachable', false, error instanceof Error ? error.message : 'API request failed']);
+    for (const hint of startupFailureHints(apiBaseUrl)) {
+      checks.push(['API hint', false, hint]);
+    }
   }
 
   if (capabilities) {
@@ -120,19 +118,18 @@ async function doctor(apiOverride?: string, targetPath?: string) {
     ]);
   }
 
-  if (config.accessToken) {
+  if (config.accessToken && capabilities) {
     try {
       const user = await api.me();
       checks.push(['Logged in', true, `${user.email} (${user.role})`]);
     } catch (error) {
       checks.push(['Logged in', false, 'Saved token is invalid or expired']);
     }
+  } else if (config.accessToken) {
+    checks.push(['Logged in', false, 'Cannot verify saved token until the API is reachable']);
   } else {
     checks.push(['Logged in', false, 'Run mebius login']);
   }
-
-  const remoteMode = !isLocalApiBase(apiBaseUrl);
-  checks.push(['Remote API mode', remoteMode, remoteMode ? 'client paths will not be registered' : 'localhost API']);
 
   try {
     const target = await normalizeTargetPath(targetPath);
@@ -152,7 +149,7 @@ async function doctor(apiOverride?: string, targetPath?: string) {
   }
 }
 
-function parseArgs(args: string[]): ParsedArgs {
+export function parseArgs(args: string[]): ParsedArgs {
   const rest: string[] = [];
   let api: string | undefined;
   let command: string | undefined;
@@ -186,4 +183,12 @@ function parseArgs(args: string[]): ParsedArgs {
   return { command, targetPath, api, version: false, rest };
 }
 
-void main();
+function isDirectRun(importMetaUrl: string): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  return resolve(entry) === fileURLToPath(importMetaUrl);
+}
+
+if (!process.env.MEBIUS_NATIVE_ENTRY && isDirectRun(import.meta.url)) {
+  void main();
+}

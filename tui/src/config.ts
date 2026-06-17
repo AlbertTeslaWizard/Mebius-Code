@@ -3,11 +3,10 @@ import { dirname, join } from 'path';
 import { homedir } from 'os';
 import type { TuiConfig } from './types';
 
-export const TUI_VERSION = '0.1.2';
-export const DEFAULT_API_BASE_URL =
-  normalizeDefaultApiBaseUrl(process.env.MEBIUS_API_BASE_URL) ?? 'http://182.92.150.169/api';
+export const TUI_VERSION = '0.1.3';
+export const DEFAULT_API_BASE_URL = normalizeApiBaseUrl(process.env.MEBIUS_API_BASE_URL) ?? 'http://182.92.150.169/api';
 
-function normalizeDefaultApiBaseUrl(value: string | undefined): string | undefined {
+export function normalizeApiBaseUrl(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   if (!trimmed) return undefined;
   return trimmed.replace(/\/+$/, '');
