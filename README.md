@@ -130,3 +130,28 @@ emulator development, manually change the login screen API URL to
 `http://10.0.2.2:3000/api`. The API address can still be changed from the login
 and settings screens. APKs are published from GitHub Releases and can be
 installed directly without app store submission.
+
+Download signed Android APKs from the repository
+[Releases](https://github.com/AlbertTeslaWizard/Mebius-Code/releases). Android
+releases use independent tags such as `android-v0.1.0` and publish an asset
+named `Mebius-Code-android-0.1.0.apk` with `SHA256SUMS`.
+
+Maintainers publish a new Android APK by configuring these GitHub Secrets and
+pushing an `android-v*` tag:
+
+```text
+ANDROID_KEYSTORE_BASE64
+ANDROID_KEYSTORE_PASSWORD
+ANDROID_KEY_ALIAS
+ANDROID_KEY_PASSWORD
+```
+
+The release keystore must be long-lived. Replacing it later can prevent users
+from installing updates over an existing APK.
+
+For the first Android release:
+
+```bash
+git tag android-v0.1.0
+git push origin android-v0.1.0
+```

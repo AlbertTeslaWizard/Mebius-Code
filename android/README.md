@@ -34,3 +34,27 @@ For local emulator development, manually change the login screen API URL to
 Users can still change the API address before signing in or later from Settings.
 Course demo releases are distributed as signed APKs through GitHub Releases; app
 store submission is not required for the course demo path.
+
+## Release
+
+Android releases are published independently from the TUI/npm release line. A
+tag such as `android-v0.1.0` triggers `.github/workflows/android-release.yml`,
+which builds a signed release APK and uploads it to GitHub Releases as:
+
+```text
+Mebius-Code-android-0.1.0.apk
+```
+
+The workflow requires these repository secrets:
+
+```text
+ANDROID_KEYSTORE_BASE64
+ANDROID_KEYSTORE_PASSWORD
+ANDROID_KEY_ALIAS
+ANDROID_KEY_PASSWORD
+```
+
+Generate and keep one long-lived release keystore. Do not commit the keystore to
+the repository; replacing it later can prevent installed APKs from upgrading.
+The tag must match `versionName`; for example `android-v0.1.0` requires
+`versionName = "0.1.0"`.

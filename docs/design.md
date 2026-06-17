@@ -442,7 +442,7 @@ local 项目的唯一性以 ownerId + 标准化 realpath 为准。Windows 下需
 
 上线验收包括：公网首页返回 `200 OK`，`GET http://182.92.150.169/api/health` 返回健康状态，管理员账号可通过 `POST /api/auth/login` 获取 JWT，并可继续访问 `GET /api/auth/me` 确认为 `admin` 角色。由于演示环境未配置 SMTP，初始管理员账号通过一次性数据库写入创建，凭据只保存在服务器 root 用户私有文件中，不写入公开文档或源码。
 
-多端发布通过 `.github/workflows/release.yml` 统一编排。推送 `v*` tag 后，TUI job 在 Ubuntu、macOS Intel、macOS arm64 和 Windows runner 上运行 typecheck、单元测试和 OpenTUI 原生编译，产出 `mebius-linux-x64.tar.gz`、`mebius-darwin-x64.tar.gz`、`mebius-darwin-arm64.tar.gz` 和 `mebius-windows-x64.zip`；Android job 解码签名 keystore secret 并构建 `Mebius-Code-android-<tag>.apk`；发布 job 汇总二进制、APK、`install.sh`、`install.ps1` 和 `SHA256SUMS` 到 GitHub Release；最后 npm job 发布 `mebius-code` 包。npm 安装、curl 安装和 PowerShell 安装都复用同一组 Release 资产，减少平台差异。
+多端发布拆分为两个 GitHub Actions workflow。`.github/workflows/release.yml` 继续处理 `v*` tag 的 TUI native 二进制和 npm 包发布；`.github/workflows/android-release.yml` 处理 `android-v*` tag 的 Android APK 发布。Android workflow 在 Ubuntu runner 上安装 JDK 17 和 Android SDK，读取 `versionName` 校验 tag，一次性解码签名 keystore secret，构建并校验 `Mebius-Code-android-<version>.apk`，再把 APK 和 `SHA256SUMS` 上传到 GitHub Releases。这样 TUI/npm 与 Android 的版本线互不干扰，但仍共享同一个公开仓库和 Release 入口。
 
 TUI 本机测试时，MVP 要求手动启动 PostgreSQL 和 NestJS API，不由 `mebius` 自动拉起后端。local workspace 需要设置 `MEBIUS_CODE_SERVER_MODE=local_runtime` 和 `MEBIUS_CODE_LOCAL_WORKSPACES_ENABLED=true`，且不能使用 production API 容器绑定 Windows 或用户本机路径。远程 API 模式下，TUI 只操作远程后端已有 workspace。公网发布版默认进入 remote API mode，连接 `http://182.92.150.169/api`，因此不会把用户本机路径注册到云端后端。
 
