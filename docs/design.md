@@ -25,7 +25,7 @@
 
 ```text
 Browser Web App
-  ├── Auth / Workspace / Settings Views
+  ├── Auth / Workspace / Account / Settings Views
   ├── Pinia Stores
   └── REST + SSE Client
 
@@ -90,6 +90,7 @@ External / Runtime Resources
 | `/login` | `AuthView` | 登录 |
 | `/register` | `AuthView` | 注册，可填写管理员邀请码 |
 | `/app` | `WorkspaceView` | 主工作区 |
+| `/settings/account` | `AccountView` | 账户安全与密码修改 |
 | `/settings/models` | `ModelsView` | 模型配置管理 |
 | `/settings/commands` | `CommandsView` | 命令权限管理 |
 | `/settings/audit` | `AuditView` | 审计日志查询 |
@@ -113,6 +114,7 @@ External / Runtime Resources
 - `DiffPreview`：展示 Agent 生成补丁的差异。
 - `MessageContent`：渲染 Markdown、表格、链接和 KaTeX 数学公式，并通过 DOMPurify 做 HTML 净化；tool role 消息默认展示工具摘要，详情折叠查看。
 - `ThemeToggle`：在工作区顶部切换明暗主题，并通过用户偏好接口持久化选择。
+- `AccountView`：展示当前账号昵称或邮箱，提供当前密码、新密码和确认密码输入；前端先校验两次新密码一致，再调用 `PATCH /auth/me/password`，成功后清空表单并提示用户。
 
 `WorkspaceView` 右侧工作台分为文件、审查、运行和事件四个页签。文件页签保留文件树和文件预览的独立滚动区域，审查页签和运行页签采用面板级滚动，保证长计划、长审批列表、命令申请表单和命令输出可以整体上下翻动。主工作区采用项目侧栏、会话栏、聊天区和上下文侧栏的多面板布局；项目侧栏和上下文侧栏保存折叠状态与宽度，会话栏保存折叠状态。会话栏折叠时聊天区切换为单列占满剩余宽度；项目侧栏 resize handle 只负责宽度拖拽，滚轮事件转交给侧栏滚动容器，避免拖拽热区覆盖纵向滚动。
 
@@ -256,6 +258,8 @@ local 项目的唯一性以 ownerId + 标准化 realpath 为准。Windows 下需
 
 `GET /api/system/capabilities` 返回后端版本、`serverMode`、local workspace 是否启用、支持的 workspace modes、source types 和功能开关。`serverMode` 枚举为 `development`、`local_runtime`、`production`，production 模式下 local workspace 必须强制关闭，即使环境变量误开也拒绝。
 
+`PATCH /api/auth/me/password` 只允许已登录用户访问。请求体包含 `currentPassword` 和 `newPassword`，`AuthService` 通过 `UsersService.findByIdWithPassword()` 读取当前密码哈希，使用 bcrypt 校验旧密码，拒绝错误旧密码和与旧密码相同的新密码，再通过 `UsersService.updatePasswordHash()` 保存新的 bcrypt 哈希。
+
 `POST /api/projects/local` 是 create-or-get 接口。后端校验调用者权限和 serverMode，对 path 执行 realpath；如果同一 ownerId 和 normalized realpath 已存在 local 项目，则返回已有项目，否则创建 sourceType=local、workspaceMode=attached、deletePolicy=db_record_only 的项目记录。
 
 `GET /api/mobile/overview` 面向 Android 伴随客户端，返回当前用户、系统能力、最多 50 个项目、最多 20 个最近会话、最多 20 个待审批项。最近会话包含项目名、权限模式、当前模型、Agent 活动、最新计划状态和待审批数量；待审批项只返回移动端可读的轻量预览，完整 Diff 和命令上下文仍通过会话详情接口按需加载。
@@ -268,7 +272,7 @@ local 项目的唯一性以 ownerId + 标准化 realpath 为准。Windows 下需
 
 ## 8. 关键流程设计
 
-### 8.1 注册与登录
+### 8.1 注册、登录与账号安全
 
 1. 前端先调用 `POST /auth/register/verification-code` 请求注册邮箱验证码。
 2. `EmailVerificationService` 校验邮箱未注册、发送频率和全局上限，生成 6 位验证码，bcrypt 哈希后保存到 `EmailVerificationCode`，并通过 `MailService` 使用 SMTP 发送邮件。
@@ -278,6 +282,7 @@ local 项目的唯一性以 ownerId + 标准化 realpath 为准。Windows 下需
 6. 若邀请码匹配 `ADMIN_INVITE_CODE`，用户角色为管理员。
 7. `JwtService` 签发 JWT，前端保存 Token 并进入工作区。
 8. 用户通过 `PATCH /auth/me/preferences` 更新布局和主题偏好，后端归一化宽度范围、左右侧栏折叠、会话栏折叠和主题枚举，前端同时更新本地主题缓存。
+9. 用户在 Web 账号安全页修改密码时，前端提交当前密码和新密码；后端验证当前密码正确，禁止新密码复用旧密码，重新哈希后更新 `users.password_hash`。
 
 ### 8.2 模型连接
 
@@ -402,7 +407,7 @@ local 项目的唯一性以 ownerId + 标准化 realpath 为准。Windows 下需
 ## 9. 安全设计
 
 - 认证安全：所有业务接口使用 JWT Guard；SSE 使用 `access_token` 查询参数配合专用 Guard。
-- 密码安全：密码使用 bcrypt 哈希，不保存明文。
+- 密码安全：密码使用 bcrypt 哈希，不保存明文；修改密码接口必须先校验当前密码，禁止新旧密码相同，并且只更新新的 bcrypt 哈希。
 - 注册验证安全：注册验证码使用 bcrypt 哈希保存，设置 10 分钟过期、重发冷却、每邮箱/全局发送频率限制和最大校验次数限制。
 - 密钥安全：模型 API Key 使用主密钥派生的 AES-256-GCM 加密；响应中永不返回明文。
 - MCP 安全：MCP Header 使用同一加密服务保存；MCP URL 展示和诊断错误会脱敏 api key、token、secret、password、authorization 等敏感内容；MCP 返回内容作为不可信外部上下文处理。
@@ -435,7 +440,7 @@ local 项目的唯一性以 ownerId + 标准化 realpath 为准。Windows 下需
 - 服务器启用 2 GiB swap，降低 Node/NPM 构建或依赖安装时对 1.6 GiB 内存机器的影响。
 - UFW 仅放行 OpenSSH 和 `80/tcp`；云服务器安全组同步放行 `80/80`，数据库和后端端口不作为公网入口。
 
-上线验收包括：公网首页返回 `200 OK`，`GET http://182.92.150.169/api/health` 返回健康状态，管理员账号可通过 `POST /api/auth/login` 获取 JWT，并可继续访问 `GET /api/auth/me` 确认为 `admin` 角色。由于演示环境未配置 SMTP，初始管理员账号通过一次性数据库写入创建，凭据只保存在服务器 root 用户私有文件中，不写入课程文档或源码。
+上线验收包括：公网首页返回 `200 OK`，`GET http://182.92.150.169/api/health` 返回健康状态，管理员账号可通过 `POST /api/auth/login` 获取 JWT，并可继续访问 `GET /api/auth/me` 确认为 `admin` 角色。由于演示环境未配置 SMTP，初始管理员账号通过一次性数据库写入创建，凭据只保存在服务器 root 用户私有文件中，不写入公开文档或源码。
 
 多端发布通过 `.github/workflows/release.yml` 统一编排。推送 `v*` tag 后，TUI job 在 Ubuntu、macOS Intel、macOS arm64 和 Windows runner 上运行 typecheck、单元测试和 OpenTUI 原生编译，产出 `mebius-linux-x64.tar.gz`、`mebius-darwin-x64.tar.gz`、`mebius-darwin-arm64.tar.gz` 和 `mebius-windows-x64.zip`；Android job 解码签名 keystore secret 并构建 `Mebius-Code-android-<tag>.apk`；发布 job 汇总二进制、APK、`install.sh`、`install.ps1` 和 `SHA256SUMS` 到 GitHub Release；最后 npm job 发布 `mebius-code` 包。npm 安装、curl 安装和 PowerShell 安装都复用同一组 Release 资产，减少平台差异。
 

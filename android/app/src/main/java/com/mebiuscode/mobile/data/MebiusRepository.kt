@@ -26,22 +26,29 @@ class MebiusRepository(
         client.overview(bearer(session.accessToken))
     }
 
+    suspend fun pairLocalDevice(apiBaseUrl: String, code: String): MobileOverview = withContext(Dispatchers.IO) {
+        val normalized = normalizeApiBaseUrl(apiBaseUrl)
+        val client = createMebiusApi(normalized)
+        val auth = client.pairLocalDevice(LocalPairRequest(code.trim()))
+        val session = StoredSession(normalized, auth.accessToken, auth.user.nickname)
+        store.save(session)
+        storedSession = session
+        api = client
+        client.overview(bearer(session.accessToken))
+    }
+
     suspend fun restore(): MobileOverview? = withContext(Dispatchers.IO) {
         val session = storedSession ?: return@withContext null
         val client = api ?: createMebiusApi(session.apiBaseUrl).also { api = it }
         client.overview(bearer(session.accessToken))
     }
 
-    suspend fun updateApiBaseUrl(apiBaseUrl: String): MobileOverview = withContext(Dispatchers.IO) {
-        val session = storedSession ?: error("Not logged in")
+    suspend fun switchApiBaseUrl(apiBaseUrl: String): String = withContext(Dispatchers.IO) {
         val normalized = normalizeApiBaseUrl(apiBaseUrl)
-        val client = createMebiusApi(normalized)
-        val overview = client.overview(bearer(session.accessToken))
-        val updatedSession = session.copy(apiBaseUrl = normalized)
-        store.save(updatedSession)
-        storedSession = updatedSession
-        api = client
-        overview
+        store.clear()
+        storedSession = null
+        api = null
+        normalized
     }
 
     fun logout() {

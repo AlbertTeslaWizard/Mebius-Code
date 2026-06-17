@@ -50,6 +50,16 @@ export class ApiClient {
     });
   }
 
+  async localBootstrapToken(): Promise<AuthResponse> {
+    return this.request<AuthResponse>('/auth/local/bootstrap-token', { method: 'POST' });
+  }
+
+  async createLocalPairingCode(): Promise<{ code: string; expiresInSeconds: number }> {
+    return this.request<{ code: string; expiresInSeconds: number }>('/auth/local/pairing-codes', {
+      method: 'POST',
+    });
+  }
+
   async me() {
     return this.request<AuthResponse['user']>('/auth/me');
   }

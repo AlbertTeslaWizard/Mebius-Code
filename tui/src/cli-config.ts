@@ -28,7 +28,7 @@ export async function configCommand(
     const nextConfig = configWithApiBaseUrl(config, value);
     await deps.save(nextConfig);
     deps.write(`API saved: ${nextConfig.apiBaseUrl}`);
-    deps.write('Saved login and recent session state were cleared. Run `mebius login` for this API.');
+    deps.write('Saved login and recent session state were cleared. Run `mebius login` for local or public API access.');
     return;
   }
   if (action === 'reset' && key === 'api' && !value) {
@@ -36,7 +36,7 @@ export async function configCommand(
     const nextConfig = configWithApiBaseUrl(config, DEFAULT_API_BASE_URL);
     await deps.save(nextConfig);
     deps.write(`API reset to default: ${DEFAULT_API_BASE_URL}`);
-    deps.write('Saved login and recent session state were cleared. Run `mebius login` for the public API.');
+    deps.write('Saved login and recent session state were cleared. Run `mebius login` or `mebius register` for the public API.');
     return;
   }
   if (action === 'show' && !key) {
@@ -74,12 +74,21 @@ export function describeApiMode(apiBaseUrl: string): string {
     : `public or remote backend (${apiBaseUrl}); client paths will not be registered`;
 }
 
+export function webRegisterUrl(apiBaseUrl: string): string {
+  const trimmed = apiBaseUrl.replace(/\/+$/, '');
+  const webBaseUrl = trimmed.replace(/\/api$/, '');
+  return `${webBaseUrl}/register`;
+}
+
 export function startupFailureHints(apiBaseUrl: string): string[] {
   if (isLocalApiBase(apiBaseUrl)) {
     return [
       'This CLI is configured for a local backend.',
-      'Start the backend or reset to the public API: mebius config reset api',
+      'Start the backend, or reset to the public API: mebius config reset api',
     ];
   }
-  return ['Check the API URL or set another API: mebius config set api <url>'];
+  return [
+    'Check the API URL or set another API: mebius config set api <url>',
+    `Create a public API account in the Web app: ${webRegisterUrl(apiBaseUrl)}`,
+  ];
 }

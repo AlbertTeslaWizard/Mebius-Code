@@ -28,6 +28,10 @@ export function localWorkspacesEnabled(config: ConfigService): boolean {
   return (config.get<string>('MEBIUS_CODE_LOCAL_WORKSPACES_ENABLED') ?? 'false').toLowerCase() === 'true';
 }
 
+export function localAuthEnabled(config: ConfigService): boolean {
+  return resolveServerMode(config) !== 'production';
+}
+
 function isServerMode(value: string): value is ServerMode {
   return SERVER_MODES.includes(value as ServerMode);
 }

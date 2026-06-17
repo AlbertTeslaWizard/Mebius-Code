@@ -39,6 +39,14 @@ export async function bunAvailable(): Promise<boolean> {
   return result.exitCode === 0;
 }
 
+export async function openExternalUrl(url: string): Promise<boolean> {
+  const command =
+    process.platform === 'win32' ? 'cmd' : process.platform === 'darwin' ? 'open' : 'xdg-open';
+  const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url];
+  const result = await runProcess(command, args, process.cwd());
+  return result.exitCode === 0;
+}
+
 function runProcess(command: string, args: string[], cwd: string): Promise<{ exitCode: number; stdout: string }> {
   return new Promise((resolveProcess) => {
     const child = spawn(command, args, { cwd, shell: false });

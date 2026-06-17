@@ -8,9 +8,22 @@ import { fileURLToPath } from 'url';
 import { ApiClient } from './api/client';
 import { bootstrapWorkspace } from './bootstrap';
 import { App } from './app/App';
-import { configCommand, configWithApiBaseUrl, describeApiMode, startupFailureHints } from './cli-config';
+import {
+  configCommand,
+  configWithApiBaseUrl,
+  describeApiMode,
+  startupFailureHints,
+  webRegisterUrl,
+} from './cli-config';
 import { clearToken, DEFAULT_API_BASE_URL, loadConfig, saveConfig, TUI_VERSION } from './config';
-import { bunAvailable, isGitRepository, isWritableDirectory, normalizeTargetPath } from './runtime';
+import {
+  bunAvailable,
+  isGitRepository,
+  isLocalApiBase,
+  isWritableDirectory,
+  normalizeTargetPath,
+  openExternalUrl,
+} from './runtime';
 
 interface ParsedArgs {
   command?: string;
@@ -29,6 +42,14 @@ export async function main(argv = process.argv.slice(2)) {
 
   if (args.command === 'login') {
     await login(args.api);
+    return;
+  }
+  if (args.command === 'register') {
+    await register(args.api);
+    return;
+  }
+  if (args.command === 'pair') {
+    await pairDevice(args.api);
     return;
   }
   if (args.command === 'logout') {
@@ -70,6 +91,19 @@ async function login(apiOverride?: string) {
   const config = await loadConfig();
   const apiBaseUrl = apiOverride ?? config.apiBaseUrl ?? DEFAULT_API_BASE_URL;
   const api = new ApiClient(apiBaseUrl);
+  const capabilities = await api.capabilities();
+  if (isLocalApiBase(apiBaseUrl) && capabilities.features.localOwnerAuth) {
+    const auth = await api.localBootstrapToken();
+    const nextConfig = apiOverride ? configWithApiBaseUrl(config, apiBaseUrl) : { ...config, apiBaseUrl };
+    await saveConfig({
+      ...nextConfig,
+      accessToken: auth.accessToken,
+    });
+    console.log(`Connected to local API as ${auth.user.nickname}.`);
+    console.log(`API saved: ${apiBaseUrl}`);
+    return;
+  }
+
   const rl = createInterface({ input, output });
   try {
     const email = await rl.question('Email: ');
@@ -87,10 +121,70 @@ async function login(apiOverride?: string) {
   }
 }
 
+async function register(apiOverride?: string) {
+  const config = await loadConfig();
+  const apiBaseUrl = apiOverride ?? config.apiBaseUrl ?? DEFAULT_API_BASE_URL;
+  if (isLocalApiBase(apiBaseUrl)) {
+    console.log('Local API mode does not use Web account registration.');
+    console.log(`Run \`mebius login --api ${apiBaseUrl}\` on this machine to connect as the local owner.`);
+    console.log('Run `mebius pair` after that to connect Android.');
+    return;
+  }
+
+  const url = webRegisterUrl(apiBaseUrl);
+  const opened = await openExternalUrl(url).catch(() => false);
+  console.log(opened ? `Opened Web registration: ${url}` : `Create an account in the Web app: ${url}`);
+}
+
+async function pairDevice(apiOverride?: string) {
+  const config = await loadConfig();
+  const apiBaseUrl = apiOverride ?? config.apiBaseUrl ?? DEFAULT_API_BASE_URL;
+  if (!isLocalApiBase(apiBaseUrl)) {
+    console.error('Device pairing is for local API mode only.');
+    console.error(`Current API: ${apiBaseUrl}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  let token = apiOverride ? undefined : config.accessToken;
+  let api = new ApiClient(apiBaseUrl, token);
+  const capabilities = await api.capabilities();
+  if (!capabilities.features.devicePairing) {
+    console.error('This backend does not support local device pairing.');
+    process.exitCode = 1;
+    return;
+  }
+
+  if (token) {
+    try {
+      await api.me();
+    } catch {
+      token = undefined;
+      api = new ApiClient(apiBaseUrl);
+    }
+  }
+
+  if (!token) {
+    const auth = await new ApiClient(apiBaseUrl).localBootstrapToken();
+    token = auth.accessToken;
+    api = api.withToken(token);
+    const nextConfig = apiOverride ? configWithApiBaseUrl(config, apiBaseUrl) : { ...config, apiBaseUrl };
+    await saveConfig({
+      ...nextConfig,
+      accessToken: token,
+    });
+  }
+
+  const pairing = await api.createLocalPairingCode();
+  console.log(`Android pairing code: ${pairing.code}`);
+  console.log(`Expires in ${Math.round(pairing.expiresInSeconds / 60)} minutes.`);
+}
+
 async function doctor(apiOverride?: string, targetPath?: string) {
   const config = await loadConfig();
   const apiBaseUrl = apiOverride ?? config.apiBaseUrl ?? DEFAULT_API_BASE_URL;
-  const api = new ApiClient(apiBaseUrl, config.accessToken);
+  const diagnosticToken = apiOverride ? undefined : config.accessToken;
+  const api = new ApiClient(apiBaseUrl, diagnosticToken);
   const checks: Array<[string, boolean, string]> = [];
 
   const bunOk = await bunAvailable();
@@ -118,17 +212,21 @@ async function doctor(apiOverride?: string, targetPath?: string) {
     ]);
   }
 
-  if (config.accessToken && capabilities) {
+  if (diagnosticToken && capabilities) {
     try {
       const user = await api.me();
       checks.push(['Logged in', true, `${user.email} (${user.role})`]);
     } catch (error) {
       checks.push(['Logged in', false, 'Saved token is invalid or expired']);
     }
-  } else if (config.accessToken) {
+  } else if (diagnosticToken) {
     checks.push(['Logged in', false, 'Cannot verify saved token until the API is reachable']);
   } else {
-    checks.push(['Logged in', false, 'Run mebius login']);
+    checks.push([
+      'Logged in',
+      false,
+      isLocalApiBase(apiBaseUrl) ? 'Run mebius login for local owner access' : 'Run mebius login',
+    ]);
   }
 
   try {
@@ -165,7 +263,7 @@ export function parseArgs(args: string[]): ParsedArgs {
     if (arg === '--version' || arg === '-v') {
       return { command, targetPath, api, version: true, rest };
     }
-    if (!command && ['login', 'logout', 'doctor', 'config'].includes(arg)) {
+    if (!command && ['login', 'register', 'pair', 'logout', 'doctor', 'config'].includes(arg)) {
       command = arg;
       continue;
     }

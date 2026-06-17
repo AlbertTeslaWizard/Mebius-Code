@@ -9,6 +9,8 @@ import { AuthService } from './auth.service';
 import { EmailVerificationCode } from './email-verification-code.entity';
 import { EmailVerificationService } from './email-verification.service';
 import { JwtStrategy } from './jwt.strategy';
+import { LocalAuthService } from './local-auth.service';
+import { LocalPairingService } from './local-pairing.service';
 import { MailService } from './mail.service';
 import { SseJwtGuard } from './sse-jwt.guard';
 
@@ -29,7 +31,15 @@ import { SseJwtGuard } from './sse-jwt.guard';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, EmailVerificationService, MailService, JwtStrategy, SseJwtGuard],
+  providers: [
+    AuthService,
+    EmailVerificationService,
+    LocalAuthService,
+    LocalPairingService,
+    MailService,
+    JwtStrategy,
+    SseJwtGuard,
+  ],
   exports: [AuthService, JwtModule, SseJwtGuard],
 })
 export class AuthModule {}

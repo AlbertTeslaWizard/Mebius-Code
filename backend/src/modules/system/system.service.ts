@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
+  localAuthEnabled,
   localWorkspacesEnabled,
   PROJECT_SOURCE_TYPES,
   resolveServerMode,
@@ -20,6 +21,8 @@ export class SystemService {
       workspaceModes: WORKSPACE_MODES,
       sourceTypes: PROJECT_SOURCE_TYPES,
       features: {
+        localOwnerAuth: localAuthEnabled(this.config),
+        devicePairing: localAuthEnabled(this.config),
         localWorkspaces: localWorkspacesEnabled(this.config),
         sseSessionEvents: true,
         planMode: true,

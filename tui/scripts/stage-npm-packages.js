@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { chmod, copyFile, mkdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, cp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -71,9 +71,12 @@ async function stagePlatformPackage(platformPackage) {
   const destination = join(outputDir, packageDirectoryName(platformPackage.name));
   const binarySource = join(inputDir, packageDirectoryName(platformPackage.name), platformPackage.executable);
   const binaryDestination = join(destination, 'bin', platformPackage.executable);
+  const runtimeSource = join(inputDir, packageDirectoryName(platformPackage.name), 'runtime');
+  const runtimeDestination = join(destination, 'bin', 'runtime');
 
   await mkdir(join(destination, 'bin'), { recursive: true });
   await copyFile(binarySource, binaryDestination);
+  await cp(runtimeSource, runtimeDestination, { recursive: true });
   if (platformPackage.os !== 'win32') {
     await chmod(binaryDestination, 0o755);
   }

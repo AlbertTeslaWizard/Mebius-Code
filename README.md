@@ -95,7 +95,22 @@ bun run start
 The installed CLI command is `mebius`. Use `mebius login`, or
 `mebius login --api http://localhost:3000/api` for a local backend, to persist
 credentials and API configuration.
-See [tui/README.md](tui/README.md) for TUI commands and shortcuts.
+
+Public API mode opens a workspace on the remote Mebius server. It cannot access
+paths from the user's machine, such as `D:\Code\Python`. Use a local API with
+local workspace support enabled when binding a real local path:
+
+```powershell
+mebius config set api http://localhost:3000/api
+mebius login
+mebius doctor D:\Code\Python
+mebius D:\Code\Python
+```
+
+Use `mebius config show` to inspect the active API and
+`mebius config reset api` to return to the public API. See
+[tui/README.md](tui/README.md) for full TUI API mode, workspace path,
+troubleshooting, command, and shortcut details.
 
 ## Android Quick Start
 
@@ -110,7 +125,8 @@ Android Gradle setup:
 gradle :app:assembleDebug
 ```
 
-Debug builds default to `http://10.0.2.2:3000/api`; release APKs default to
-`http://182.92.150.169/api`. The API address can still be changed from the
-login and settings screens. APKs are published from GitHub Releases and can be
+Debug and release builds default to `http://182.92.150.169/api`. For local
+emulator development, manually change the login screen API URL to
+`http://10.0.2.2:3000/api`. The API address can still be changed from the login
+and settings screens. APKs are published from GitHub Releases and can be
 installed directly without app store submission.

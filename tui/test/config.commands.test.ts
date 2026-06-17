@@ -5,6 +5,7 @@ import {
   describeApiMode,
   formatConfigShow,
   startupFailureHints,
+  webRegisterUrl,
 } from '../src/cli-config';
 import { DEFAULT_API_BASE_URL } from '../src/config';
 import type { TuiConfig } from '../src/types';
@@ -72,8 +73,12 @@ describe('TUI config command helpers', () => {
     expect(describeApiMode('http://localhost:3000/api')).toContain('local backend');
     expect(describeApiMode('http://182.92.150.169/api')).toContain('public or remote backend');
     expect(startupFailureHints('http://localhost:3000/api')).toContain(
-      'Start the backend or reset to the public API: mebius config reset api',
+      'Start the backend, or reset to the public API: mebius config reset api',
     );
+    expect(startupFailureHints('http://182.92.150.169/api')).toContain(
+      'Create a public API account in the Web app: http://182.92.150.169/register',
+    );
+    expect(webRegisterUrl('http://182.92.150.169/api')).toBe('http://182.92.150.169/register');
   });
 });
 

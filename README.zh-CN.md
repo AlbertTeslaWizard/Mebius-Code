@@ -100,4 +100,4 @@ Android 应用是连接已有 Mebius API 实例的轻量伴随客户端。它支
 gradle :app:assembleDebug
 ```
 
-Debug 构建默认连接 `http://10.0.2.2:3000/api`；release APK 默认连接 `http://182.92.150.169/api`。API 地址仍可在登录页和设置页修改。APK 通过 GitHub Releases 发布，可以不经过应用市场上架直接安装。
+Debug 和 release 构建默认连接 `http://182.92.150.169/api`。本地模拟器开发时，可在登录页手动改为 `http://10.0.2.2:3000/api`。API 地址仍可在登录页和设置页修改。APK 通过 GitHub Releases 发布，可以不经过应用市场上架直接安装。

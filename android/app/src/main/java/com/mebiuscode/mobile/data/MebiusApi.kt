@@ -23,6 +23,9 @@ interface MebiusApi {
     @POST("auth/login")
     suspend fun login(@Body body: LoginRequest): AuthResponse
 
+    @POST("auth/local/pair")
+    suspend fun pairLocalDevice(@Body body: LocalPairRequest): AuthResponse
+
     @GET("auth/me")
     suspend fun me(@Header("Authorization") authorization: String): User
 
@@ -161,6 +164,8 @@ interface MebiusApi {
     ): Response<ResponseBody>
 }
 
+const val PUBLIC_WEB_BASE_URL = "http://182.92.150.169"
+
 object MebiusJson {
     val json = Json {
         ignoreUnknownKeys = true
@@ -190,6 +195,17 @@ fun bearer(token: String): String = "Bearer $token"
 fun normalizeApiBaseUrl(value: String): String {
     val trimmed = value.trim().ifBlank { BuildConfig.DEFAULT_API_BASE_URL }
     return if (trimmed.endsWith("/")) trimmed else "$trimmed/"
+}
+
+fun webRegisterUrl(apiBaseUrl: String): String {
+    val trimmed = normalizeApiBaseUrl(apiBaseUrl).trimEnd('/')
+    val webBase = if (trimmed.endsWith("/api")) trimmed.removeSuffix("/api") else trimmed
+    val resolvedWebBase = if (webBase == BuildConfig.DEFAULT_API_BASE_URL.trimEnd('/').removeSuffix("/api")) {
+        PUBLIC_WEB_BASE_URL
+    } else {
+        webBase
+    }
+    return "$resolvedWebBase/register"
 }
 
 private object ErrorInterceptor : Interceptor {

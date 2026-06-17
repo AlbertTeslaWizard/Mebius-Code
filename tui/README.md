@@ -36,8 +36,98 @@ mebius doctor
 mebius
 ```
 
-Use `--api` for a one-off API override or `mebius config set api <url>` to
-persist a different API URL.
+Use `mebius config show` to inspect the current API and login state. Use
+`mebius config reset api` to return to the public API, or
+`mebius config set api <url>` to persist a different API URL.
+
+## API Modes and Workspace Paths
+
+Mebius TUI has two API modes. They differ in where files and commands are
+executed.
+
+### Public API mode
+
+Release builds default to the public course API:
+
+```text
+http://182.92.150.169/api
+```
+
+This mode opens a workspace on the remote Mebius server. It cannot access a
+path from your machine, such as `D:\Code\Python` or `/home/me/project`. If the
+status panel shows a path like `/opt/mebius-code/workspaces/...`, that is the
+server-side workspace for the current project.
+
+Common public API commands:
+
+```bash
+mebius config reset api
+mebius login
+mebius doctor
+mebius
+```
+
+### Local API mode
+
+Use local API mode when you want TUI to bind a real path that is visible to a
+local Mebius backend, such as `D:\Code\Python`.
+
+Start the backend in local runtime mode first. In PowerShell:
+
+```powershell
+cd D:\Code\MebiusCode\backend
+$env:MEBIUS_CODE_SERVER_MODE = "local_runtime"
+$env:MEBIUS_CODE_LOCAL_WORKSPACES_ENABLED = "true"
+npm run start:dev
+```
+
+Then configure and log in from another shell:
+
+```powershell
+mebius config set api http://localhost:3000/api
+mebius login
+mebius doctor D:\Code\Python
+mebius D:\Code\Python
+```
+
+You can also log in while setting the API:
+
+```powershell
+mebius login --api http://localhost:3000/api
+mebius D:\Code\Python
+```
+
+For development from the `tui/` directory, the same commands can be run through
+Bun:
+
+```powershell
+bun --preload @opentui/solid/preload src/cli.tsx login --api http://localhost:3000/api
+bun --preload @opentui/solid/preload src/cli.tsx doctor D:\Code\Python
+bun --preload @opentui/solid/preload src/cli.tsx D:\Code\Python
+```
+
+`--api` can temporarily override the API for a single command:
+
+```powershell
+mebius --api http://localhost:3000/api D:\Code\Python
+mebius doctor --api http://localhost:3000/api D:\Code\Python
+```
+
+Tokens are API-specific. If you switch between public and local APIs, log in
+again for the selected API.
+
+### Troubleshooting
+
+- `Not logged in`: run `mebius login` for the currently configured API, or
+  `mebius login --api <url>` when switching APIs.
+- `Local workspace support: disabled`: the connected backend is not running in
+  local runtime mode or `MEBIUS_CODE_LOCAL_WORKSPACES_ENABLED=true` is missing.
+- The workspace path is `/opt/mebius-code/workspaces/...`: you are connected to
+  the public API and are viewing a remote server workspace.
+- `Saved token is invalid or expired`: run `mebius login` again for the current
+  API.
+- `Request failed with HTTP 502`: the configured API is unreachable or the
+  backend behind it is unhealthy. Run `mebius config show` to confirm the API.
 
 ## Development
 
@@ -55,6 +145,7 @@ MVP behavior:
 - `mebius login --api <url>` and `mebius config set api <url>` persist the API URL.
 - Local workspace binding only happens for localhost API URLs and only when `/api/system/capabilities` says the backend supports it.
 - Remote public API mode cannot register a path from the user's machine; create or import a project in the Web app first.
+- `mebius config set api <url>` and `mebius config reset api` clear saved login and recent session state, because tokens and project IDs belong to one backend.
 
 ## Composer
 

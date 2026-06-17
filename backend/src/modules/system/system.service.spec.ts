@@ -12,6 +12,10 @@ describe('SystemService', () => {
       expect.objectContaining({
         serverMode: 'production',
         localWorkspacesEnabled: false,
+        features: expect.objectContaining({
+          devicePairing: false,
+          localOwnerAuth: false,
+        }),
       }),
     );
   });
@@ -26,6 +30,10 @@ describe('SystemService', () => {
       expect.objectContaining({
         serverMode: 'local_runtime',
         localWorkspacesEnabled: true,
+        features: expect.objectContaining({
+          devicePairing: true,
+          localOwnerAuth: true,
+        }),
       }),
     );
   });

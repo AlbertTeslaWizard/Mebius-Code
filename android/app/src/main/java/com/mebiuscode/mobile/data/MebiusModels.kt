@@ -12,6 +12,11 @@ data class LoginRequest(
 )
 
 @Serializable
+data class LocalPairRequest(
+    val code: String,
+)
+
+@Serializable
 data class AuthResponse(
     val user: User,
     val accessToken: String,

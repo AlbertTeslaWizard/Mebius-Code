@@ -60,15 +60,30 @@ export async function bootstrapWorkspace(input: {
 }): Promise<WorkspaceState> {
   const config = await loadConfig();
   const apiBaseUrl = input.apiBaseUrl;
-  const token = input.token ?? config.accessToken;
-  const api = new ApiClient(apiBaseUrl, token);
+  let token = input.token ?? config.accessToken;
+  let api = new ApiClient(apiBaseUrl, token);
   const capabilities = await api.capabilities();
+  const localApi = isLocalApiBase(apiBaseUrl);
+  if (!token && localApi && capabilities.features.localOwnerAuth) {
+    const auth = await api.localBootstrapToken();
+    token = auth.accessToken;
+    api = api.withToken(token);
+  }
   if (!token) {
     throw new Error(`Not logged in. Run: mebius login --api ${apiBaseUrl}`);
   }
-  await api.me();
-
-  const localApi = isLocalApiBase(apiBaseUrl);
+  try {
+    await api.me();
+  } catch (error) {
+    if (localApi && capabilities.features.localOwnerAuth) {
+      const auth = await new ApiClient(apiBaseUrl).localBootstrapToken();
+      token = auth.accessToken;
+      api = api.withToken(token);
+      await api.me();
+    } else {
+      throw error;
+    }
+  }
   const mode = localApi ? 'local' : 'remote';
   const targetPath = mode === 'local' ? await normalizeTargetPath(input.targetPath) : (input.targetPath ?? process.cwd());
   let projects = await api.listProjects();

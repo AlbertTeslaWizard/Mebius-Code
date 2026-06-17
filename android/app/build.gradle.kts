@@ -9,8 +9,7 @@ android {
     namespace = "com.mebiuscode.mobile"
     compileSdk = 35
 
-    val debugApiBaseUrl = "http://10.0.2.2:3000/api"
-    val releaseApiBaseUrl = "http://182.92.150.169/api"
+    val publicApiBaseUrl = "http://182.92.150.169/api"
 
     defaultConfig {
         applicationId = "com.mebiuscode.mobile"
@@ -20,7 +19,7 @@ android {
         versionName = "0.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        buildConfigField("String", "DEFAULT_API_BASE_URL", "\"$debugApiBaseUrl\"")
+        buildConfigField("String", "DEFAULT_API_BASE_URL", "\"$publicApiBaseUrl\"")
     }
 
     buildFeatures {
@@ -42,10 +41,10 @@ android {
 
     buildTypes {
         debug {
-            buildConfigField("String", "DEFAULT_API_BASE_URL", "\"$debugApiBaseUrl\"")
+            buildConfigField("String", "DEFAULT_API_BASE_URL", "\"$publicApiBaseUrl\"")
         }
         release {
-            buildConfigField("String", "DEFAULT_API_BASE_URL", "\"$releaseApiBaseUrl\"")
+            buildConfigField("String", "DEFAULT_API_BASE_URL", "\"$publicApiBaseUrl\"")
             isMinifyEnabled = false
             if (!System.getenv("ANDROID_KEYSTORE_FILE").isNullOrBlank()) {
                 signingConfig = signingConfigs.getByName("release")

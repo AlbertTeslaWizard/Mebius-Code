@@ -29,9 +29,11 @@ import kotlinx.coroutines.launch
 
 data class UiState(
     val route: Route = Route.Login,
+    val authMode: AuthMode = AuthMode.SignIn,
     val loginApi: String = BuildConfig.DEFAULT_API_BASE_URL,
     val loginEmail: String = "",
     val loginPassword: String = "",
+    val pairingCode: String = "",
     val settingsApi: String = "",
     val settingsSaving: Boolean = false,
     val settingsReturnRoute: Route = Route.Dashboard,
@@ -56,6 +58,8 @@ sealed interface Route {
 }
 
 enum class ComposerMode { Build, Plan }
+
+enum class AuthMode { SignIn, PairLocal }
 
 class MebiusViewModel(
     private val repository: MebiusRepository,
@@ -85,9 +89,11 @@ class MebiusViewModel(
         }
     }
 
+    fun setAuthMode(value: AuthMode) = _state.update { it.copy(authMode = value, error = null) }
     fun setLoginApi(value: String) = _state.update { it.copy(loginApi = value) }
     fun setLoginEmail(value: String) = _state.update { it.copy(loginEmail = value) }
     fun setLoginPassword(value: String) = _state.update { it.copy(loginPassword = value) }
+    fun setPairingCode(value: String) = _state.update { it.copy(pairingCode = value.filter(Char::isDigit).take(6)) }
     fun setSettingsApi(value: String) = _state.update { it.copy(settingsApi = value) }
     fun setComposerText(value: String) = _state.update { it.copy(composerText = value) }
     fun setComposerMode(mode: ComposerMode) = _state.update { it.copy(composerMode = mode) }
@@ -109,6 +115,35 @@ class MebiusViewModel(
                         settingsApi = currentApi,
                         userName = repository.currentSession?.userName.orEmpty(),
                         loginPassword = "",
+                        error = null,
+                    )
+                }
+            }.onFailure { error ->
+                _state.update { it.copy(overview = LoadState.Failed(error.userMessage()), error = error.userMessage()) }
+            }
+        }
+    }
+
+    fun pairLocalDevice() {
+        val snapshot = _state.value
+        if (snapshot.pairingCode.length != 6) {
+            _state.update { it.copy(error = "Enter the 6-digit pairing code from TUI.") }
+            return
+        }
+        _state.update { it.copy(overview = LoadState.Loading, error = null) }
+        viewModelScope.launch {
+            runCatching {
+                repository.pairLocalDevice(snapshot.loginApi, snapshot.pairingCode)
+            }.onSuccess { overview ->
+                _state.update {
+                    val currentApi = repository.currentSession?.apiBaseUrl ?: snapshot.loginApi
+                    it.copy(
+                        route = Route.Dashboard,
+                        overview = LoadState.Ready(overview),
+                        loginApi = currentApi,
+                        settingsApi = currentApi,
+                        userName = repository.currentSession?.userName.orEmpty(),
+                        pairingCode = "",
                         error = null,
                     )
                 }
@@ -162,19 +197,13 @@ class MebiusViewModel(
         _state.update { it.copy(settingsSaving = true, error = null) }
         viewModelScope.launch {
             runCatching {
-                repository.updateApiBaseUrl(snapshot.settingsApi)
-            }.onSuccess { overview ->
-                val currentApi = repository.currentSession?.apiBaseUrl ?: snapshot.settingsApi
-                _state.update {
-                    it.copy(
-                        loginApi = currentApi,
-                        settingsApi = currentApi,
-                        settingsSaving = false,
-                        overview = LoadState.Ready(overview),
-                        userName = repository.currentSession?.userName.orEmpty(),
-                        error = null,
-                    )
-                }
+                repository.switchApiBaseUrl(snapshot.settingsApi)
+            }.onSuccess { normalizedApi ->
+                streamJob?.cancel()
+                _state.value = UiState(
+                    loginApi = normalizedApi,
+                    settingsApi = normalizedApi,
+                )
             }.onFailure { error ->
                 _state.update {
                     it.copy(

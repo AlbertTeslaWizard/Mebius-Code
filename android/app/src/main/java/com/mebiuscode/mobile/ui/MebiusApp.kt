@@ -75,6 +75,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -91,6 +92,7 @@ import com.mebiuscode.mobile.data.PlanBundle
 import com.mebiuscode.mobile.data.Project
 import com.mebiuscode.mobile.data.RecentSession
 import com.mebiuscode.mobile.data.SessionDetails
+import com.mebiuscode.mobile.data.webRegisterUrl
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.contentOrNull
@@ -211,6 +213,7 @@ private fun MebiusTopBar(
 }
 @Composable
 private fun LoginScreen(state: UiState, viewModel: MebiusViewModel) {
+    val uriHandler = LocalUriHandler.current
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -262,8 +265,21 @@ private fun LoginScreen(state: UiState, viewModel: MebiusViewModel) {
         }
         item {
             Panel {
-                Text("Sign in", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text("Connect", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(14.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = state.authMode == AuthMode.SignIn,
+                        onClick = { viewModel.setAuthMode(AuthMode.SignIn) },
+                        label = { Text("Public account") },
+                    )
+                    FilterChip(
+                        selected = state.authMode == AuthMode.PairLocal,
+                        onClick = { viewModel.setAuthMode(AuthMode.PairLocal) },
+                        label = { Text("Local pair") },
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
                     value = state.loginApi,
                     onValueChange = viewModel::setLoginApi,
@@ -272,40 +288,70 @@ private fun LoginScreen(state: UiState, viewModel: MebiusViewModel) {
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = state.loginEmail,
-                    onValueChange = viewModel::setLoginEmail,
-                    label = { Text("Email") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = state.loginPassword,
-                    onValueChange = viewModel::setLoginPassword,
-                    label = { Text("Password") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                if (state.authMode == AuthMode.SignIn) {
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = state.loginEmail,
+                        onValueChange = viewModel::setLoginEmail,
+                        label = { Text("Email") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = state.loginPassword,
+                        onValueChange = viewModel::setLoginPassword,
+                        label = { Text("Password") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                } else {
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = state.pairingCode,
+                        onValueChange = viewModel::setPairingCode,
+                        label = { Text("Pairing code") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Run `mebius pair` on the machine running the local API, then enter the code here.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
                 Spacer(Modifier.height(18.dp))
                 Button(
-                    onClick = viewModel::login,
+                    onClick = if (state.authMode == AuthMode.SignIn) viewModel::login else viewModel::pairLocalDevice,
                     enabled = state.overview !is LoadState.Loading,
                     shape = RoundedCornerShape(14.dp),
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(52.dp),
                 ) {
-                    Text("Sign in", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        if (state.authMode == AuthMode.SignIn) "Sign in" else "Pair device",
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+                if (state.authMode == AuthMode.SignIn) {
+                    Spacer(Modifier.height(10.dp))
+                    TextButton(
+                        onClick = { uriHandler.openUri(webRegisterUrl(state.loginApi)) },
+                        modifier = Modifier.align(Alignment.CenterHorizontally),
+                    ) {
+                        Text("Create account on Web")
+                    }
                 }
             }
         }
         item {
             Text(
-                "Default API: ${state.loginApi}. You can change it before signing in or later in Settings.",
+                "Public API accounts use the Web account system. Local API connections use pairing and keep workspaces on that backend.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -362,7 +408,7 @@ private fun SettingsScreen(state: UiState, viewModel: MebiusViewModel) {
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "Saving verifies this API with your current session before changing the app connection.",
+                    "Switching API clears the saved token on this device. Sign in or pair again for the new backend.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -375,7 +421,10 @@ private fun SettingsScreen(state: UiState, viewModel: MebiusViewModel) {
                         .fillMaxWidth()
                         .height(50.dp),
                 ) {
-                    Text(if (state.settingsSaving) "Saving..." else "Save API", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        if (state.settingsSaving) "Switching..." else "Switch API and sign out",
+                        fontWeight = FontWeight.SemiBold,
+                    )
                 }
             }
         }

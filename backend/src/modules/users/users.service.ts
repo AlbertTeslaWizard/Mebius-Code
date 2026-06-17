@@ -34,6 +34,10 @@ export class UsersService {
     );
   }
 
+  async count(): Promise<number> {
+    return this.users.count();
+  }
+
   async findById(id: string): Promise<User> {
     const user = await this.users.findOne({ where: { id } });
     if (!user) {
