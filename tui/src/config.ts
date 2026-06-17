@@ -1,9 +1,10 @@
 import { mkdir, readFile, writeFile, chmod, rm } from 'fs/promises';
 import { dirname, join } from 'path';
 import { homedir } from 'os';
+import packageJson from '../package.json' with { type: 'json' };
 import type { TuiConfig } from './types';
 
-export const TUI_VERSION = '0.1.3';
+export const TUI_VERSION = packageJson.version;
 export const DEFAULT_API_BASE_URL = normalizeApiBaseUrl(process.env.MEBIUS_API_BASE_URL) ?? 'http://182.92.150.169/api';
 
 export function normalizeApiBaseUrl(value: string | undefined): string | undefined {

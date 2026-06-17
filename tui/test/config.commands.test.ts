@@ -7,10 +7,16 @@ import {
   startupFailureHints,
   webRegisterUrl,
 } from '../src/cli-config';
-import { DEFAULT_API_BASE_URL } from '../src/config';
+import { DEFAULT_API_BASE_URL, TUI_VERSION } from '../src/config';
 import type { TuiConfig } from '../src/types';
 
 describe('TUI config command helpers', () => {
+  it('uses package.json as the CLI version source of truth', async () => {
+    const packageJson = await Bun.file(new URL('../package.json', import.meta.url)).json();
+
+    expect(TUI_VERSION).toBe(packageJson.version);
+  });
+
   it('clears backend-bound state when setting an API URL', () => {
     const next = configWithApiBaseUrl(configFixture(), ' http://localhost:3000/api/ ');
 

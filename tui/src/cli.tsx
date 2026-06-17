@@ -24,6 +24,12 @@ import {
   normalizeTargetPath,
   openExternalUrl,
 } from './runtime';
+import {
+  formatBundledMarkdownDiagnostic,
+  formatBundledOpenTuiRuntimeDiagnostic,
+  inspectBundledOpenTuiRuntimeWithParserPreload,
+  isBundledOpenTuiRuntime,
+} from './nativeRuntime';
 
 interface ParsedArgs {
   command?: string;
@@ -188,8 +194,16 @@ async function doctor(apiOverride?: string, targetPath?: string) {
   const checks: Array<[string, boolean, string]> = [];
 
   const bunOk = await bunAvailable();
+  checks.push(['TUI version', true, TUI_VERSION]);
   checks.push(['Bun available', bunOk, bunOk ? 'available' : 'Install Bun from https://bun.sh']);
   checks.push(['API mode', true, describeApiMode(apiBaseUrl)]);
+  if (isBundledOpenTuiRuntime()) {
+    const runtimeDiagnostic = await inspectBundledOpenTuiRuntimeWithParserPreload();
+    checks.push(['OpenTUI runtime', runtimeDiagnostic.ok, formatBundledOpenTuiRuntimeDiagnostic(runtimeDiagnostic)]);
+    checks.push(['Markdown parser', runtimeDiagnostic.markdownOk, formatBundledMarkdownDiagnostic(runtimeDiagnostic)]);
+  } else {
+    checks.push(['OpenTUI runtime', true, 'source runtime; native parser assets are checked in release builds']);
+  }
 
   let capabilities: Awaited<ReturnType<ApiClient['capabilities']>> | null = null;
   try {

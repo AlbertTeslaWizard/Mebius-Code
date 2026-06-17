@@ -1,6 +1,6 @@
 // @ts-nocheck
 import solidPlugin from "@opentui/solid/bun-plugin";
-import { copyFile, mkdir, readdir, rm, stat } from "node:fs/promises";
+import { copyFile, cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 const args = process.argv.slice(2);
@@ -69,14 +69,11 @@ async function stageNativeRuntime(nativeDir) {
     );
   }
 
-  const webTreeSitterDestination = join(runtimeDir, "node_modules", "web-tree-sitter");
-  await mkdir(webTreeSitterDestination, { recursive: true });
-  for (const file of ["package.json", "tree-sitter.js", "tree-sitter.wasm"]) {
-    await copyFile(
-      join("node_modules", "web-tree-sitter", file),
-      join(webTreeSitterDestination, file),
-    );
-  }
+  await cp(join("node_modules", "web-tree-sitter"), join(runtimeDir, "node_modules", "web-tree-sitter"), {
+    recursive: true,
+  });
+
+  await patchBundledParserWorker(join(runtimeDir, "parser.worker.js"));
 }
 
 async function copyDirectory(source, destination) {
@@ -91,4 +88,27 @@ async function copyDirectory(source, destination) {
       await copyFile(sourcePath, destinationPath);
     }
   }
+}
+
+async function patchBundledParserWorker(workerPath) {
+  const original = await readFile(workerPath, "utf8");
+  const patched = original
+    .replace(
+      'from "web-tree-sitter";',
+      'from "./node_modules/web-tree-sitter/tree-sitter.js";',
+    )
+    .replaceAll(
+      'import("web-tree-sitter/tree-sitter.wasm"',
+      'import("./node_modules/web-tree-sitter/tree-sitter.wasm"',
+    )
+    .replaceAll(
+      'import.meta.resolve("web-tree-sitter/tree-sitter.wasm")',
+      'import.meta.resolve("./node_modules/web-tree-sitter/tree-sitter.wasm")',
+    );
+
+  if (patched === original) {
+    throw new Error(`Failed to patch bundled parser worker at ${workerPath}`);
+  }
+
+  await writeFile(workerPath, patched);
 }
