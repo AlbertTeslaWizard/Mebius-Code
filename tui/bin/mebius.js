@@ -7,10 +7,10 @@ import { dirname, join } from 'node:path';
 const require = createRequire(import.meta.url);
 
 const packagesByTarget = {
-  'win32-x64': { name: 'mebius-code-win32-x64', executable: 'mebius.exe' },
-  'linux-x64': { name: 'mebius-code-linux-x64', executable: 'mebius' },
-  'darwin-x64': { name: 'mebius-code-darwin-x64', executable: 'mebius' },
-  'darwin-arm64': { name: 'mebius-code-darwin-arm64', executable: 'mebius' },
+  'win32-x64': { name: '@albert_tesla/mebius-code-win32-x64', executable: 'mebius.exe' },
+  'linux-x64': { name: '@albert_tesla/mebius-code-linux-x64', executable: 'mebius' },
+  'darwin-x64': { name: '@albert_tesla/mebius-code-darwin-x64', executable: 'mebius' },
+  'darwin-arm64': { name: '@albert_tesla/mebius-code-darwin-arm64', executable: 'mebius' },
 };
 
 const target = `${process.platform}-${process.arch}`;

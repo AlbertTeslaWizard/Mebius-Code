@@ -12,25 +12,25 @@ const sourcePackage = JSON.parse(readFileSync(join(packageDir, 'package.json'), 
 
 const platformPackages = [
   {
-    name: 'mebius-code-win32-x64',
+    name: '@albert_tesla/mebius-code-win32-x64',
     os: 'win32',
     cpu: 'x64',
     executable: 'mebius.exe',
   },
   {
-    name: 'mebius-code-linux-x64',
+    name: '@albert_tesla/mebius-code-linux-x64',
     os: 'linux',
     cpu: 'x64',
     executable: 'mebius',
   },
   {
-    name: 'mebius-code-darwin-x64',
+    name: '@albert_tesla/mebius-code-darwin-x64',
     os: 'darwin',
     cpu: 'x64',
     executable: 'mebius',
   },
   {
-    name: 'mebius-code-darwin-arm64',
+    name: '@albert_tesla/mebius-code-darwin-arm64',
     os: 'darwin',
     cpu: 'arm64',
     executable: 'mebius',
@@ -68,8 +68,8 @@ async function stageMainPackage() {
 }
 
 async function stagePlatformPackage(platformPackage) {
-  const destination = join(outputDir, platformPackage.name);
-  const binarySource = join(inputDir, platformPackage.name, platformPackage.executable);
+  const destination = join(outputDir, packageDirectoryName(platformPackage.name));
+  const binarySource = join(inputDir, packageDirectoryName(platformPackage.name), platformPackage.executable);
   const binaryDestination = join(destination, 'bin', platformPackage.executable);
 
   await mkdir(join(destination, 'bin'), { recursive: true });
@@ -88,6 +88,10 @@ async function stagePlatformPackage(platformPackage) {
     files: ['bin'],
     publishConfig: sourcePackage.publishConfig,
   });
+}
+
+function packageDirectoryName(packageName) {
+  return packageName.replace(/^@/, '').replace('/', '__');
 }
 
 async function writeJson(path, value) {

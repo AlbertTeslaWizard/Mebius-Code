@@ -16,19 +16,19 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            package: mebius-code-linux-x64
+            package: albert_tesla__mebius-code-linux-x64
             executable: mebius
             expected_arch: x86_64
           - os: macos-15-intel
-            package: mebius-code-darwin-x64
+            package: albert_tesla__mebius-code-darwin-x64
             executable: mebius
             expected_arch: x86_64
           - os: macos-15
-            package: mebius-code-darwin-arm64
+            package: albert_tesla__mebius-code-darwin-arm64
             executable: mebius
             expected_arch: arm64
           - os: windows-latest
-            package: mebius-code-win32-x64
+            package: albert_tesla__mebius-code-win32-x64
             executable: mebius.exe
             expected_arch: AMD64
     runs-on: ${{ matrix.os }}
@@ -53,7 +53,7 @@ jobs:
       - run: npm run typecheck
       - run: bun test
       - name: Install Linux musl OpenTUI package for Bun compile
-        if: matrix.package == 'mebius-code-linux-x64'
+        if: matrix.package == 'albert_tesla__mebius-code-linux-x64'
         shell: bash
         run: |
           opentui_version="$(node -p "require('./node_modules/@opentui/core/package.json').version")"
@@ -98,10 +98,10 @@ jobs:
       - name: Publish platform packages
         run: |
           for package in \
-            mebius-code-win32-x64 \
-            mebius-code-linux-x64 \
-            mebius-code-darwin-x64 \
-            mebius-code-darwin-arm64
+            albert_tesla__mebius-code-win32-x64 \
+            albert_tesla__mebius-code-linux-x64 \
+            albert_tesla__mebius-code-darwin-x64 \
+            albert_tesla__mebius-code-darwin-arm64
           do
             npm publish "dist/npm/$package" --access public
           done
