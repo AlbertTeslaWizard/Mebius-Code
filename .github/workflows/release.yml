@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag to build and publish, for example v0.1.5"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -37,6 +43,8 @@ jobs:
         working-directory: tui
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
       - uses: oven-sh/setup-bun@v2
       - uses: actions/setup-node@v4
         with:
@@ -70,16 +78,120 @@ jobs:
           name: ${{ matrix.package }}
           path: tui/dist/native/**
 
+  github-release:
+    name: Publish GitHub Release assets
+    runs-on: ubuntu-latest
+    needs:
+      - tui-native
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: tui/dist/native-artifacts
+      - name: Package release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          artifact_dir="$PWD/tui/dist/native-artifacts"
+          release_dir="$PWD/tui/dist/release"
+          rm -rf "$release_dir"
+          mkdir -p "$release_dir"
+
+          package_tar() {
+            local package="$1"
+            local asset="$2"
+            local source_dir="$artifact_dir/$package"
+
+            test -f "$source_dir/mebius"
+            test -d "$source_dir/runtime"
+            chmod +x "$source_dir/mebius"
+            tar -C "$source_dir" -czf "$release_dir/$asset" mebius runtime
+          }
+
+          package_zip() {
+            local package="$1"
+            local asset="$2"
+            local source_dir="$artifact_dir/$package"
+
+            test -f "$source_dir/mebius.exe"
+            test -d "$source_dir/runtime"
+            (cd "$source_dir" && zip -qr "$release_dir/$asset" mebius.exe runtime)
+          }
+
+          package_tar "albert_tesla__mebius-code-linux-x64" "mebius-linux-x64.tar.gz"
+          package_tar "albert_tesla__mebius-code-darwin-x64" "mebius-darwin-x64.tar.gz"
+          package_tar "albert_tesla__mebius-code-darwin-arm64" "mebius-darwin-arm64.tar.gz"
+          package_zip "albert_tesla__mebius-code-win32-x64" "mebius-windows-x64.zip"
+
+          (
+            cd "$release_dir"
+            sha256sum \
+              mebius-linux-x64.tar.gz \
+              mebius-darwin-x64.tar.gz \
+              mebius-darwin-arm64.tar.gz \
+              mebius-windows-x64.zip \
+              > SHA256SUMS
+          )
+
+          ls -lh "$release_dir"
+      - name: Prepare release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.version }}"
+          else
+            tag="${{ github.ref_name }}"
+          fi
+          test -n "$tag"
+          cat > "$RUNNER_TEMP/tui-release-notes.md" <<EOF
+          Native TUI binaries for $tag.
+
+          Install with:
+
+          Linux/macOS:
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-tui.sh | bash
+          \`\`\`
+
+          Windows PowerShell:
+          \`\`\`powershell
+          irm https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-tui.ps1 | iex
+          \`\`\`
+          EOF
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: Mebius Code ${{ steps.meta.outputs.tag }}
+          body_path: ${{ runner.temp }}/tui-release-notes.md
+          overwrite_files: true
+          files: |
+            tui/dist/release/mebius-linux-x64.tar.gz
+            tui/dist/release/mebius-darwin-x64.tar.gz
+            tui/dist/release/mebius-darwin-arm64.tar.gz
+            tui/dist/release/mebius-windows-x64.zip
+            tui/dist/release/SHA256SUMS
+          fail_on_unmatched_files: true
+
   npm:
     name: Publish npm packages
     runs-on: ubuntu-latest
     needs:
       - tui-native
+    if: github.event_name == 'push'
     defaults:
       run:
         working-directory: tui
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
