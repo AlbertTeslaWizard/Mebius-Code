@@ -1,22 +1,113 @@
-# Mebius Code
+<p align="center">
+  <img src="frontend/src/assets/mebius-loop.png" alt="Mebius Loop — humans and AI moving forward together" width="100%" />
+</p>
 
-Language: **English** | [简体中文](README.zh-CN.md)
+<h1 align="center">Mebius Code</h1>
 
-Mebius Code is a multi-client agentic coding platform. It provides a backend service for model configuration, project workspaces, coding sessions, Plan Mode, tool approvals, and server-side code operations.
+<p align="center"><strong>Humans and AI, building side by side.</strong></p>
 
-The visible product name is **Mebius Code**. Engineering identifiers use lowercase names such as `mebius-code`, `mebius_code`, and `MEBIUS_CODE_`.
+<p align="center">
+  <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a>
+</p>
 
-## Project Layout
+<p align="center">
+  <a href="http://182.92.150.169/">Open the Web app</a> ·
+  <a href="https://www.npmjs.com/package/mebius-code">Install the TUI</a> ·
+  <a href="https://github.com/AlbertTeslaWizard/Mebius-Code/releases">Download a release</a>
+</p>
 
-```text
-backend/                 NestJS backend service
-frontend/                Vue 3 + TypeScript web workspace
-tui/                     Bun + OpenTUI terminal workspace
-android/                 Native Kotlin + Jetpack Compose Android companion app
-docs/                    Project requirements, design, and management documents
+Mebius Code is a multi-client agentic coding platform. Its NestJS backend powers
+a full Web workspace, a terminal-native TUI, and an Android companion app, so a
+coding session can move with you without giving up plans, approvals, or context.
+
+## Why “Mebius”?
+
+The name **Mebius** pays tribute to *Ultraman Mebius*, a story centered on the
+friendship and bonds between humans and Ultraman. We chose it to express the
+hope that humans and AI can also become partners who stand side by side, build
+trust through shared work, and form lasting friendship and bonds.
+
+The **Mebius Loop** carries a second meaning. Its `∞` form represents the
+limitless potential created when human judgment and creativity connect with AI
+capabilities and both move forward together.
+
+## What Mebius Code provides
+
+- **Build and Plan workflows** — work directly with the coding agent or develop,
+  review, revise, and approve a plan before implementation.
+- **Real project workspaces** — create projects on the server, import Git
+  repositories or archives, or attach a real local path to a local-runtime
+  backend.
+- **Code and Git tools** — inspect and edit files, preview patches, run approved
+  commands, and manage common Git staging, commit, and push operations.
+- **Controlled automation** — sandboxed paths, tool approvals, command policies,
+  session grants, audit records, and encrypted model credentials.
+- **Extensible context** — repository-level `AGENTS.md` instructions,
+  OpenAI-compatible model providers, MCP tools, Web search, and local TUI Skills.
+- **Live multi-client sessions** — session history, SSE activity and token
+  updates, Plan state, and pending approvals are shared through one API.
+
+## Choose a client
+
+| Client | Best for | Highlights |
+| --- | --- | --- |
+| [Web](frontend/README.md) | Full project and workspace management | File tree and editor, Build/Plan workbench, model and command settings, Git workflow, approvals, and audit records |
+| [TUI](tui/README.md) | Daily coding from a terminal | Build/Plan composer, local paths, MCP browser, Skills, slash commands, model switching, and interactive approvals |
+| [Android](android/README.md) | Following work away from the desk | Projects and sessions, live status, Build/Plan messages, Plan review, and allow-once/reject decisions |
+
+The Android app is intentionally a companion rather than a phone IDE. Model
+setup, Git publishing, MCP/Skills management, and local workspace binding remain
+Web or TUI workflows.
+
+## Try the hosted service
+
+### Web
+
+Open the [Mebius Code Web app](http://182.92.150.169/), register or sign in,
+configure a model under **Settings → Models**, then create or import a project.
+The API is available at `http://182.92.150.169/api`.
+
+> The hosted endpoint currently uses plain HTTP. Treat it as a public evaluation
+> environment: do not reuse a sensitive password or upload confidential source
+> code.
+
+### TUI
+
+The npm package requires Node.js 18 or newer:
+
+```bash
+npm install -g mebius-code
+mebius login --api http://182.92.150.169/api
+mebius
 ```
 
-## Backend Quick Start
+Native Windows, Linux, and macOS builds are also available from
+[GitHub Releases](https://github.com/AlbertTeslaWizard/Mebius-Code/releases).
+The install scripts and full command reference are documented in
+[tui/README.md](tui/README.md).
+
+The public API creates workspaces on the Mebius server. It cannot open a path
+from your computer such as `D:\Code\Python` or `/home/me/project`; use a local
+backend for that workflow.
+
+### Android
+
+Download the signed `Mebius-Code-android-x.x.x.apk` and `SHA256SUMS` from
+[GitHub Releases](https://github.com/AlbertTeslaWizard/Mebius-Code/releases).
+After allowing installation from the selected source on your Android device,
+install the APK and sign in. The API address can be changed from the login or
+Settings screen.
+
+## Local development
+
+### Prerequisites
+
+- Node.js 18 or newer and npm
+- Docker with Docker Compose for PostgreSQL
+- [Bun](https://bun.sh/) when running the TUI from source
+- JDK 17 and Android SDK 35 when building the Android app
+
+### Backend and PostgreSQL
 
 ```bash
 cd backend
@@ -26,23 +117,17 @@ docker compose up -d postgres
 npm run start:dev
 ```
 
-API base URL:
+In PowerShell, use `Copy-Item .env.example .env` instead of `cp`. The API runs
+at `http://localhost:3000/api`.
 
-```text
-http://localhost:3000/api
-```
+New-account registration requires email verification. Configure
+`MAIL_ENABLED=true`, `MAIL_FROM`, `SMTP_USER`, and `SMTP_PASS` in
+`backend/.env` before requesting a registration code. Model API keys are
+configured after sign-in and are encrypted with `MEBIUS_CODE_MASTER_KEY`.
 
-Email verification for registration uses SMTP. For Brevo's free SMTP relay,
-set `MAIL_ENABLED=true`, `MAIL_FROM`, `SMTP_USER`, and `SMTP_PASS` in
-`backend/.env` after creating a Brevo transactional sender and SMTP key.
+### Web
 
-SSE session events:
-
-```text
-GET /api/sessions/:id/events?access_token=<jwt>
-```
-
-## Frontend Quick Start
+Start the backend first, then open another terminal:
 
 ```bash
 cd frontend
@@ -50,41 +135,28 @@ npm install
 npm run dev
 ```
 
-The web app runs at `http://127.0.0.1:5173` and proxies `/api` to the backend.
+The Vite app runs at `http://127.0.0.1:5173` and proxies `/api` to the local
+backend.
 
-Shell commands can be requested from the workspace **Runs** tab. Every command
-requires review before execution. Administrators manage Git, Node.js, Python,
-and custom command permissions from **Settings > Command permissions**.
+### TUI and real local paths
 
-Mebius Code reads a project root `AGENTS.md` as repository-level agent
-instructions. In the TUI, run `/init` to generate a starter file.
+To let the TUI attach a path from your computer, set these values in
+`backend/.env` before starting the backend:
 
-## TUI Quick Start
-
-The TUI connects to an already running backend API. It does not start the
-backend in the MVP. Release builds default to the public API:
-
-```text
-http://182.92.150.169/api
+```env
+MEBIUS_CODE_SERVER_MODE=local_runtime
+MEBIUS_CODE_LOCAL_WORKSPACES_ENABLED=true
 ```
 
-Install the released TUI with one of these methods:
+Then connect an installed TUI:
 
 ```bash
-npm install -g mebius-code
+mebius login --api http://localhost:3000/api
+mebius doctor <workspace-path>
+mebius <workspace-path>
 ```
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/AlbertTeslaWizard/Mebius-Code/main/scripts/install-tui.sh | bash
-```
-
-Windows PowerShell:
-
-```powershell
-irm https://raw.githubusercontent.com/AlbertTeslaWizard/Mebius-Code/main/scripts/install-tui.ps1 | iex
-```
-
-For local development:
+Or run it from source:
 
 ```bash
 cd tui
@@ -92,66 +164,50 @@ bun install
 bun run start
 ```
 
-The installed CLI command is `mebius`. Use `mebius login`, or
-`mebius login --api http://localhost:3000/api` for a local backend, to persist
-credentials and API configuration.
+See [tui/README.md](tui/README.md) for API switching, local-path behavior,
+troubleshooting, shortcuts, MCP, Skills, and slash commands.
 
-Public API mode opens a workspace on the remote Mebius server. It cannot access
-paths from the user's machine, such as `D:\Code\Python`. Use a local API with
-local workspace support enabled when binding a real local path:
+### Android
 
-```powershell
-mebius config set api http://localhost:3000/api
-mebius login
-mebius doctor D:\Code\Python
-mebius D:\Code\Python
-```
-
-Use `mebius config show` to inspect the active API and
-`mebius config reset api` to return to the public API. See
-[tui/README.md](tui/README.md) for full TUI API mode, workspace path,
-troubleshooting, command, and shortcut details.
-
-## Android Quick Start
-
-The Android app is a lightweight companion client for existing Mebius API
-instances. It supports project/session browsing, Build and Plan messages, SSE
-status updates, and one-time approval/reject actions.
-
-Open `android/` in Android Studio, or run from that directory with a local
-Android Gradle setup:
+Open `android/` in Android Studio, or use the Gradle wrapper:
 
 ```bash
-gradle :app:assembleDebug
+cd android
+./gradlew :app:assembleDebug
+adb install app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Debug and release builds default to `http://182.92.150.169/api`. For local
-emulator development, manually change the login screen API URL to
-`http://10.0.2.2:3000/api`. The API address can still be changed from the login
-and settings screens. APKs are published from GitHub Releases and can be
-installed directly without app store submission.
+On Windows, use `gradlew.bat`. An Android emulator reaches a backend on the host
+machine through `http://10.0.2.2:3000/api`.
 
-Download signed Android APKs from the repository
-[Releases](https://github.com/AlbertTeslaWizard/Mebius-Code/releases). Android
-releases use independent tags such as `android-v0.1.0` and publish an asset
-named `Mebius-Code-android-0.1.0.apk` with `SHA256SUMS`.
+### Reset the local database
 
-Maintainers publish a new Android APK by configuring these GitHub Secrets and
-pushing an `android-v*` tag:
+From the `backend/` directory:
+
+```bash
+docker compose down -v
+```
+
+The `-v` flag permanently removes the local PostgreSQL and backend workspace
+volumes.
+
+## Repository layout
 
 ```text
-ANDROID_KEYSTORE_BASE64
-ANDROID_KEYSTORE_PASSWORD
-ANDROID_KEY_ALIAS
-ANDROID_KEY_PASSWORD
+backend/                 NestJS API, agent runtime, tools, and PostgreSQL entities
+frontend/                Vue 3 + TypeScript Web workspace
+tui/                     Bun + OpenTUI terminal client and npm package
+android/                 Kotlin + Jetpack Compose companion app
+scripts/                 TUI installation scripts
+.github/workflows/       TUI and Android release automation
 ```
 
-The release keystore must be long-lived. Replacing it later can prevent users
-from installing updates over an existing APK.
+Display text uses **Mebius Code**. Engineering identifiers use forms such as
+`mebius-code`, `mebius_code`, and `MEBIUS_CODE_`.
 
-For the first Android release:
+## Detailed documentation
 
-```bash
-git tag android-v0.1.0
-git push origin android-v0.1.0
-```
+- [Backend setup, API surface, Web search, and security defaults](backend/README.md)
+- [Web development and quality checks](frontend/README.md)
+- [TUI installation, configuration, commands, and shortcuts](tui/README.md)
+- [Android scope, build, and release process](android/README.md)
