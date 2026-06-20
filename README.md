@@ -73,18 +73,34 @@ The API is available at `http://182.92.150.169/api`.
 
 ### TUI
 
-The npm package requires Node.js 18 or newer:
+Install the npm package with Node.js 18 or newer:
 
 ```bash
 npm install -g mebius-code
+```
+
+Or install the latest native release on Linux, macOS, or WSL:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AlbertTeslaWizard/Mebius-Code/main/scripts/install-tui.sh | bash
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/AlbertTeslaWizard/Mebius-Code/main/scripts/install-tui.ps1 | iex
+```
+
+You can also download the Windows, Linux, or macOS archive from
+[GitHub Releases](https://github.com/AlbertTeslaWizard/Mebius-Code/releases).
+After installation, sign in and start the TUI:
+
+```bash
 mebius login --api http://182.92.150.169/api
 mebius
 ```
 
-Native Windows, Linux, and macOS builds are also available from
-[GitHub Releases](https://github.com/AlbertTeslaWizard/Mebius-Code/releases).
-The install scripts and full command reference are documented in
-[tui/README.md](tui/README.md).
+See [tui/README.md](tui/README.md) for the full command reference.
 
 The public API creates workspaces on the Mebius server. It cannot open a path
 from your computer such as `D:\Code\Python` or `/home/me/project`; use a local
